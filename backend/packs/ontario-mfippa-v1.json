@@ -1,0 +1,304 @@
+{
+  "pack_id": "ontario-mfippa-v1",
+  "name": "Ontario MFIPPA",
+  "version": "1.0.0",
+  "author": "BlackBar Team",
+  "created_at": "2025-01-10T00:00:00Z",
+  "updated_at": "2025-01-10T00:00:00Z",
+  "description": "Municipal Freedom of Information and Protection of Privacy Act for Ontario, Canada",
+  
+  "jurisdiction": {
+    "country": "CA",
+    "country_name": "Canada",
+    "region": "ON",
+    "region_name": "Ontario",
+    "legislation": "Municipal Freedom of Information and Protection of Privacy Act",
+    "legislation_short": "MFIPPA",
+    "legislation_url": "https://www.ontario.ca/laws/statute/90m56"
+  },
+  
+  "terminology": {
+    "request_type": "FOI Request",
+    "requester": "Applicant",
+    "case": "Request",
+    "tracking_number_prefix": "MFOI",
+    "redaction": "Exemption",
+    "release": "Disclosure"
+  },
+  
+  "timelines": {
+    "default_response_days": 30,
+    "extension_max_days": 30,
+    "extension_reasons": [
+      "Meeting time limit would unreasonably interfere with operations",
+      "Consultation required with other institutions",
+      "Large volume of records",
+      "Additional time needed for severing"
+    ],
+    "business_days": true,
+    "exclude_holidays": true,
+    "fee_estimate_days": 30
+  },
+  
+  "redaction_categories": [
+    {
+      "id": "s6",
+      "code": "S6",
+      "name": "Closed Meetings",
+      "description": "Closed meeting information",
+      "section": "Section 6",
+      "color": "#6f42c1",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 6",
+      "guidance": "Information from closed meetings of council, board, commission or committee",
+      "ai_keywords": ["closed meeting", "in camera", "confidential session"]
+    },
+    {
+      "id": "s7",
+      "code": "S7",
+      "name": "Advice to Government",
+      "description": "Advice or recommendations",
+      "section": "Section 7",
+      "color": "#17a2b8",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 7",
+      "guidance": "Advice or recommendations developed by or for an institution or its employees",
+      "ai_keywords": ["advice", "recommendation", "opinion", "proposal", "draft policy"]
+    },
+    {
+      "id": "s8",
+      "code": "S8",
+      "name": "Law Enforcement",
+      "description": "Law enforcement",
+      "section": "Section 8",
+      "color": "#dc3545",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 8",
+      "guidance": "Law enforcement matters including investigations, security, and crime prevention",
+      "ai_keywords": ["investigation", "police", "security", "crime", "enforcement"]
+    },
+    {
+      "id": "s9",
+      "code": "S9",
+      "name": "Relations with Other Governments",
+      "description": "Relations with other governments",
+      "section": "Section 9",
+      "color": "#fd7e14",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 9",
+      "guidance": "Information received in confidence from other governments",
+      "ai_keywords": ["federal", "provincial", "intergovernmental", "confidential"]
+    },
+    {
+      "id": "s10",
+      "code": "S10",
+      "name": "Third Party Information",
+      "description": "Third party information",
+      "section": "Section 10",
+      "color": "#20c997",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 10",
+      "guidance": "Commercial, financial, labour relations, scientific or technical information of third parties",
+      "ai_keywords": ["trade secret", "commercial", "proprietary", "confidential business"]
+    },
+    {
+      "id": "s11",
+      "code": "S11",
+      "name": "Economic Interests",
+      "description": "Economic and other interests",
+      "section": "Section 11",
+      "color": "#ffc107",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 11",
+      "guidance": "Information that could harm economic or financial interests of the institution",
+      "ai_keywords": ["financial", "economic", "negotiation", "contract", "tender"]
+    },
+    {
+      "id": "s12",
+      "code": "S12",
+      "name": "Solicitor-Client Privilege",
+      "description": "Solicitor-client privilege",
+      "section": "Section 12",
+      "color": "#6610f2",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 12",
+      "guidance": "Information subject to solicitor-client privilege",
+      "ai_keywords": ["legal advice", "attorney", "counsel", "privileged", "litigation"]
+    },
+    {
+      "id": "s13",
+      "code": "S13",
+      "name": "Danger to Safety or Health",
+      "description": "Danger to safety or health",
+      "section": "Section 13",
+      "color": "#e83e8c",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 13",
+      "guidance": "Information that could endanger safety or health of a person",
+      "ai_keywords": ["safety", "health", "danger", "risk", "threat"]
+    },
+    {
+      "id": "s14",
+      "code": "S14",
+      "name": "Personal Privacy",
+      "description": "Personal privacy",
+      "section": "Section 14",
+      "color": "#0d6efd",
+      "legal_reference": "R.S.O. 1990, c. M.56, s. 14",
+      "guidance": "Personal information about identifiable individuals",
+      "ai_keywords": ["name", "address", "phone", "email", "date of birth", "SIN", "personal"]
+    }
+  ],
+  
+  "statuses": [
+    {
+      "value": "new",
+      "label": "New",
+      "description": "Request received, not yet assigned",
+      "color": "#6c757d",
+      "is_initial": true,
+      "is_final": false
+    },
+    {
+      "value": "in_progress",
+      "label": "In Progress",
+      "description": "Request is being processed",
+      "color": "#0dcaf0",
+      "is_initial": false,
+      "is_final": false
+    },
+    {
+      "value": "clarification_needed",
+      "label": "Clarification Needed",
+      "description": "Waiting for clarification from requester",
+      "color": "#ffc107",
+      "is_initial": false,
+      "is_final": false
+    },
+    {
+      "value": "fee_estimate",
+      "label": "Fee Estimate Sent",
+      "description": "Fee estimate sent, awaiting payment",
+      "color": "#fd7e14",
+      "is_initial": false,
+      "is_final": false
+    },
+    {
+      "value": "review",
+      "label": "Under Review",
+      "description": "Records under review for exemptions",
+      "color": "#6f42c1",
+      "is_initial": false,
+      "is_final": false
+    },
+    {
+      "value": "third_party_notification",
+      "label": "Third Party Notification",
+      "description": "Notifying affected third parties",
+      "color": "#20c997",
+      "is_initial": false,
+      "is_final": false
+    },
+    {
+      "value": "completed",
+      "label": "Completed",
+      "description": "Request fulfilled, records released",
+      "color": "#198754",
+      "is_initial": false,
+      "is_final": true
+    },
+    {
+      "value": "closed",
+      "label": "Closed",
+      "description": "Request closed (abandoned, withdrawn, or no records)",
+      "color": "#dc3545",
+      "is_initial": false,
+      "is_final": true
+    }
+  ],
+  
+  "priorities": [
+    {
+      "value": "low",
+      "label": "Low",
+      "color": "#6c757d",
+      "description": "Standard processing"
+    },
+    {
+      "value": "normal",
+      "label": "Normal",
+      "color": "#0dcaf0",
+      "description": "Regular priority"
+    },
+    {
+      "value": "high",
+      "label": "High",
+      "color": "#ffc107",
+      "description": "Expedited processing"
+    },
+    {
+      "value": "urgent",
+      "label": "Urgent",
+      "color": "#dc3545",
+      "description": "Immediate attention required"
+    }
+  ],
+  
+  "templates": {
+    "acknowledgment_letter": {
+      "name": "Acknowledgment Letter",
+      "description": "Initial acknowledgment of FOI request",
+      "subject": "Acknowledgment of Freedom of Information Request - {tracking_number}",
+      "body": "Dear {requester_name},\n\nThis letter acknowledges receipt of your request under the Municipal Freedom of Information and Protection of Privacy Act (MFIPPA) received on {received_date}.\n\nYour request has been assigned the following reference number: {tracking_number}\n\nPlease use this reference number in all future correspondence regarding this request.\n\nYour request is for: {request_description}\n\nUnder MFIPPA, we have 30 days to respond to your request. We will make every effort to provide you with the requested information within this timeframe.\n\nIf you have any questions, please contact us at {contact_email}.\n\nSincerely,\n{org_name}\nFreedom of Information Coordinator"
+    },
+    "extension_letter": {
+      "name": "Extension Notice",
+      "description": "Notice of time extension",
+      "subject": "Time Extension Notice - {tracking_number}",
+      "body": "Dear {requester_name},\n\nRe: Freedom of Information Request {tracking_number}\n\nThis letter is to inform you that we require additional time to process your request under MFIPPA.\n\nReason for extension: {extension_reason}\n\nThe new response date is: {new_due_date}\n\nUnder section 20 of MFIPPA, we may extend the time limit for responding to your request for up to 30 days if:\n- Meeting the time limit would unreasonably interfere with the operations of the institution\n- Consultations are necessary to comply with the request\n- A large volume of records is involved\n- Additional time is needed for severing\n\nIf you have any questions, please contact us at {contact_email}.\n\nSincerely,\n{org_name}\nFreedom of Information Coordinator"
+    },
+    "fee_estimate": {
+      "name": "Fee Estimate",
+      "description": "Fee estimate for request processing",
+      "subject": "Fee Estimate - {tracking_number}",
+      "body": "Dear {requester_name},\n\nRe: Freedom of Information Request {tracking_number}\n\nWe have completed our review of your request and determined that fees will apply.\n\nEstimated fees:\n- Search time: {search_hours} hours @ $7.50/hour = ${search_cost}\n- Preparation time: {prep_hours} hours @ $7.50/hour = ${prep_cost}\n- Photocopying: {page_count} pages @ $0.20/page = ${copy_cost}\n\nTotal estimated fee: ${total_fee}\n\nThe first $5.00 is waived. Amount owing: ${amount_owing}\n\nPlease note:\n- A 50% deposit of ${deposit_amount} is required before we proceed\n- Final fees may vary from this estimate\n- You have 30 days to respond to this fee estimate\n\nTo proceed with your request, please send payment to:\n{org_name}\n{payment_address}\n\nIf you have questions about these fees, please contact us at {contact_email}.\n\nSincerely,\n{org_name}\nFreedom of Information Coordinator"
+    },
+    "response_letter": {
+      "name": "Response Letter",
+      "description": "Final response with records",
+      "subject": "Response to Freedom of Information Request - {tracking_number}",
+      "body": "Dear {requester_name},\n\nRe: Freedom of Information Request {tracking_number}\n\nThis letter is in response to your request under MFIPPA received on {received_date}.\n\nYour request was for: {request_description}\n\nDECISION:\n{decision_text}\n\nRECORDS DISCLOSED:\n{records_summary}\n\nEXEMPTIONS APPLIED:\n{exemptions_summary}\n\nRIGHT TO APPEAL:\nIf you are not satisfied with this decision, you have the right to appeal to the Information and Privacy Commissioner of Ontario within 30 days of receiving this letter.\n\nOffice of the Information and Privacy Commissioner of Ontario\n2 Bloor Street East, Suite 1400\nToronto, ON M4W 1A8\nPhone: 416-326-3333 or 1-800-387-0073\nWebsite: www.ipc.on.ca\n\nIf you have any questions, please contact us at {contact_email}.\n\nSincerely,\n{org_name}\nFreedom of Information Coordinator"
+    },
+    "no_records": {
+      "name": "No Records Letter",
+      "description": "Response when no records exist",
+      "subject": "No Records Found - {tracking_number}",
+      "body": "Dear {requester_name},\n\nRe: Freedom of Information Request {tracking_number}\n\nThis letter is in response to your request under MFIPPA received on {received_date}.\n\nYour request was for: {request_description}\n\nAfter conducting a thorough search of our records, we have determined that no records exist that are responsive to your request.\n\nSearch conducted:\n{search_description}\n\nRIGHT TO APPEAL:\nIf you are not satisfied with this decision, you have the right to appeal to the Information and Privacy Commissioner of Ontario within 30 days of receiving this letter.\n\nOffice of the Information and Privacy Commissioner of Ontario\n2 Bloor Street East, Suite 1400\nToronto, ON M4W 1A8\nPhone: 416-326-3333 or 1-800-387-0073\nWebsite: www.ipc.on.ca\n\nIf you have any questions, please contact us at {contact_email}.\n\nSincerely,\n{org_name}\nFreedom of Information Coordinator"
+    }
+  },
+  
+  "ai_prompts": {
+    "redaction_analysis": {
+      "system_prompt": "You are an expert Ontario MFIPPA (Municipal Freedom of Information and Protection of Privacy Act) analyst. Analyze documents and identify information that should be exempted under MFIPPA sections 6-14. Focus on personal privacy (s.14), solicitor-client privilege (s.12), third party information (s.10), and law enforcement (s.8).",
+      "user_prompt_template": "Analyze this document for MFIPPA exemptions. Identify information that should be severed under sections 6-14.\n\nDocument text:\n{document_text}\n\nFor each exemption, provide:\n1. The exact text to sever\n2. The MFIPPA section (s6-s14)\n3. Brief reason\n4. Confidence level (high/medium/low)\n\nReturn as JSON:\n{\n  \"suggestions\": [\n    {\n      \"text\": \"exact text\",\n      \"category\": \"s14\",\n      \"reason\": \"Personal information - name and address\",\n      \"confidence\": \"high\"\n    }\n  ],\n  \"summary\": \"Overall analysis\"\n}",
+      "temperature": 0.3,
+      "max_tokens": 2000
+    }
+  },
+  
+  "features": {
+    "fee_calculation": true,
+    "third_party_notification": true,
+    "time_extensions": true,
+    "appeal_tracking": true,
+    "public_requests": true,
+    "request_tracking": true
+  },
+  
+  "fee_schedule": {
+    "search_rate_per_hour": 7.50,
+    "preparation_rate_per_hour": 7.50,
+    "photocopy_per_page": 0.20,
+    "first_amount_waived": 5.00,
+    "deposit_percentage": 50,
+    "currency": "CAD"
+  },
+  
+  "branding": {
+    "primary_color": "#0066cc",
+    "logo_position": "left",
+    "show_jurisdiction_badge": true
+  }
+}

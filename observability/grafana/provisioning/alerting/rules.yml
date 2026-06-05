@@ -1,0 +1,271 @@
+# Grafana Alert Rules
+# RFC-009: System Monitoring and Observability
+#
+# Alert rules organized by category
+
+apiVersion: 1
+
+groups:
+  # ============================================
+  # Availability Alerts
+  # ============================================
+  - orgId: 1
+    name: Availability
+    folder: BlackBar Alerts
+    interval: 1m
+    rules:
+      - uid: service-down
+        title: Service Down
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: up{job=~"blackbar.*"} == 0
+              instant: true
+              refId: A
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 1m
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "The service {{ $labels.job }} on {{ $labels.instance }} has been down for more than 1 minute."
+          runbook_url: "/docs/operations/runbooks/service-down.md"
+        labels:
+          severity: critical
+          category: availability
+
+      - uid: high-error-rate
+        title: High Error Rate
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                (sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))) > 0.01
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "Error rate above 1%"
+          description: "HTTP 5xx error rate is {{ $value | printf \"%.2f\" }}%, exceeding the 1% threshold."
+          runbook_url: "/docs/operations/runbooks/high-error-rate.md"
+        labels:
+          severity: high
+          category: availability
+
+  # ============================================
+  # Performance Alerts
+  # ============================================
+  - orgId: 1
+    name: Performance
+    folder: BlackBar Alerts
+    interval: 1m
+    rules:
+      - uid: high-latency-p95
+        title: High API Latency (P95)
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 2
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "P95 latency above 2 seconds"
+          description: "95th percentile API latency is {{ $value | printf \"%.2f\" }}s, exceeding the 2s threshold."
+          runbook_url: "/docs/operations/runbooks/high-latency.md"
+        labels:
+          severity: high
+          category: performance
+
+      - uid: slow-database
+        title: Slow Database Operations
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                histogram_quantile(0.95, sum(rate(db_operation_duration_seconds_bucket[5m])) by (le, collection)) > 1
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "Slow database operations detected"
+          description: "P95 database operation latency is {{ $value | printf \"%.2f\" }}s for collection {{ $labels.collection }}."
+          runbook_url: "/docs/operations/runbooks/database-issues.md"
+        labels:
+          severity: medium
+          category: performance
+
+  # ============================================
+  # Infrastructure Alerts
+  # ============================================
+  - orgId: 1
+    name: Infrastructure
+    folder: BlackBar Alerts
+    interval: 1m
+    rules:
+      - uid: high-memory-usage
+        title: High Container Memory Usage
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                (container_memory_usage_bytes{name=~"blackbar.*|backend|frontend|admin.*|mongodb"} / container_spec_memory_limit_bytes{name=~"blackbar.*|backend|frontend|admin.*|mongodb"}) > 0.9
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "Container {{ $labels.name }} memory usage above 90%"
+          description: "Container {{ $labels.name }} is using {{ $value | printf \"%.0f\" }}% of its memory limit."
+          runbook_url: "/docs/operations/runbooks/high-memory.md"
+        labels:
+          severity: high
+          category: infrastructure
+
+      - uid: container-restart
+        title: Container Restarting
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                increase(container_restart_count{name=~"blackbar.*|backend|frontend|admin.*|mongodb"}[1h]) > 3
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: "Container {{ $labels.name }} restarting frequently"
+          description: "Container {{ $labels.name }} has restarted {{ $value | printf \"%.0f\" }} times in the last hour."
+          runbook_url: "/docs/operations/runbooks/container-restart.md"
+        labels:
+          severity: high
+          category: infrastructure
+
+  # ============================================
+  # Security Alerts
+  # ============================================
+  - orgId: 1
+    name: Security
+    folder: BlackBar Alerts
+    interval: 1m
+    rules:
+      - uid: auth-failures
+        title: High Authentication Failure Rate
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                sum(rate(auth_failures_total[5m])) > 10
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "High authentication failure rate"
+          description: "Authentication failures are occurring at {{ $value | printf \"%.1f\" }} per second. Possible brute force attack."
+          runbook_url: "/docs/operations/runbooks/brute-force.md"
+        labels:
+          severity: high
+          category: security
+
+  # ============================================
+  # Business Alerts
+  # ============================================
+  - orgId: 1
+    name: Business
+    folder: BlackBar Alerts
+    interval: 5m
+    rules:
+      - uid: llm-high-cost
+        title: High LLM Cost
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                sum(increase(llm_cost_dollars_total[1h])) > 100
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: "High LLM costs in the last hour"
+          description: "LLM costs have exceeded ${{ $value | printf \"%.2f\" }} in the last hour."
+          runbook_url: "/docs/operations/runbooks/ai-cost.md"
+        labels:
+          severity: medium
+          category: business
+
+      - uid: llm-provider-errors
+        title: LLM Provider Errors
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              expr: |
+                sum(rate(llm_requests_total{status="error"}[5m])) / sum(rate(llm_requests_total[5m])) > 0.1
+              instant: true
+              refId: A
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "LLM provider error rate above 10%"
+          description: "LLM API error rate is {{ $value | printf \"%.1f\" }}%. Check provider status."
+          runbook_url: "/docs/operations/runbooks/llm-provider-down.md"
+        labels:
+          severity: high
+          category: business

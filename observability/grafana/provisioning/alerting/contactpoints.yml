@@ -1,0 +1,78 @@
+# Grafana Contact Points Configuration
+# RFC-009: System Monitoring and Observability
+#
+# Email-based alerting (Phase 1)
+# Slack/PagerDuty marked as future enhancements
+
+apiVersion: 1
+
+contactPoints:
+  # Primary email contact point for all alerts
+  - orgId: 1
+    name: email-ops
+    receivers:
+      - uid: email-ops-1
+        type: email
+        settings:
+          addresses: ops@blackbar.app
+          singleEmail: false
+        disableResolveMessage: false
+
+  # Critical alerts - immediate notification
+  - orgId: 1
+    name: email-critical
+    receivers:
+      - uid: email-critical-1
+        type: email
+        settings:
+          addresses: ops@blackbar.app
+          singleEmail: false
+        disableResolveMessage: false
+
+  # ============================================
+  # FUTURE: Slack Integration
+  # ============================================
+  # Uncomment when Slack is configured
+  #
+  # - orgId: 1
+  #   name: slack-alerts
+  #   receivers:
+  #     - uid: slack-alerts-1
+  #       type: slack
+  #       settings:
+  #         url: ${SLACK_WEBHOOK_URL}
+  #         recipient: "#blackbar-alerts"
+  #         username: BlackBar Alerts
+  #         icon_emoji: ":warning:"
+  #         mentionChannel: "here"
+  #       disableResolveMessage: false
+  #
+  # - orgId: 1
+  #   name: slack-critical
+  #   receivers:
+  #     - uid: slack-critical-1
+  #       type: slack
+  #       settings:
+  #         url: ${SLACK_WEBHOOK_URL}
+  #         recipient: "#blackbar-critical"
+  #         username: BlackBar Critical
+  #         icon_emoji: ":rotating_light:"
+  #         mentionChannel: "channel"
+  #       disableResolveMessage: false
+
+  # ============================================
+  # FUTURE: PagerDuty Integration
+  # ============================================
+  # Uncomment when PagerDuty is configured
+  #
+  # - orgId: 1
+  #   name: pagerduty-critical
+  #   receivers:
+  #     - uid: pagerduty-1
+  #       type: pagerduty
+  #       settings:
+  #         integrationKey: ${PAGERDUTY_INTEGRATION_KEY}
+  #         severity: critical
+  #         class: BlackBar
+  #         component: backend
+  #       disableResolveMessage: false

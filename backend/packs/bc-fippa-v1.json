@@ -1,0 +1,648 @@
+{
+  "pack_id": "bc-fippa-v2",
+  "name": "British Columbia FIPPA",
+  "version": "2.0.5",
+  "author": "BlackBar Team",
+  "description": "Freedom of Information and Protection of Privacy Act for British Columbia, Canada. Two-pass detection and classification model with explicit harm tests, s.22(4) disclosure overrides, and s.25 public interest override.",
+  "created_at": "2025-01-10T00:00:00Z",
+  "updated_at": "2026-05-16",
+  "jurisdiction": {
+    "country": "CA",
+    "country_name": "Canada",
+    "region": "BC",
+    "region_name": "British Columbia",
+    "legislation": "Freedom of Information and Protection of Privacy Act",
+    "legislation_short": "FIPPA",
+    "legislation_url": "https://www.bclaws.gov.bc.ca/civix/document/id/complete/statreg/96165_00"
+  },
+  "terminology": {
+    "request_type": "FOI Request",
+    "request_type_plural": "FOI Requests",
+    "requester": "Applicant",
+    "case": "Request",
+    "case_plural": "Requests",
+    "tracking_number_prefix": "FOI",
+    "tracking_number_format": "FOI-{year}-{number:03d}-{region}"
+  },
+  "core_principles": {
+    "default": "Disclosure is the rule; exemption is the exception. FIPPA is interpreted in favour of access.",
+    "severance_rule": "Under s.4(2), redact the minimum span that achieves the exemption's purpose. A phone number, not the line. A name, not the paragraph. Factual content must be severed from advice and released.",
+    "harm_test": "Exemptions in s.15, s.16, s.17, s.19, and s.21 require a reasonable expectation of probable harm, not speculation. The harm must be identifiable, the expectation must be reasonable on the face of the document, and the connection between disclosure and harm must be direct.",
+    "public_interest_override": "Section 25 requires disclosure without delay where there is a risk of significant harm to the environment, health, or safety, or where disclosure is clearly in the public interest. s.25 overrides discretionary exemptions including s.13, s.17, s.21.",
+    "section_22_overrides": "Section 22(4) requires disclosure of specific categories even where s.22(3) would presume an unreasonable invasion. s.22(4) applies before s.22(3) presumptions.",
+    "time_limits": "Section 13 does not apply to information more than 10 years old. Section 12 exclusions for Cabinet records have specific time limits.",
+    "scope_exclusions": "Section 3 excludes certain records from FIPPA entirely (court files, personal notes of elected officials, constituency records, etc). These are not exemptions, they are out of scope."
+  },
+  "interpretation_rules": [
+    {
+      "topic": "personal_information",
+      "definition": "Recorded information about an identifiable individual, excluding business contact information used for employment or business purposes.",
+      "key_points": [
+        "Must be about an identifiable individual (not anonymous, not an organization)",
+        "Must be recorded (written, electronic, audio, video)",
+        "Business contact info (work name, work title, business address, business phone, work email) is NOT personal information",
+        "Organization names are NEVER personal information, even when they identify an individual's employer in a personal-context document",
+        "Public-sector employer names (Crown corporations, ministries, municipalities) are public facts and never personal information",
+        "Speculative chains of inference (`this fact could lead to identification`) are not a sufficient basis for s.22. Redact the direct personal identifier, not surrounding neutral facts."
+      ],
+      "examples": {
+        "personal_info": [
+          "Home address",
+          "Personal cell phone",
+          "Personal email (gmail, hotmail, etc)",
+          "SIN, driver's licence, passport numbers",
+          "Medical records",
+          "Personal opinions expressed in private capacity",
+          "Date of birth"
+        ],
+        "not_personal_info": [
+          "Business card information",
+          "Official title and work role",
+          "Work email (firstname.lastname@organization.example)",
+          "Office phone, direct work line",
+          "Work address",
+          "Employer name (current or former, public or private sector)",
+          "Public statements made in official capacity",
+          "Job classification, salary band of senior officials"
+        ]
+      }
+    },
+    {
+      "topic": "business_contact_information",
+      "definition": "Name, title, business address, business phone, or business email of an employee, officer, or contractor used for employment or business purposes. Not personal information under FIPPA.",
+      "key_points": [
+        "Format and context determine status: a person's name in an email signature with work title and work email is business contact info, even if the person's home address appears elsewhere in the same document",
+        "Personal cell phones used for work do not become business contact info unless the individual has designated them as such",
+        "Generic mailboxes (info@, foi@, contact@) are organizational, not personal"
+      ]
+    },
+    {
+      "topic": "professional_vs_personal",
+      "definition": "Personal information under s.22 means information about an individual's private life. Professional opinions, performance assessments, capacity judgments, and business judgments about someone's work are NOT personal information.",
+      "key_points": [
+        "Procurement assessments of vendors are not s.22 even when they name individuals",
+        "Capacity judgments (`their proposed FTE commitment may be optimistic`) are professional, not personal",
+        "Internal deliberation on personnel may engage s.13 (advice), not s.22",
+        "Reference checks and candid third-party assessments DO engage s.22, because the surrounding content is itself personal information about the named individual",
+        "Heuristic: if you are about to flag an OPINION, ASSESSMENT, RECOMMENDATION, or PROFESSIONAL JUDGMENT as s.22, stop. Consider s.13 if internal deliberation; otherwise release."
+      ]
+    },
+    {
+      "topic": "co_occurrence_reasoning",
+      "definition": "Names take their character from surrounding context. The same name can be business contact info in one paragraph and personal information in another.",
+      "rules": [
+        "Name + work title + work email/phone = business contact, disclose name",
+        "Name + employer (any sector) in a professional context = business contact, disclose name",
+        "Name + reference check, candid assessment, interview note, complaint, or witness statement = s.22 typically applies to both name and surrounding content",
+        "Name + medical, financial, or family context = s.22 personal information",
+        "Name in isolation without context = insufficient basis for redaction; flag for review"
+      ]
+    },
+    {
+      "topic": "section_22_3_presumptions",
+      "definition": "Section 22(3) lists categories where disclosure is presumed to be an unreasonable invasion of privacy. These can still be released if s.22(4) applies or public interest under s.25 overrides.",
+      "presumed_categories": [
+        "Medical, psychiatric, or psychological history, diagnosis, condition, treatment, or evaluation",
+        "Employment, occupational, or educational history",
+        "Personal recommendations or evaluations, character references, personnel evaluations",
+        "Financial, credit, or income information including financial assistance benefits",
+        "Identification as part of an investigation into a possible violation of law",
+        "Eligibility for income assistance, social service benefits",
+        "Indication of racial or ethnic origin, sexual orientation, religious or political beliefs or associations",
+        "Tax return information",
+        "Information collected by a law enforcement or correctional agency"
+      ]
+    },
+    {
+      "topic": "section_22_4_required_disclosures",
+      "definition": "Section 22(4) lists categories where disclosure is NOT an unreasonable invasion of privacy. These must be disclosed and override s.22(3) presumptions.",
+      "required_disclosures": [
+        "Information about position, functions, or remuneration of an officer, employee, or member of a public body",
+        "Discretionary benefits granted by a public body to an individual including details and amount",
+        "Details of a licence, permit, or similar discretionary benefit",
+        "Financial and other details of a contract to supply goods or services to a public body",
+        "Personal information about the third party who is the subject of the request if the third party has consented",
+        "Information about expenses incurred by an individual travelling at the expense of a public body"
+      ],
+      "key_points": [
+        "Apply s.22(4) BEFORE s.22(3). If the content falls in s.22(4), release it.",
+        "Contract financial details (amount, term, deliverables) are disclosable under s.22(4)(e) and s.22(4)(f), regardless of s.21 unless specific competitive harm test is met.",
+        "Senior public servant compensation in the position/function range is disclosable under s.22(4)(e)."
+      ]
+    },
+    {
+      "topic": "public_body_duties",
+      "rule": "Public bodies must respond to FOI requests within 30 calendar days under s.7, unless an extension applies under s.10.",
+      "key_points": [
+        "Days are CALENDAR days, not business days",
+        "Clock starts when request is received in writing",
+        "Extensions up to 30 additional calendar days allowed under s.10(1)",
+        "Longer extensions require Commissioner approval",
+        "Must notify applicant of extension in writing with reason"
+      ]
+    },
+    {
+      "topic": "section_25_public_interest_override",
+      "definition": "Section 25 requires disclosure without delay where there is a risk of significant harm to the environment, health, or safety, or where disclosure is clearly in the public interest.",
+      "key_points": [
+        "s.25 overrides discretionary exemptions including s.13, s.17, s.21",
+        "Applies when there is a clear and compelling public interest, not generalized curiosity",
+        "Risk of significant harm to environment, health, or safety triggers mandatory disclosure",
+        "Flag any redaction under s.13, s.17, or s.21 where the content relates to public safety, environmental harm, or significant accountability matters"
+      ]
+    }
+  ],
+  "timelines": {
+    "default_response_days": 30,
+    "extension_max_days": 30,
+    "calendar_days": true,
+    "extension_reasons": [
+      "Applicant has not provided sufficient detail to identify the record (s.10(1)(a))",
+      "Large volume of records requested and meeting the deadline would interfere unreasonably with the operations of the public body (s.10(1)(b))",
+      "Consultation with a third party or another public body is needed before deciding whether to disclose (s.10(1)(c))",
+      "Applicant consents to the extension (s.10(1)(d))"
+    ],
+    "extension_note": "s.10 allows up to a 30-day extension on the s.7(1) deadline on the grounds above. Longer extensions require Information & Privacy Commissioner permission under s.10(1.1).",
+    "third_party_notification_reference": "Third-party notification (s.23) is a distinct procedural step; it can trigger a s.10(1)(c) consultation-grounds extension but is not itself an extension ground."
+  },
+  "statuses": [
+    {
+      "value": "new",
+      "label": "New",
+      "color": "#7A878E",
+      "description": "Request received, not yet assigned"
+    },
+    {
+      "value": "under_review",
+      "label": "Under Review",
+      "color": "#03ABCE",
+      "description": "Analyst reviewing request"
+    },
+    {
+      "value": "records_search",
+      "label": "Records Search",
+      "color": "#093E71",
+      "description": "Searching for responsive records"
+    },
+    {
+      "value": "redaction_in_progress",
+      "label": "Redaction In Progress",
+      "color": "#F38F1E",
+      "description": "Applying redactions to documents"
+    },
+    {
+      "value": "ready_for_approval",
+      "label": "Ready for Approval",
+      "color": "#36B54F",
+      "description": "Package ready for manager approval"
+    },
+    {
+      "value": "approved",
+      "label": "Approved",
+      "color": "#36B54F",
+      "description": "Release package approved"
+    },
+    {
+      "value": "released",
+      "label": "Released",
+      "color": "#093E71",
+      "description": "Records released to applicant"
+    },
+    {
+      "value": "closed",
+      "label": "Closed",
+      "color": "#7A878E",
+      "description": "Request completed"
+    }
+  ],
+  "priorities": [
+    {
+      "value": "low",
+      "label": "Low",
+      "color": "#7A878E"
+    },
+    {
+      "value": "medium",
+      "label": "Medium",
+      "color": "#F38F1E"
+    },
+    {
+      "value": "high",
+      "label": "High",
+      "color": "#D90F8B"
+    },
+    {
+      "value": "urgent",
+      "label": "Urgent",
+      "color": "#D91A33"
+    }
+  ],
+  "redaction_categories": [
+    {
+      "id": "s12",
+      "code": "S12",
+      "name": "Cabinet and Local Public Body Confidences",
+      "section": "Section 12",
+      "type": "mandatory",
+      "harm_test_required": false,
+      "color": "#9c27b0",
+      "legal_reference": "RSBC 1996, c. 165, s. 12",
+      "guidance": "Protects substance of deliberations of Cabinet (s.12(1)) and local public bodies (s.12(3)). Includes advice, recommendations, policy considerations, draft legislation that has been considered by Cabinet.",
+      "exceptions": [
+        "Information in a record more than 15 years old (s.12(2)(a))",
+        "Background explanations or analyses presented to Cabinet after a decision has been made and implemented",
+        "Decision itself, once publicly announced"
+      ],
+      "trigger_contexts": [
+        "Cabinet submissions, decision notes, briefing notes prepared for Cabinet",
+        "Local public body in-camera deliberation records",
+        "Draft legislation or regulation under Cabinet consideration"
+      ]
+    },
+    {
+      "id": "s13",
+      "code": "S13",
+      "name": "Policy Advice or Recommendations",
+      "section": "Section 13",
+      "type": "discretionary",
+      "harm_test_required": false,
+      "color": "#17a2b8",
+      "legal_reference": "RSBC 1996, c. 165, s. 13",
+      "guidance": "Protects advice or recommendations developed by or for a public body. Discretionary, so must consider whether to release despite the exemption.",
+      "exceptions": [
+        "Factual material",
+        "Public opinion polls",
+        "Statistical surveys",
+        "Appraisals",
+        "Economic forecasts",
+        "Environmental impact statements or similar information",
+        "Final decisions, orders, or rulings",
+        "Reasons for a final decision, order, or ruling",
+        "Reports on the performance or efficiency of a public body",
+        "Records older than 10 years (s.13(3))"
+      ],
+      "trigger_contexts": [
+        "Briefing notes containing recommendations",
+        "Options analysis with recommended approach",
+        "Internal memos advising on a course of action",
+        "Draft policy documents under deliberation"
+      ],
+      "severance_guidance": "Sever the advice/recommendation portion only. Factual background, data, and final decisions must be released."
+    },
+    {
+      "id": "s14",
+      "code": "S14",
+      "name": "Legal Advice",
+      "section": "Section 14",
+      "type": "discretionary",
+      "harm_test_required": false,
+      "color": "#6f42c1",
+      "legal_reference": "RSBC 1996, c. 165, s. 14",
+      "guidance": "Information subject to solicitor-client privilege or litigation privilege. Includes communications with legal counsel for the purpose of giving or receiving legal advice.",
+      "trigger_contexts": [
+        "Email or memo to/from legal counsel for legal advice",
+        "Legal opinions and analyses",
+        "Litigation strategy and materials prepared in contemplation of litigation",
+        "Settlement negotiations"
+      ],
+      "exclusions": [
+        "Communications with counsel for non-legal purposes (administrative coordination, scheduling)",
+        "Facts that exist independently of the legal advice"
+      ]
+    },
+    {
+      "id": "s15",
+      "code": "S15",
+      "name": "Disclosure Harmful to Law Enforcement",
+      "section": "Section 15",
+      "type": "discretionary",
+      "harm_test_required": true,
+      "color": "#dc3545",
+      "legal_reference": "RSBC 1996, c. 165, s. 15",
+      "guidance": "Information whose disclosure could reasonably be expected to harm law enforcement, reveal investigative techniques, endanger persons, or compromise security.",
+      "harm_test": "Reasonable expectation of probable harm to: (a) law enforcement matter, (b) investigation or prosecution, (c) effectiveness of investigative techniques, (d) confidential source identity, (e) life or safety of law enforcement officer, (f) security of a building or vehicle, (g) effectiveness of security system, (h) information system security.",
+      "trigger_contexts": [
+        "Active investigation records",
+        "Investigative techniques and procedures",
+        "Confidential informant information",
+        "Security system specifications"
+      ]
+    },
+    {
+      "id": "s16",
+      "code": "S16",
+      "name": "Disclosure Harmful to Intergovernmental Relations",
+      "section": "Section 16",
+      "type": "discretionary",
+      "harm_test_required": true,
+      "color": "#e91e63",
+      "legal_reference": "RSBC 1996, c. 165, s. 16",
+      "guidance": "Information received in confidence from another government, or whose disclosure could harm relations between governments.",
+      "harm_test": "Reasonable expectation of probable harm to relations with the federal government, another province, a foreign government, an Indigenous governing entity, or an international organization."
+    },
+    {
+      "id": "s17",
+      "code": "S17",
+      "name": "Disclosure Harmful to Financial Interests",
+      "section": "Section 17",
+      "type": "discretionary",
+      "harm_test_required": true,
+      "color": "#ff9800",
+      "legal_reference": "RSBC 1996, c. 165, s. 17",
+      "guidance": "Information that could reasonably be expected to harm the financial or economic interests of a public body or the government, or its ability to manage the economy.",
+      "harm_test": "Reasonable expectation of probable harm to: trade secrets of the public body, financial/commercial information of value, plans for managing personnel that have not been implemented, contractual or other negotiations.",
+      "trigger_contexts": [
+        "Reserve prices in active negotiations",
+        "Pre-decisional financial positions in ongoing procurements",
+        "Unimplemented personnel plans"
+      ],
+      "common_misapplications": [
+        "Completed contract values (these are disclosable under s.22(4)(e))",
+        "General budget figures already published",
+        "Historical financial information no longer commercially sensitive"
+      ]
+    },
+    {
+      "id": "s18",
+      "code": "S18",
+      "name": "Disclosure Harmful to Heritage Sites",
+      "section": "Section 18",
+      "type": "discretionary",
+      "harm_test_required": true,
+      "color": "#795548",
+      "legal_reference": "RSBC 1996, c. 165, s. 18",
+      "guidance": "Information about the location of archaeological or heritage sites, or habitats of rare, endangered, or vulnerable species.",
+      "harm_test": "Disclosure could reasonably be expected to result in damage to or interference with conservation of the site or species."
+    },
+    {
+      "id": "s18.1",
+      "code": "S18.1",
+      "name": "Disclosure Harmful to Indigenous Interests",
+      "section": "Section 18.1",
+      "type": "discretionary",
+      "harm_test_required": true,
+      "color": "#8d6e63",
+      "legal_reference": "RSBC 1996, c. 165, s. 18.1",
+      "guidance": "Protects specific categories of Indigenous information including sacred ceremonial knowledge, information provided in confidence by an Indigenous governing entity, and information that would harm Indigenous heritage sites.",
+      "harm_test": "Disclosure could reasonably be expected to: harm the rights of an Indigenous people, harm relations with an Indigenous governing entity, reveal information provided in confidence by an Indigenous governing entity.",
+      "common_misapplications": [
+        "Routine mentions of First Nations, Métis, or Inuit organizations in public consultation records (not s.18.1)",
+        "Publicly disclosed Indigenous engagement activities",
+        "Names of Indigenous government partners in public-facing communications"
+      ],
+      "narrow_application": "s.18.1 protects specific sensitive Indigenous knowledge or confidential communications. Routine references to Indigenous governments, communities, or consultation processes are not s.18.1."
+    },
+    {
+      "id": "s19",
+      "code": "S19",
+      "name": "Disclosure Harmful to Individual or Public Safety",
+      "section": "Section 19",
+      "type": "mandatory",
+      "harm_test_required": true,
+      "color": "#f44336",
+      "legal_reference": "RSBC 1996, c. 165, s. 19",
+      "guidance": "Mandatory exemption where disclosure could reasonably be expected to threaten anyone's safety or mental or physical health, or interfere with public safety.",
+      "harm_test": "Reasonable expectation of threat to safety or mental/physical health of an individual, or interference with public safety."
+    },
+    {
+      "id": "s21",
+      "code": "S21",
+      "name": "Disclosure Harmful to Business Interests of a Third Party",
+      "section": "Section 21",
+      "type": "mandatory",
+      "harm_test_required": true,
+      "color": "#fd7e14",
+      "legal_reference": "RSBC 1996, c. 165, s. 21",
+      "guidance": "Three-part test must be met: (1) information is a trade secret or commercial, financial, labour relations, scientific, or technical information of a third party, AND (2) supplied in confidence, AND (3) disclosure could reasonably be expected to cause specific harms listed in s.21(1)(c).",
+      "three_part_test": [
+        "Part 1: Information must be of a type listed in s.21(1)(a) - trade secret, commercial, financial, labour relations, scientific, technical",
+        "Part 2: Supplied implicitly or explicitly in confidence under s.21(1)(b)",
+        "Part 3: Disclosure could reasonably be expected to cause harm under s.21(1)(c): significant harm to competitive position, similar information no longer supplied, undue financial loss/gain, undue financial loss to the public body"
+      ],
+      "common_misapplications": [
+        "Vendor names in completed procurements (disclosable, see s.22(4)(e))",
+        "Total contract value in awarded contracts (disclosable, see s.22(4)(e))",
+        "Information already publicly available (e.g. on vendor website, in public filings)",
+        "Generic commercial information that is not confidential",
+        "Pricing in mature, completed contracts where competitive harm is speculative"
+      ],
+      "trigger_contexts": [
+        "Detailed unit pricing and cost breakdowns in active procurements",
+        "Proprietary methodologies, formulas, source code",
+        "Confidential financial statements of a third party",
+        "Trade secrets clearly identified and substantiated by the third party"
+      ],
+      "third_party_notification": "Section 23 requires notification of third parties whose information may be released. Notification is required even where the analyst believes the information should be disclosed."
+    },
+    {
+      "id": "s22",
+      "code": "S22",
+      "name": "Disclosure Harmful to Personal Privacy",
+      "section": "Section 22",
+      "type": "mandatory",
+      "harm_test_required": false,
+      "color": "#0d6efd",
+      "legal_reference": "RSBC 1996, c. 165, s. 22",
+      "guidance": "Mandatory exemption for unreasonable invasion of personal privacy. Apply in order: (1) Is it personal information? (2) Does s.22(4) require disclosure? (3) Does s.22(3) presume unreasonable invasion? (4) Balancing under s.22(2).",
+      "decision_order": [
+        "Step 1: Is it personal information? If business contact info or organization, stop. Release.",
+        "Step 2: Does s.22(4) apply? If yes, release.",
+        "Step 3: Does s.22(3) presume unreasonable invasion? If yes, redact unless rebutted.",
+        "Step 4: Balance under s.22(2) factors."
+      ],
+      "section_22_2_factors": [
+        "(a) Disclosure desirable for subjecting public body to public scrutiny",
+        "(b) Disclosure likely to promote public health and safety or environment protection",
+        "(c) Personal information relevant to fair determination of applicant's rights",
+        "(d) Disclosure will assist in researching activities of a public body",
+        "(e) Third party will be exposed unfairly to financial or other harm",
+        "(f) Personal information has been supplied in confidence",
+        "(g) Disclosure may unfairly damage reputation of any person",
+        "(h) Disclosure may unfairly result in pecuniary loss or gain to any person"
+      ]
+    },
+    {
+      "id": "s22.1",
+      "code": "S22.1",
+      "name": "Disclosure of Abortion Services Information",
+      "section": "Section 22.1",
+      "type": "mandatory",
+      "harm_test_required": false,
+      "color": "#3f51b5",
+      "legal_reference": "RSBC 1996, c. 165, s. 22.1",
+      "guidance": "Mandatory exemption protecting information that could identify individuals providing or receiving abortion services, or the location of facilities providing those services."
+    }
+  ],
+  "disclosure_overrides": [
+    {
+      "id": "s25",
+      "code": "S25",
+      "name": "Public Interest Override",
+      "section": "Section 25",
+      "legal_reference": "RSBC 1996, c. 165, s. 25",
+      "guidance": "Mandatory disclosure without delay where there is risk of significant harm to environment, health, or safety, or where disclosure is clearly in the public interest. Overrides discretionary exemptions including s.13, s.17, s.21.",
+      "flag_when": [
+        "Content under s.13, s.17, or s.21 relates to public safety risks",
+        "Content describes environmental harm or risk",
+        "Content describes health hazards or risks to a class of people",
+        "Content addresses significant matters of public accountability"
+      ]
+    },
+    {
+      "id": "s3",
+      "code": "S3",
+      "name": "Scope Exclusions",
+      "section": "Section 3",
+      "legal_reference": "RSBC 1996, c. 165, s. 3",
+      "guidance": "Certain records are excluded from FIPPA entirely. These are not exemptions; the Act does not apply. Examples: court records, personal notes of judges or elected officials, constituency records of MLAs, records of officers of the Legislature in their officer capacity.",
+      "flag_when": [
+        "Record is from a court file or judicial proceeding",
+        "Record is personal notes of an elected official",
+        "Record is constituency office record of an MLA"
+      ]
+    }
+  ],
+  "templates": {
+    "acknowledgment_letter": {
+      "name": "Acknowledgment Letter",
+      "description": "Initial acknowledgment sent to applicant",
+      "subject": "Acknowledgment of FOI Request {{tracking_number}}",
+      "template": "Dear {{applicant_name}},\n\nThis letter acknowledges receipt of your Freedom of Information request received on {{received_date}}.\n\nYour request has been assigned tracking number {{tracking_number}}.\n\nUnder the Freedom of Information and Protection of Privacy Act, we have 30 calendar days to respond to your request. You can expect a response by {{due_date}}.\n\nIf you have any questions about your request, please contact us at {{contact_email}} and reference your tracking number.\n\nSincerely,\n{{organization_name}}\nFreedom of Information Office"
+    },
+    "extension_letter": {
+      "name": "Extension Notification",
+      "description": "Notice of time extension under Section 10",
+      "subject": "Time Extension for FOI Request {{tracking_number}}",
+      "template": "Dear {{applicant_name}},\n\nRe: FOI Request {{tracking_number}}\n\nWe are writing to inform you that we require an extension of time to respond to your request under Section 10 of the Freedom of Information and Protection of Privacy Act.\n\nReason for extension: {{extension_reason}}\n\nThe new response date is {{new_due_date}}. This represents an extension of {{extension_days}} calendar days from the original deadline.\n\nIf you have any questions about this extension, please contact us at {{contact_email}}.\n\nSincerely,\n{{organization_name}}\nFreedom of Information Office"
+    },
+    "response_letter": {
+      "name": "Response Letter",
+      "description": "Final response with records",
+      "subject": "Response to FOI Request {{tracking_number}}",
+      "template": "Dear {{applicant_name}},\n\nRe: FOI Request {{tracking_number}}\n\nPlease find enclosed {{document_count}} document(s) responsive to your request dated {{request_date}}.\n\n{{redaction_summary}}\n\nYou have the right to request a review of this decision by the Information and Privacy Commissioner of British Columbia within 30 business days of receiving this response. For more information, please visit www.oipc.bc.ca.\n\nIf you have any questions about this response, please contact us at {{contact_email}}.\n\nSincerely,\n{{organization_name}}\nFreedom of Information Office"
+    },
+    "fee_estimate": {
+      "name": "Fee Estimate",
+      "description": "Estimated fees for processing request",
+      "subject": "Fee Estimate for FOI Request {{tracking_number}}",
+      "template": "Dear {{applicant_name}},\n\nRe: FOI Request {{tracking_number}}\n\nThe estimated fee for processing your request is ${{estimated_fee}} CAD.\n\nThis estimate includes:\n- Search time: ${{search_fee}}\n- Preparation time: ${{prep_fee}}\n- Copying: ${{copy_fee}}\n\nFees are calculated according to the FIPPA Regulation fee schedule in effect at the time of the request. The first three hours of search and retrieval time are free for general applicants.\n\nPlease confirm within 30 days if you wish to proceed with this request. If you believe you qualify for a fee waiver under s.75(5), please provide supporting documentation.\n\nSincerely,\n{{organization_name}}\nFreedom of Information Office"
+    },
+    "no_records_letter": {
+      "name": "No Records Response",
+      "description": "Response when no records found",
+      "subject": "Response to FOI Request {{tracking_number}} - No Records",
+      "template": "Dear {{applicant_name}},\n\nRe: FOI Request {{tracking_number}}\n\nAfter conducting a thorough search, we have determined that no records exist that are responsive to your request dated {{request_date}}.\n\nThis response is issued under the Freedom of Information and Protection of Privacy Act.\n\nYou have the right to request a review of this decision by the Information and Privacy Commissioner of British Columbia within 30 business days of receiving this response.\n\nSincerely,\n{{organization_name}}\nFreedom of Information Office"
+    }
+  },
+  "ai_prompts": {
+    "detection_pass": {
+      "name": "Detection Pass",
+      "purpose": "Identify all candidate items in the document without applying exemption labels. Goal is recall: find everything that might require analysis.",
+      "system_prompt": "You are an FOI analyst conducting the detection pass on a document under BC FIPPA. Your job is to identify all candidate items that may require exemption analysis. Do NOT apply exemption labels in this pass. Do NOT decide whether to redact. Only identify.\n\nIDENTIFY:\n1. Names of individuals (any context)\n2. Contact details (phone, email, address) of any kind\n3. Government identifiers (SIN, driver's licence, passport, health card)\n4. Financial figures (amounts, rates, percentages)\n5. Opinions, recommendations, assessments, advice\n6. References to legal counsel or legal advice\n7. References to investigations, law enforcement, security\n8. References to Cabinet, in-camera deliberations, draft policy\n9. References to third-party business information (commercial, technical, trade secrets)\n10. Medical, employment, educational, financial history of individuals\n11. References to sacred or ceremonial Indigenous knowledge\n12. Date-of-birth, age, family relationships\n13. References to safety risks, environmental harm, health hazards (flag for s.25 override consideration)\n\nFor each item, note:\n- Exact text span\n- Surrounding context (one sentence before and after)\n- Initial category hypothesis (personal-identifier, business-contact, financial-figure, opinion, etc.)\n\nDo not classify under FIPPA sections yet. Output candidates only.",
+      "temperature": 0.1,
+      "max_tokens": 4000
+    },
+    "classification_pass": {
+      "name": "Classification Pass",
+      "purpose": "For each detected item, apply FIPPA exemption analysis with explicit reasoning. Goal is precision: only redact items meeting the exemption test.",
+      "system_prompt": "You are an FOI analyst applying BC FIPPA to a document. The DEFAULT IS DISCLOSURE.\n\nSTEP 0 — Identify the record type FIRST. Before classifying any individual item, ask: what kind of record is this?\n\n- INTERNAL DELIBERATION (committee minutes, evaluation memos, hiring committee notes, briefing notes, procurement evaluations, risk assessments, internal advice memos): the entire record is candidate s.13 material. The default category for protected content in this record type is S13, NOT S22. Use S22 only for direct personal-life facts (medical, financial, demographic, home contact) that appear inside the record.\n\n- OPERATIONAL RECORD (signed contracts, invoices, registers, lists, completed forms): default disclosure. Apply S22 only to direct personal contact details.\n\n- THIRD-PARTY RECORD (records about an individual receiving services — health, social services, income assistance): default S22 on the personal subject's identity and details.\n\n- CORRESPONDENCE (emails, letters): assess per content; quoted business correspondence between public officials is generally disclosable; personal correspondence may attract S22.\n\nIf the record is INTERNAL DELIBERATION and you find yourself reaching for S22 on a quoted committee opinion, STOP. Use S13. The quoted opinion is advice to the public body, not a personal fact about anyone discussed in it. This includes opinions that reference a vendor's or candidate's role, employer, education, or capacity.\n\n================================================================\n\nDo not redact anything that doesn't appear in the REDACT list below.\n\n================================================================\nREDACT — and only these things\n================================================================\n\nPERSONAL CONTACT (direct, private):\n- Home addresses\n- Personal phone numbers (home, personal mobile)\n- Personal email addresses (non-work domains)\n- Date of birth\n\nGOVERNMENT IDENTIFIERS:\n- SIN, driver's licence, passport, health card numbers\n- Banking / financial account numbers\n\nS22(3) PRESUMED-INVASION CATEGORIES (closed list — match exactly, do not extend):\n(a) Medical, psychiatric or psychological history, diagnosis, or treatment of an identifiable individual\n(b) Information compiled for a law-enforcement investigation\n(c) Eligibility for income assistance or social benefits\n(d) Employment, occupational, or educational HISTORY of an identifiable individual (not their current professional role)\n(e) Personnel evaluations or character references about an identifiable individual\n(f) Tax-return information or descriptions of financial obligations\n(g) Race, religion, sexual orientation, political beliefs\n(i) Name + address + phone number bundled together (mailing-list disclosure)\n\nOTHER EXEMPTIONS:\n- S13: internal advice or recommendations to a public body (but NOT factual material, statistics, polls, surveys, environmental impact info, final decisions, or reasons for decisions)\n- S14: solicitor-client privileged communications\n- S15-19, S21: only when a specific harm is clearly articulable. Speculation is not enough.\n- S22.1: abortion services identifying information\n\n================================================================\nNEVER REDACT\n================================================================\n\n- Names of any individual in a business or professional capacity (employees, public officials, vendors, contractors, consultants, principals of consultancies, proposers in procurement).\n- Names of vendor principals appearing in procurement records. The principal of a one-person consultancy is no more redactable than the CEO of a large corporation.\n- Organization names (employers, vendors, agencies, Crown corporations, ministries, municipalities, universities, hospitals). EVER. Even when adjacent to personal information.\n- Work titles, work emails, office phone numbers, business addresses.\n- Public officials' names + titles when acting in official capacity.\n- Anything already publicly available (LinkedIn, hiring notices, org charts, annual reports).\n- Factual material, statistics, polls, environmental impact information, final decisions, or reasons (s.13(2) exceptions).\n- Vendor names + total contract values on completed procurements (s.22(4)(e)).\n- Professional opinions, performance assessments, capacity judgments, scheduling concerns. If internal deliberation needs protection, use s.13 — never s.22.\n\n\n\n================================================================\nS13 vs S22 — when in doubt about deliberative content, use S13\n================================================================\n\nInternal deliberations by a public body — committee discussions, evaluation memos, briefing notes, hiring committee notes, procurement evaluations, internal advice — are S13 territory, NOT S22. This holds even when the deliberation:\n- quotes a named public official's opinion (the official's name stays disclosed; the opinion content is what s.13 covers)\n- discusses a named individual (vendor, candidate, citizen) — the discussion is advice to the body, not a private fact about the discussed person\n- contains professional capacity judgments or capacity concerns\n\nTest: \"Is this content the public body advising itself about a decision?\" If yes → S13 (and check the s.13(2) exceptions: factual material, statistics, polls, surveys, environmental impact, final decisions, reasons). If it's a direct private fact about someone's personal life (medical, financial, demographic, home contact) → S22.\n\nS22 is reserved for personal-life facts about identifiable individuals. It is NOT for professional judgments expressed within deliberative records, even when those judgments name a person.\n\n================================================================\nNAMES — special rule (the most common mistake)\n================================================================\n\nA name is NOT automatically personal information. The default for any name is DISCLOSE.\n\nOnly redact a name when ONE of these is true:\n1. It appears in a candid third-party assessment OF THAT NAMED PERSON (reference check, performance evaluation, complaint against them).\n2. It's bundled with sensitive personal information ABOUT THAT PERSON in the same sentence (their home address, their medical record, their financial situation).\n3. It identifies a person receiving services (income assistance, health, social services).\n\nIf neither applies, the name is not personal information for redaction purposes. This applies even when the name appears next to opinions, business judgments, financial figures, or organizational details.\n\nForbidden reasoning patterns:\n- \"The name identifies an individual, therefore s.22 applies.\" WRONG. Identification is necessary but not sufficient.\n- \"s.22(3) applies because this is personal information.\" WRONG. s.22(3) is a closed list of specific categories above. Identifying someone is not one of them.\n- \"This could lead to identification of the person.\" WRONG. Speculative inference is not a basis.\n- \"Balancing under s.22(2) favors privacy\" without articulating a specific privacy harm. WRONG. State the specific harm or do not redact.\n\n- \"This quote is from a named individual, so s.22 applies.\" WRONG.\n  A quoted opinion by a public officer acting in a professional or\n  deliberative capacity is s.13 territory, not s.22. The officer's\n  name + title stay disclosed; the deliberative content is what s.13\n  covers (subject to the s.13(2) exceptions).\n- \"Discussing a named individual is s.22 because it identifies them.\"\n  WRONG. Procurement/hiring committees discuss vendors and candidates\n  by name — that's advice to the body (s.13), not private information\n  about the person discussed.\n================================================================\nOUTPUT\n================================================================\n\nReturn ONLY a JSON array. Each redacted item:\n{\n  \"text\": \"exact text from the document\",\n  \"category\": \"S22\" | \"S13\" | \"S14\" | \"S15\" | \"S17\" | \"S21\" | \"S22.1\",\n  \"section_subsection\": \"s.22(3)(a)\" or similar — required when claiming s.22(3),\n  \"confidence\": \"high\" | \"medium\" | \"low\",\n  \"page\": <int>,\n  \"reasoning_chain\": [\"short bullet 1\", \"short bullet 2\"] — only when redaction is non-obvious; otherwise omit,\n  \"requires_human_review\": true if confidence < high or if you considered multiple exemptions\n}\n\nBe concise. Do not include audit-trail DISCLOSE entries. If in doubt, do not redact.",
+      "user_prompt_template": "Analyze the document below under BC FIPPA. Apply the redaction rules from the system prompt strictly. The default is DISCLOSURE — only redact items that clearly match the REDACT list.\n\nDOCUMENT TEXT:\n{document_text}\n\n{candidates}\n\nReturn ONLY the JSON array. No prose, no markdown, no commentary.",
+      "temperature": 0.2,
+      "max_tokens": 4000
+    },
+    "response_letter_generation": {
+      "system_prompt": "You are an FOI coordinator drafting response letters under BC FIPPA. Write professional, clear, and legally compliant correspondence in plain language. Avoid bureaucratic phrasing.",
+      "user_prompt_template": "Draft a professional response letter for this FOI request under BC FIPPA.\n\nRequest details:\n- Tracking number: {tracking_number}\n- Applicant: {applicant_name}\n- Request description: {request_description}\n- Documents being released: {document_count}\n- Redactions applied: {redaction_summary}\n\nThe letter should:\n1. Reference the tracking number and request date\n2. Indicate how many documents are being released\n3. Briefly explain any redactions (which sections were applied and why)\n4. Inform about review rights with the BC Information and Privacy Commissioner (30 business days)\n5. Use professional, clear language appropriate for government correspondence\n6. Be concise but complete\n\nGenerate only the body of the letter (no subject line).",
+      "temperature": 0.7,
+      "max_tokens": 1000
+    }
+  },
+  "review_workflow": {
+    "auto_apply_thresholds": {
+      "high_confidence": "Auto-apply suggested redaction, log for audit",
+      "medium_confidence": "Suggest redaction, require analyst confirmation",
+      "low_confidence": "Flag for analyst review, do not pre-apply"
+    },
+    "mandatory_human_review": [
+      "All s.21 items (third-party notification under s.23 required)",
+      "All s.25 public interest override flags",
+      "All s.22(4) override candidates",
+      "All items in records subject to s.3 scope questions",
+      "Any document where AI flagged conflicting exemptions"
+    ]
+  },
+  "required_fields": {
+    "case": [
+      "title",
+      "description",
+      "requester_name",
+      "requester_email"
+    ],
+    "requester": [
+      "name",
+      "email"
+    ],
+    "document": [
+      "filename",
+      "upload_date"
+    ]
+  },
+  "optional_fields": {
+    "case": [
+      "requester_phone",
+      "requester_organization",
+      "fee_waiver_requested",
+      "delivery_method"
+    ],
+    "requester": [
+      "phone",
+      "organization",
+      "address"
+    ],
+    "document": [
+      "description",
+      "source",
+      "date_created",
+      "author"
+    ]
+  },
+  "features": {
+    "fee_calculation": true,
+    "fee_waiver": true,
+    "third_party_notification": true,
+    "public_portal": true,
+    "time_tracking": true,
+    "approval_workflow": true,
+    "extension_requests": true,
+    "two_pass_redaction": true,
+    "public_interest_override_flagging": true,
+    "severance_assistance": true
+  },
+  "fee_schedule": {
+    "currency": "CAD",
+    "source": "BC Reg 155/2012 Schedule 1 (verified 2026-05 at bclaws.gov.bc.ca)",
+    "applies_to": "general (non-commercial) applicants",
+    "search_rate_per_quarter_hour": 7.5,
+    "search_free_hours": 3,
+    "preparation_rate_per_quarter_hour": 7.5,
+    "copying": {
+      "black_and_white_per_page": 0.25,
+      "colour_per_page": 1.65,
+      "scanned_electronic_per_page": 0.1,
+      "page_sizes_covered": [
+        "8.5x11",
+        "8.5x14",
+        "11x17"
+      ]
+    },
+    "minimum_fee": 0,
+    "commercial_applicant_note": "Commercial applicants pay the actual cost to the public body for all services; the general fee schedule does not apply."
+  },
+  "branding": {
+    "primary_color": "#093E71",
+    "secondary_color": "#36B54F",
+    "accent_color": "#03ABCE",
+    "logo_url": null,
+    "footer_text": "Released under the Freedom of Information and Protection of Privacy Act"
+  }
+}

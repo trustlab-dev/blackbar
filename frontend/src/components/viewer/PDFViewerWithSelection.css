@@ -1,0 +1,73 @@
+/* frontend/src/components/viewer/PDFViewerWithSelection.css */
+
+.pdf-viewer-with-selection {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.pdf-viewer-loading,
+.pdf-viewer-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 400px;
+  color: var(--text-secondary);
+}
+
+/* Enable text selection in PDF */
+.react-pdf__Page__textContent {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  -moz-user-select: text !important;
+}
+
+/* Selection indicator */
+.selection-indicator {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #fff;
+  color: var(--text-primary);
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 14px;
+  z-index: 1000;
+  border: 1px solid var(--border-default);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+/* Redaction overlays */
+.redaction-overlay {
+  pointer-events: none;
+  mix-blend-mode: multiply;
+  transition: opacity 0.2s;
+}
+
+.redaction-overlay:hover {
+  opacity: 0.8;
+}
+
+/* Text layer styling */
+.react-pdf__Page__textContent span {
+  color: transparent;
+  background-color: transparent;
+}
+
+/* Text selection highlight */
+.react-pdf__Page__textContent span::selection {
+  background-color: rgba(0, 120, 212, 0.4);
+  color: transparent;
+}
+
+.react-pdf__Page__textContent ::selection {
+  background-color: rgba(0, 120, 212, 0.4);
+}
+
+/* Search match highlighting */
+.react-pdf__Page__textContent span.search-highlight {
+  background-color: rgba(255, 255, 0, 0.6) !important;
+  color: transparent;
+}

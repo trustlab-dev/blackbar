@@ -1,0 +1,49 @@
+# docker-compose.prod.yml
+# Production overrides - merge with docker-compose.yml
+# Deploy with: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+
+  backend:
+    # Remove dev volume mounts
+    volumes: []
+    environment:
+      - PYTHONPATH=/app/src
+      - LLM_API_KEY_ENCRYPTION_KEY=${LLM_API_KEY_ENCRYPTION_KEY}
+      # Add any prod-specific env vars here
+
+  frontend:
+    # Remove dev volume mounts
+    volumes: []
+    environment:
+      # Vite reads VITE_* env vars; the prior REACT_APP_API_URL was a
+      # CRA-era hold-over (audit B55) silently ignored by the build.
+      - VITE_API_URL=/api
+      # Remove dev-specific vars
+      - NODE_ENV=production
+
+  mongodb:
+    # Production volume configuration
+    volumes:
+      - mongodb_data:/data/db
+
+  grafana:
+    # Keep provisioning mount, update data volume
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+
+# Production volume definitions
+volumes:
+  mongodb_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${BLACKBAR_DATA_DIR:-./data}/mongodb
+  grafana_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${BLACKBAR_DATA_DIR:-./data}/grafana

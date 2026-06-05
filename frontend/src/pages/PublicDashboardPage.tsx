@@ -1,0 +1,64 @@
+/**
+ * Public Dashboard Page (RFC-007)
+ * Main dashboard for authenticated public users
+ */
+import React, { useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Box, Typography, Button } from '@mui/material';
+import LogoutIcon from '@mui/icons-material/Logout';
+import { PublicPortalDashboard } from '../components/public/PublicPortalDashboard';
+
+export const PublicDashboardPage: React.FC = () => {
+  const navigate = useNavigate();
+
+  // Check authentication
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const userType = localStorage.getItem('user_type');
+    
+    if (!token || userType !== 'public') {
+      // Not authenticated, redirect to login
+      navigate('/public/login');
+    }
+  }, [navigate]);
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    localStorage.removeItem('user_type');
+    localStorage.removeItem('magic_link_email'); // Clear saved email
+    navigate('/public/login');
+  };
+
+  const user = JSON.parse(localStorage.getItem('user') || '{}');
+
+  return (
+    <Box sx={{ minHeight: '100vh', backgroundColor: 'var(--bg-tertiary)' }}>
+      {/* Top Navigation */}
+      <Box sx={{ backgroundColor: 'var(--color-primary)', color: 'white', px: 3, py: 2 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', maxWidth: 1200, mx: 'auto' }}>
+          <Typography variant="h6" sx={{ flexGrow: 1 }}>
+            FOI Portal
+          </Typography>
+          {user.email && (
+            <Typography variant="body2" sx={{ mr: 2 }}>
+              {user.email}
+            </Typography>
+          )}
+          <Button
+            sx={{ color: 'white' }}
+            startIcon={<LogoutIcon />}
+            onClick={handleLogout}
+          >
+            Sign Out
+          </Button>
+        </Box>
+      </Box>
+
+      {/* Dashboard Content */}
+      <Box sx={{ maxWidth: 1200, mx: 'auto', py: 4, px: 2 }}>
+        <PublicPortalDashboard />
+      </Box>
+    </Box>
+  );
+};

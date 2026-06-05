@@ -1,0 +1,115 @@
+# Observability Stack for BlackBar
+# Run with: docker compose -f observability/docker-compose.observability.yml up -d
+# From the project root directory
+#
+# NOTE: Grafana is now in the main docker-compose.yml and accessible at dashboard.blackbar.app
+# This file contains the supporting observability services (Prometheus, Loki, Tempo, etc.)
+
+services:
+  # Prometheus - Metrics collection and storage
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: blackbar-prometheus
+    ports:
+      - "127.0.0.1:9099:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    networks:
+      - foi-network
+    restart: unless-stopped
+
+  # Loki - Log aggregation
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: blackbar-loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - foi-network
+    restart: unless-stopped
+
+  # Promtail - Log collector (ships logs to Loki)
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: blackbar-promtail
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - foi-network
+    restart: unless-stopped
+
+  # Tempo - Distributed tracing
+  tempo:
+    image: grafana/tempo:2.2.0
+    container_name: blackbar-tempo
+    ports:
+      - "127.0.0.1:3200:3200"   # Tempo API
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+    volumes:
+      - ./tempo/tempo-config.yml:/etc/tempo/config.yaml:ro
+      - tempo_data:/tmp/tempo
+    command: -config.file=/etc/tempo/config.yaml
+    networks:
+      - foi-network
+    restart: unless-stopped
+
+  # NOTE: Grafana is now defined in the main docker-compose.yml
+  # Access at: http://dashboard.blackbar.app (via Traefik)
+
+  # cAdvisor - Container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.0
+    container_name: blackbar-cadvisor
+    ports:
+      - "127.0.0.1:8082:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    networks:
+      - foi-network
+    restart: unless-stopped
+
+  # MongoDB Exporter - Database metrics
+  mongodb-exporter:
+    image: percona/mongodb_exporter:0.40.0
+    container_name: blackbar-mongodb-exporter
+    ports:
+      - "127.0.0.1:9216:9216"
+    environment:
+      - MONGODB_URI=mongodb://${MONGO_USERNAME:-blackbar}:${MONGO_PASSWORD}@mongodb:27017/admin?authSource=admin
+    networks:
+      - foi-network
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+
+networks:
+  foi-network:
+    external: true
+    name: blackbar_foi-network

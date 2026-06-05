@@ -1,0 +1,40 @@
+/* frontend/src/components/viewer/ViewerShell.css */
+
+.viewer-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--bg-tertiary);
+}
+
+.viewer-content {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.pdf-canvas-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  background-color: var(--bg-hover);
+  padding: 20px;
+}
+
+/* Smooth zoom transitions */
+.pdf-canvas-container canvas {
+  transition: transform 0.2s ease-out;
+}
+
+/* Loading states */
+.viewer-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}

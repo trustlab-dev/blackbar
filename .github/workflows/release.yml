@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0). Must already exist."
+        required: true
+        type: string
+
+permissions:
+  contents: write   # release-notes job creates the GitHub Release
+
+jobs:
+  release-notes:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `extract-changelog` can find the matching section.
+          fetch-depth: 0
+
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF##refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # Pull the `[X.Y.Z]` section out of CHANGELOG.md verbatim. Stops at
+      # the next `## [` heading. If no matching section exists, falls back
+      # to a generated changelog from softprops/action-gh-release.
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          {
+            echo "body<<__EOF__"
+            awk -v v="${VERSION}" '
+              $0 ~ "^## \\[" v "\\]" { capture=1; next }
+              capture && $0 ~ "^## \\[" { exit }
+              capture { print }
+            ' CHANGELOG.md
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          body: ${{ steps.notes.outputs.body }}
+          # If body is empty (no matching CHANGELOG section), fall back to
+          # auto-generated notes from compare-against-previous-tag.
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.version, '-') }}
+
+  # Container publish lives in .github/workflows/container.yml's `publish` job
+  # (triggered on the same tag push). Keeping the two workflows decoupled means
+  # a failed image build doesn't block the release notes, and a re-run of the
+  # container workflow can re-push images without re-creating the GH Release.

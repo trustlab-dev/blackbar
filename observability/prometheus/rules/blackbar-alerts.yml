@@ -1,0 +1,165 @@
+# BlackBar Alert Rules
+groups:
+  # Availability Alerts
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"blackbar.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "The {{ $labels.job }} service has been unreachable for more than 1 minute."
+          runbook_url: "/docs/operations/runbooks/service-down.md"
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m])) 
+          / sum(rate(http_requests_total[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: high
+          category: availability
+        annotations:
+          summary: "Error rate above 1%"
+          description: "The overall error rate is {{ $value | humanizePercentage }}"
+          runbook_url: "/docs/operations/runbooks/high-error-rate.md"
+
+      - alert: TenantHighErrorRate
+        expr: |
+          sum by (tenant_id) (rate(http_requests_total{status=~"5.."}[5m])) 
+          / sum by (tenant_id) (rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: high
+          category: availability
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} error rate above 5%"
+          runbook_url: "/docs/operations/runbooks/tenant-errors.md"
+
+  # Performance Alerts
+  - name: performance
+    rules:
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 1
+        for: 10m
+        labels:
+          severity: high
+          category: performance
+        annotations:
+          summary: "API P95 latency above 1s"
+          description: "P95 latency is {{ $value | humanizeDuration }}"
+          runbook_url: "/docs/operations/runbooks/high-latency.md"
+
+      - alert: SlowEndpoint
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le, endpoint)
+          ) > 2
+        for: 10m
+        labels:
+          severity: medium
+          category: performance
+        annotations:
+          summary: "Endpoint {{ $labels.endpoint }} P95 latency above 2s"
+          runbook_url: "/docs/operations/runbooks/slow-endpoint.md"
+
+  # Infrastructure Alerts
+  - name: infrastructure
+    rules:
+      - alert: HighCPUUsage
+        expr: |
+          sum(rate(container_cpu_usage_seconds_total{name=~"blackbar.*"}[5m])) by (name) * 100 > 80
+        for: 15m
+        labels:
+          severity: medium
+          category: infrastructure
+        annotations:
+          summary: "High CPU usage on {{ $labels.name }}"
+          runbook_url: "/docs/operations/runbooks/high-cpu.md"
+
+      - alert: HighMemoryUsage
+        expr: |
+          (container_memory_usage_bytes{name=~"blackbar.*"} / container_spec_memory_limit_bytes{name=~"blackbar.*"}) * 100 > 85
+        for: 10m
+        labels:
+          severity: medium
+          category: infrastructure
+        annotations:
+          summary: "High memory usage on {{ $labels.name }}"
+          runbook_url: "/docs/operations/runbooks/high-memory.md"
+
+      - alert: ContainerRestarting
+        expr: |
+          increase(container_restart_count{name=~"blackbar.*"}[10m]) > 3
+        labels:
+          severity: high
+          category: infrastructure
+        annotations:
+          summary: "Container {{ $labels.name }} restarting frequently"
+          runbook_url: "/docs/operations/runbooks/container-restart.md"
+
+      - alert: MongoDBConnectionsHigh
+        expr: |
+          mongodb_connections{state="current"} > 100
+        for: 5m
+        labels:
+          severity: medium
+          category: infrastructure
+        annotations:
+          summary: "MongoDB connections high"
+          runbook_url: "/docs/operations/runbooks/database-connections.md"
+
+  # Business Alerts
+  - name: business
+    rules:
+      - alert: HighAICost
+        expr: |
+          sum by (tenant_id) (increase(llm_cost_dollars_total[24h])) > 100
+        labels:
+          severity: medium
+          category: business
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} AI cost exceeds $100/day"
+          runbook_url: "/docs/operations/runbooks/ai-cost.md"
+
+      - alert: BackgroundJobQueueHigh
+        expr: |
+          background_job_queue_depth > 100
+        for: 15m
+        labels:
+          severity: medium
+          category: business
+        annotations:
+          summary: "Background job queue depth high"
+          runbook_url: "/docs/operations/runbooks/job-queue.md"
+
+  # Security Alerts
+  - name: security
+    rules:
+      - alert: BruteForceAttempt
+        expr: |
+          sum by (ip_address) (rate(auth_failures_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: high
+          category: security
+        annotations:
+          summary: "Possible brute force from {{ $labels.ip_address }}"
+          runbook_url: "/docs/operations/runbooks/brute-force.md"
+
+      - alert: HighAuthFailureRate
+        expr: |
+          sum(rate(auth_failures_total[5m])) / sum(rate(auth_attempts_total[5m])) > 0.3
+        for: 5m
+        labels:
+          severity: medium
+          category: security
+        annotations:
+          summary: "High authentication failure rate"
+          runbook_url: "/docs/operations/runbooks/auth-failures.md"

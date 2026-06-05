@@ -1,0 +1,61 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/packs:/app/packs
+      - ./backend/scripts:/app/scripts
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - MONGODB_URI=mongodb://${MONGO_USERNAME:-blackbar}:${MONGO_PASSWORD}@mongodb:27017/blackbar?authSource=admin
+      - LLM_API_KEY_ENCRYPTION_KEY=${LLM_API_KEY_ENCRYPTION_KEY}
+      # Demo mode: when "true", /api/v1/auth/public/demo-login is enabled
+      # and the public login page renders a one-click demo-persona button.
+      # Default false; set to "true" in .env for local dev or demos.
+      - BLACKBAR_DEMO_MODE=${BLACKBAR_DEMO_MODE:-false}
+    networks:
+      - blackbar-network
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=/api
+    networks:
+      - blackbar-network
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:5
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME:-blackbar}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+    networks:
+      - blackbar-network
+    command: mongod --quiet --logpath /dev/null --auth
+    restart: unless-stopped
+
+networks:
+  blackbar-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:

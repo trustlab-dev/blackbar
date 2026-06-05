@@ -1,0 +1,17 @@
+/* frontend/src/components/viewer/ReasonPickerModal.css */
+
+.reason-picker-modal .MuiDialog-paper {
+  min-height: 500px;
+}
+
+.reason-section {
+  margin-bottom: 16px;
+}
+
+.reason-section .MuiFormControlLabel-root {
+  align-items: flex-start;
+}
+
+.reason-section .MuiRadio-root {
+  padding-top: 0;
+}
