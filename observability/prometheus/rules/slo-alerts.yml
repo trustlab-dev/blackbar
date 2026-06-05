@@ -1,0 +1,162 @@
+# SLO-Based Alerts for BlackBar
+# RFC-009: System Monitoring and Observability
+#
+# Multi-window, multi-burn-rate alerts for SLO breaches
+
+groups:
+  # ============================================
+  # Availability SLO Alerts
+  # ============================================
+  - name: slo:availability:alerts
+    rules:
+      # Fast burn - 14.4x burn rate for 2 minutes
+      # Will exhaust 30-day budget in 2 days
+      - alert: SLOAvailabilityFastBurn
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[2m]))
+            / sum(rate(http_requests_total[2m]))
+          ) > (14.4 * 0.001)
+          and
+          (
+            sum(rate(http_requests_total{status=~"5.."}[1h]))
+            / sum(rate(http_requests_total[1h]))
+          ) > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: critical
+          category: slo
+          slo: availability
+        annotations:
+          summary: "Availability SLO fast burn detected"
+          description: "Error rate is burning through the error budget at 14.4x the sustainable rate. At this rate, the 30-day budget will be exhausted in ~2 days."
+          runbook_url: "/docs/operations/runbooks/slo-breach.md"
+
+      # Slow burn - 3x burn rate for 1 hour
+      # Will exhaust 30-day budget in 10 days
+      - alert: SLOAvailabilitySlowBurn
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[1h]))
+            / sum(rate(http_requests_total[1h]))
+          ) > (3 * 0.001)
+          and
+          (
+            sum(rate(http_requests_total{status=~"5.."}[6h]))
+            / sum(rate(http_requests_total[6h]))
+          ) > (3 * 0.001)
+        for: 1h
+        labels:
+          severity: high
+          category: slo
+          slo: availability
+        annotations:
+          summary: "Availability SLO slow burn detected"
+          description: "Error rate is burning through the error budget at 3x the sustainable rate. At this rate, the 30-day budget will be exhausted in ~10 days."
+          runbook_url: "/docs/operations/runbooks/slo-breach.md"
+
+      # Error budget exhausted
+      - alert: SLOAvailabilityBudgetExhausted
+        expr: slo:error_budget:availability_remaining < 0
+        for: 5m
+        labels:
+          severity: critical
+          category: slo
+          slo: availability
+        annotations:
+          summary: "Availability error budget exhausted"
+          description: "The 30-day availability error budget has been exhausted. Current budget: {{ $value | printf \"%.1f\" }}%"
+          runbook_url: "/docs/operations/runbooks/slo-breach.md"
+
+      # Error budget low warning
+      - alert: SLOAvailabilityBudgetLow
+        expr: slo:error_budget:availability_remaining < 0.25 and slo:error_budget:availability_remaining > 0
+        for: 30m
+        labels:
+          severity: medium
+          category: slo
+          slo: availability
+        annotations:
+          summary: "Availability error budget below 25%"
+          description: "Only {{ $value | printf \"%.1f\" }}% of the 30-day availability error budget remains."
+          runbook_url: "/docs/operations/runbooks/slo-breach.md"
+
+  # ============================================
+  # Latency SLO Alerts
+  # ============================================
+  - name: slo:latency:alerts
+    rules:
+      # P95 latency SLO breach
+      - alert: SLOLatencyP95Breach
+        expr: slo:latency:p95_5m > 0.5
+        for: 5m
+        labels:
+          severity: high
+          category: slo
+          slo: latency
+        annotations:
+          summary: "P95 latency SLO breach"
+          description: "P95 latency is {{ $value | printf \"%.2f\" }}s, exceeding the 500ms SLO target."
+          runbook_url: "/docs/operations/runbooks/high-latency.md"
+
+      # P99 latency SLO breach
+      - alert: SLOLatencyP99Breach
+        expr: slo:latency:p99_5m > 2
+        for: 5m
+        labels:
+          severity: medium
+          category: slo
+          slo: latency
+        annotations:
+          summary: "P99 latency SLO breach"
+          description: "P99 latency is {{ $value | printf \"%.2f\" }}s, exceeding the 2s SLO target."
+          runbook_url: "/docs/operations/runbooks/high-latency.md"
+
+  # ============================================
+  # AI/LLM SLO Alerts
+  # ============================================
+  - name: slo:ai:alerts
+    rules:
+      # AI availability breach
+      - alert: SLOAIAvailabilityBreach
+        expr: slo:ai:availability_5m < 0.99
+        for: 5m
+        labels:
+          severity: high
+          category: slo
+          slo: ai_availability
+        annotations:
+          summary: "AI availability SLO breach"
+          description: "AI availability is {{ $value | printf \"%.2f\" }}%, below the 99% SLO target."
+          runbook_url: "/docs/operations/runbooks/llm-provider-down.md"
+
+      # AI latency breach
+      - alert: SLOAILatencyBreach
+        expr: slo:ai:latency_p95_5m > 30
+        for: 5m
+        labels:
+          severity: medium
+          category: slo
+          slo: ai_latency
+        annotations:
+          summary: "AI latency SLO breach"
+          description: "AI P95 latency is {{ $value | printf \"%.1f\" }}s, exceeding the 30s target."
+          runbook_url: "/docs/operations/runbooks/llm-provider-down.md"
+
+  # ============================================
+  # Per-Tenant SLO Alerts
+  # ============================================
+  - name: slo:tenant:alerts
+    rules:
+      # Tenant-specific availability issues
+      - alert: SLOTenantAvailabilityDegraded
+        expr: slo:tenant:availability_1h < 0.99
+        for: 15m
+        labels:
+          severity: medium
+          category: slo
+          slo: tenant_availability
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} availability degraded"
+          description: "Tenant {{ $labels.tenant_id }} availability is {{ $value | printf \"%.2f\" }}%, below 99%."
+          runbook_url: "/docs/operations/runbooks/tenant-issues.md"

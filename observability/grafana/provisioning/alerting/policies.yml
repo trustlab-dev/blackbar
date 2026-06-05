@@ -1,0 +1,52 @@
+# Grafana Notification Policies
+# RFC-009: System Monitoring and Observability
+#
+# Routes alerts to appropriate contact points based on severity
+
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: email-ops
+    group_by:
+      - grafana_folder
+      - alertname
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      # Critical alerts - immediate, no grouping
+      - receiver: email-critical
+        matchers:
+          - severity = critical
+        group_wait: 0s
+        group_interval: 1m
+        repeat_interval: 15m
+        continue: false
+      
+      # High severity - quick notification
+      - receiver: email-ops
+        matchers:
+          - severity = high
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 1h
+        continue: false
+      
+      # Medium severity - grouped notifications
+      - receiver: email-ops
+        matchers:
+          - severity = medium
+        group_wait: 5m
+        group_interval: 10m
+        repeat_interval: 4h
+        continue: false
+      
+      # Low severity - daily digest
+      - receiver: email-ops
+        matchers:
+          - severity = low
+        group_wait: 1h
+        group_interval: 6h
+        repeat_interval: 24h
+        continue: false

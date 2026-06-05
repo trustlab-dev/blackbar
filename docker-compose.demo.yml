@@ -1,0 +1,49 @@
+# docker-compose.demo.yml
+# Public, daily-resetting demo overlay — merge with docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+#
+# AI redaction suggestions are served from a pre-seeded snapshot
+# (see scripts/demo_snapshot.sh + DEPLOY-DEMO.md). NO LLM API key is required
+# or used in this mode, so there is nothing to abuse or pay for:
+#   - backend refuses live (re)generation when BLACKBAR_DEMO_MODE=true
+#   - the viewer hides the Regenerate controls
+# Visitor changes are wiped nightly by scripts/demo_reset.sh restoring the
+# golden snapshot.
+
+services:
+  backend:
+    # Run the built image, not the dev bind-mounts. `!reset []` REPLACES the
+    # base list (a plain `volumes: []` would merge and leave the dev mounts).
+    volumes: !reset []
+    environment:
+      - PYTHONPATH=/app/src
+      - MONGODB_URI=mongodb://${MONGO_USERNAME:-blackbar}:${MONGO_PASSWORD}@mongodb:27017/blackbar?authSource=admin
+      - LLM_API_KEY_ENCRYPTION_KEY=${LLM_API_KEY_ENCRYPTION_KEY}
+      # Force demo mode on regardless of .env.
+      - BLACKBAR_DEMO_MODE=true
+    # Bind to loopback only; a reverse proxy (see DEPLOY-DEMO.md) terminates
+    # TLS and is the sole public entry point. `!override` REPLACES the base
+    # port list instead of appending (which would collide on :8000).
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    volumes: !reset []
+    environment:
+      - VITE_API_URL=/api
+      - NODE_ENV=production
+      # The Vite dev server blocks unknown Host headers. Behind the demo's
+      # reverse proxy it only ever sees the trusted proxy, so accept any host.
+      # Set DEMO_ALLOWED_HOSTS to your exact domain to tighten this.
+      - ALLOWED_HOSTS=${DEMO_ALLOWED_HOSTS:-all}
+    ports: !override
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+  mongodb:
+    # Loopback only — never expose the demo database publicly.
+    ports: !override
+      - "127.0.0.1:27017:27017"
+    restart: unless-stopped

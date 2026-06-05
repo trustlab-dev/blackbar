@@ -1,0 +1,9 @@
+.right-utility-bar {
+  width: 60px;
+  background-color: var(--bg-tertiary);
+  border-left: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0;
+}

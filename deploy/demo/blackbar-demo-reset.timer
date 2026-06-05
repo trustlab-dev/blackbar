@@ -1,0 +1,13 @@
+# Nightly trigger for blackbar-demo-reset.service.
+# Default: 09:00 UTC daily (~01:00–02:00 US Pacific, an off-peak window).
+# Change OnCalendar to suit your audience. `Persistent=true` runs a missed
+# reset on boot if the VM was off at the scheduled time.
+[Unit]
+Description=Nightly reset of the BlackBar public demo
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

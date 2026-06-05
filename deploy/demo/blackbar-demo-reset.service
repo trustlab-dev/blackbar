@@ -1,0 +1,14 @@
+# Restore the BlackBar public demo to its golden snapshot.
+# Install:  sudo cp deploy/demo/blackbar-demo-reset.{service,timer} /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now blackbar-demo-reset.timer
+# Adjust WorkingDirectory below to wherever you cloned the repo on the VM.
+[Unit]
+Description=Reset BlackBar public demo data from the golden snapshot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/blackbar
+ExecStart=/opt/blackbar/scripts/demo_reset.sh

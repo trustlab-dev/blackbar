@@ -1,0 +1,161 @@
+# SLO Recording Rules for BlackBar
+# RFC-009: System Monitoring and Observability
+#
+# Pre-computed SLI metrics for efficient SLO dashboards
+
+groups:
+  # ============================================
+  # Availability SLIs
+  # ============================================
+  - name: slo:availability
+    interval: 1m
+    rules:
+      # Total requests (for SLO calculation)
+      - record: slo:http_requests:total
+        expr: sum(increase(http_requests_total[5m]))
+      
+      # Failed requests (5xx errors)
+      - record: slo:http_requests:errors
+        expr: sum(increase(http_requests_total{status=~"5.."}[5m]))
+      
+      # Availability ratio (5 minute window)
+      - record: slo:availability:ratio_5m
+        expr: |
+          1 - (
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m]))
+          )
+      
+      # Availability ratio (1 hour window)
+      - record: slo:availability:ratio_1h
+        expr: |
+          1 - (
+            sum(rate(http_requests_total{status=~"5.."}[1h]))
+            / sum(rate(http_requests_total[1h]))
+          )
+      
+      # Availability ratio (24 hour window)
+      - record: slo:availability:ratio_24h
+        expr: |
+          1 - (
+            sum(rate(http_requests_total{status=~"5.."}[24h]))
+            / sum(rate(http_requests_total[24h]))
+          )
+      
+      # Availability ratio (30 day window)
+      - record: slo:availability:ratio_30d
+        expr: |
+          1 - (
+            sum(increase(http_requests_total{status=~"5.."}[30d]))
+            / sum(increase(http_requests_total[30d]))
+          )
+
+  # ============================================
+  # Latency SLIs
+  # ============================================
+  - name: slo:latency
+    interval: 1m
+    rules:
+      # P50 latency
+      - record: slo:latency:p50_5m
+        expr: histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+      
+      # P95 latency
+      - record: slo:latency:p95_5m
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+      
+      # P99 latency
+      - record: slo:latency:p99_5m
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+      
+      # Requests under 500ms threshold (for latency SLO)
+      - record: slo:latency:under_500ms_ratio
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{le="0.5"}[5m]))
+          / sum(rate(http_request_duration_seconds_count[5m]))
+      
+      # Requests under 2s threshold
+      - record: slo:latency:under_2s_ratio
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{le="2"}[5m]))
+          / sum(rate(http_request_duration_seconds_count[5m]))
+
+  # ============================================
+  # AI/LLM SLIs
+  # ============================================
+  - name: slo:ai
+    interval: 1m
+    rules:
+      # AI availability ratio
+      - record: slo:ai:availability_5m
+        expr: |
+          1 - (
+            sum(rate(llm_requests_total{status="error"}[5m]))
+            / sum(rate(llm_requests_total[5m]))
+          )
+      
+      # AI availability (30 day)
+      - record: slo:ai:availability_30d
+        expr: |
+          1 - (
+            sum(increase(llm_requests_total{status="error"}[30d]))
+            / sum(increase(llm_requests_total[30d]))
+          )
+      
+      # AI latency P95
+      - record: slo:ai:latency_p95_5m
+        expr: histogram_quantile(0.95, sum(rate(llm_request_duration_seconds_bucket[5m])) by (le))
+
+  # ============================================
+  # Error Budget
+  # ============================================
+  - name: slo:error_budget
+    interval: 5m
+    rules:
+      # Error budget remaining (availability SLO: 99.9%)
+      # Budget = allowed_errors - actual_errors
+      # Allowed errors = total_requests * (1 - SLO)
+      - record: slo:error_budget:availability_remaining
+        expr: |
+          1 - (
+            sum(increase(http_requests_total{status=~"5.."}[30d]))
+            / (sum(increase(http_requests_total[30d])) * 0.001)
+          )
+      
+      # Error budget burn rate (how fast we're consuming budget)
+      # > 1 means we're burning faster than sustainable
+      - record: slo:error_budget:burn_rate_1h
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[1h]))
+            / sum(rate(http_requests_total[1h]))
+          ) / 0.001
+      
+      # Fast burn rate (for alerting)
+      - record: slo:error_budget:burn_rate_5m
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m]))
+          ) / 0.001
+
+  # ============================================
+  # Per-Tenant SLIs
+  # ============================================
+  - name: slo:tenant
+    interval: 5m
+    rules:
+      # Availability by tenant
+      - record: slo:tenant:availability_1h
+        expr: |
+          1 - (
+            sum(rate(http_requests_total{status=~"5.."}[1h])) by (tenant_id)
+            / sum(rate(http_requests_total[1h])) by (tenant_id)
+          )
+      
+      # Latency P95 by tenant
+      - record: slo:tenant:latency_p95_5m
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le, tenant_id)
+          )

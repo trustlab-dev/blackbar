@@ -1,0 +1,54 @@
+/* frontend/src/components/viewer/ManualRedactionTool.css */
+
+.manual-redaction-banner {
+  position: fixed;
+  top: 64px; /* Below top bar */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  min-width: 400px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.manual-redaction-overlay {
+  cursor: crosshair !important;
+}
+
+.manual-redaction-overlay * {
+  cursor: crosshair !important;
+}
+
+.snap-mode-controls {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  padding: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.snap-mode-controls button {
+  padding: 6px 12px;
+  border: 1px solid var(--border-default);
+  background-color: white;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+
+.snap-mode-controls button:hover {
+  background-color: var(--bg-tertiary);
+  border-color: var(--color-primary);
+}
+
+.snap-mode-controls button.active {
+  background-color: var(--color-primary);
+  color: white;
+  border-color: var(--color-primary);
+}

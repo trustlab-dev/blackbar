@@ -1,0 +1,23 @@
+# BlackBar code owners.
+#
+# CODEOWNERS auto-requests review from the listed owners on every PR that
+# touches the matching paths. Owners must be either users (e.g. `@octocat`)
+# or teams scoped to the org (e.g. `@blackbar/maintainers`).
+#
+# TBD: the `@blackbar/maintainers` team does not exist yet — it will be
+# created once the OSS migration completes and the `blackbar` GitHub org is
+# spun up (audit Q1). Until then this file documents the intended ownership
+# model but does not actually enforce reviews.
+
+# Default — every path falls through to the maintainers team.
+*                       @blackbar/maintainers
+
+# Security-sensitive surfaces deserve a dedicated security review group once
+# one exists. Until then they pile up under the same maintainers team.
+/SECURITY.md            @blackbar/maintainers
+/backend/src/auth/      @blackbar/maintainers
+/backend/src/utils/audit_logger.py    @blackbar/maintainers
+
+# CI + release tooling.
+/.github/               @blackbar/maintainers
+/docker-compose*.yml    @blackbar/maintainers

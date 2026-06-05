@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/blackbar/blackbar/security/policy
+    about: Please report security issues privately per SECURITY.md, not as a public issue.
+  - name: Questions & general discussion
+    url: https://github.com/blackbar/blackbar/discussions
+    about: For "how do I…?" questions, configuration help, or design conversations.
+  - name: Documentation
+    url: https://github.com/blackbar/blackbar/tree/main/docs
+    about: Setup guide, architecture notes, and operator references live in the repo.

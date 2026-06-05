@@ -1,0 +1,94 @@
+name: Bug report
+description: Report a defect in BlackBar
+title: "[bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill in the details below so we can reproduce the issue.
+
+  - type: checkboxes
+    id: prereqs
+    attributes:
+      label: Pre-flight checklist
+      description: Please confirm the following before submitting.
+      options:
+        - label: I have read [`KNOWN_ISSUES.md`](https://github.com/blackbar/blackbar/blob/main/KNOWN_ISSUES.md) and confirmed this is not a known limitation.
+          required: true
+        - label: I have searched [existing issues](https://github.com/blackbar/blackbar/issues) and this is not a duplicate.
+          required: true
+        - label: This is **not** a security vulnerability (those go to `security@blackbar.example` per [SECURITY.md](https://github.com/blackbar/blackbar/blob/main/SECURITY.md)).
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear, concise description of the bug.
+      placeholder: When I do X, Y happens instead of Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that will let a maintainer reproduce the issue locally.
+      placeholder: |
+        1. Run `docker compose up`
+        2. Navigate to http://localhost:5173
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include any stack traces, console output, or screenshots.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: BlackBar version
+      description: Tag, branch, or commit SHA you are running.
+      placeholder: v0.1.0 / main@abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment environment
+      options:
+        - Docker Compose (recommended)
+        - Local development (uvicorn + vite)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: browser_os
+    attributes:
+      label: Browser / OS (if a UI bug)
+      placeholder: Firefox 128 / macOS 14.5
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Logs, related issues, screenshots, anything else relevant.
+    validations:
+      required: false
