@@ -10,7 +10,7 @@
         "@mui/icons-material": "^5.14.0",
         "@mui/material": "^5.14.0",
         "@mui/types": "^7.2.0",
-        "@react-pdf/renderer": "^3.4.5",
+        "@react-pdf/renderer": "^4.5.1",
         "@sentry/react": "^7.91.0",
         "@types/react": "^18.3.18",
         "@types/react-dom": "^18.3.5",
