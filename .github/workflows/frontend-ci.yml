@@ -33,7 +33,7 @@ jobs:
     # surfacing without blocking the gate until cleared.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -52,7 +52,7 @@ jobs:
     name: Tests + coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -93,7 +93,7 @@ jobs:
     name: npm audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -119,7 +119,7 @@ jobs:
     # builds cleanly. Run vite directly here so the bundle is verified even
     # while the tsc backlog clears.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node
         uses: actions/setup-node@v4
