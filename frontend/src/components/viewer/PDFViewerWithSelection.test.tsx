@@ -7,10 +7,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const { __urlPatch } = vi.hoisted(() => {
   const RealURL = global.URL;
   const PatchedURL = function (url: any, base?: any) {
-    if (base && typeof base !== 'string') {
+    // `import.meta.url` is not a usable absolute base under Vitest (its value
+    // varies across versions and may be empty), so the worker-line URL resolve
+    // can throw. Fall back to a localhost base whenever construction fails.
+    try {
+      return new RealURL(url, base);
+    } catch {
       return new RealURL(url, 'http://localhost/');
     }
-    return new RealURL(url, base);
   } as any;
   PatchedURL.createObjectURL = (...args: any[]) => 'blob:mock-url';
   PatchedURL.revokeObjectURL = () => {};
