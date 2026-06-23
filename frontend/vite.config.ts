@@ -35,6 +35,13 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: './src/setupTests.ts',
     css: true,
+    // Vitest 4 defaults the pool to `forks`, which starts noticeably slower
+    // than the `threads` pool this suite was tuned under. Combined with v8
+    // coverage instrumentation that was enough to push a couple of
+    // userEvent-driven dialog tests past the default 5s timeout. Restore the
+    // thread pool and give coverage runs extra headroom.
+    pool: 'threads',
+    testTimeout: 15000,
     coverage: {
       reporter: ['text', 'html', 'lcov'],
       exclude: [
