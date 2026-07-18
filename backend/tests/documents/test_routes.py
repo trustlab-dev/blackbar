@@ -188,6 +188,35 @@ class TestListDocuments:
         r = await client.get("/api/v1/documents/")
         assert r.status_code == 403
 
+    async def test_list_user_scoped_to_own_case_team(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A `user` must only see documents whose parent case they are an
+        active team member of — not every document in the system. Regression
+        for the unscoped `find({})` that amplified the export IDOR."""
+        client = await authed_client_factory(role="user", email="scoped@example.test")
+        user_doc = await db.users.find_one({"email": "scoped@example.test"})
+
+        mine = make_case(
+            case_team=[{"user_id": user_doc["id"], "role": "analyst", "status": "active"}]
+        )
+        theirs = make_case(case_team=[])
+        await db.cases.insert_many([mine, theirs])
+        await db.documents.insert_many(
+            [
+                make_document(filename="mine.pdf", case_id=mine["id"]),
+                make_document(filename="theirs.pdf", case_id=theirs["id"]),
+            ]
+        )
+
+        r = await client.get("/api/v1/documents/")
+        assert r.status_code == 200, r.text
+        filenames = {d["filename"] for d in r.json()}
+        assert filenames == {"mine.pdf"}, f"user saw documents outside their team: {filenames}"
+
 
 # ---------------------------------------------------------------------------
 # GET /{document_id}  get_document (PDF content)
@@ -540,6 +569,60 @@ class TestExportDocumentWithRedactions:
         client = await authed_client_factory(role="guest")
         r = await client.get("/api/v1/documents/anyid/export")
         assert r.status_code == 403
+
+    async def test_export_idor_user_cannot_export_other_case_document(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A `user` who is NOT on a document's case team must not be able to
+        export it (and thereby read its bytes) by ID. Regression for the
+        IDOR where export skipped `check_document_access` — a low-priv user
+        on case A could pull unredacted originals from case B.
+        """
+        client = await authed_client_factory(role="user", email="outsider@example.test")
+        pdf = _make_minimal_pdf_bytes()
+        # Case the user is NOT a member of.
+        other_case = make_case(case_team=[])
+        await db.cases.insert_one(other_case)
+        doc = make_document(
+            filename="secret.pdf", content=pdf, case_id=other_case["id"], redactions=[]
+        )
+        await db.documents.insert_one(doc)
+
+        r = await client.get(f"/api/v1/documents/{doc['id']}/export")
+        assert r.status_code == 403, (
+            f"IDOR: non-team user exported another case's document "
+            f"(status {r.status_code})"
+        )
+        # And the original bytes must not have leaked in the body.
+        assert pdf not in r.content
+
+    async def test_export_user_on_case_team_can_export(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Positive control: a `user` who IS an active case-team member can
+        export the document — the access check must not over-block."""
+        client = await authed_client_factory(role="user", email="member@example.test")
+        # Recover the seeded user's id to add them to the case team.
+        user_doc = await db.users.find_one({"email": "member@example.test"})
+        pdf = _make_minimal_pdf_bytes()
+        case = make_case(
+            case_team=[{"user_id": user_doc["id"], "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        doc = make_document(
+            filename="mine.pdf", content=pdf, case_id=case["id"], redactions=[]
+        )
+        await db.documents.insert_one(doc)
+
+        r = await client.get(f"/api/v1/documents/{doc['id']}/export")
+        assert r.status_code == 200, r.text
+        assert r.content == pdf
 
 
 # ---------------------------------------------------------------------------

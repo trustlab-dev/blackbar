@@ -102,7 +102,22 @@ def check_document_access(doc: dict, current_user: dict, case: dict = None) -> b
 async def list_documents(
     request: Request, current_user=Depends(get_current_user), db=Depends(get_db)
 ):
-    cursor = db.documents.find({}, {"content": 0})  # Exclude binary content
+    # Object-level scoping: admin/analyst see all documents (mirrors
+    # list_cases); a plain `user` sees only documents whose parent case
+    # they are an active team member of. Without this, an unscoped listing
+    # hands a low-priv user every document ID in the system.
+    user_role = current_user.get("role")
+    if user_role in ["owner", "admin", "analyst"]:
+        query: dict = {}
+    else:
+        team_cases = await db.cases.find(
+            {"case_team": {"$elemMatch": {"user_id": current_user["id"], "status": "active"}}},
+            {"id": 1},
+        ).to_list(length=None)
+        accessible_case_ids = [c["id"] for c in team_cases]
+        query = {"case_id": {"$in": accessible_case_ids}}
+
+    cursor = db.documents.find(query, {"content": 0})  # Exclude binary content
     docs = await cursor.to_list(length=None)
     return [
         {
@@ -305,13 +320,28 @@ async def get_document_metadata(
     "/{document_id}/export",
     dependencies=[Depends(check_role(["owner", "admin", "analyst", "user"]))],
 )
-async def export_document_with_redactions(request: Request, document_id: str, db=Depends(get_db)):
+async def export_document_with_redactions(
+    request: Request,
+    document_id: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
     """Export a document with redactions applied permanently."""
     try:
         # Get the document
         doc = await db.documents.find_one({"id": document_id})
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
+
+        # Object-level authorization: the role gate above is not enough —
+        # a caller must also be allowed to access THIS document, or any
+        # user could export (and read the unredacted bytes of) any document
+        # by ID. Mirrors get_document / download_original_file.
+        case = await db.cases.find_one({"id": doc.get("case_id")}) if doc.get("case_id") else None
+        if not check_document_access(doc, current_user, case):
+            raise HTTPException(
+                status_code=403, detail="You don't have access to this document"
+            )
 
         # Get the redactions
         redactions = doc.get("redactions", [])
