@@ -24,7 +24,7 @@ from fastapi import (
 )
 
 from src.core.database import get_database_from_request
-from src.dependencies import get_current_user
+from src.dependencies import check_role, get_current_user
 from src.utils.email_service import EmailService
 
 from .models import (
@@ -879,7 +879,11 @@ async def revoke_records_confirmation(
 # =============================================================================
 
 
-@router.post("/cases/{case_id}/transfer", response_model=dict)
+@router.post(
+    "/cases/{case_id}/transfer",
+    response_model=dict,
+    dependencies=[Depends(check_role(["owner", "admin", "analyst"]))],
+)
 async def transfer_case(
     case_id: str,
     transfer_data: TransferCreate,

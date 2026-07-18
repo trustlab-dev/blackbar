@@ -1399,12 +1399,18 @@ def test_check_document_access_owner_always_allowed() -> None:
     assert check_document_access({}, {"id": "u", "role": "admin"}) is True
 
 
-def test_check_document_access_others_no_case_denies() -> None:
-    """A user with no case context and no admin/guest role is denied
-    via the fall-through `return False`."""
+def test_check_document_access_analyst_is_global() -> None:
+    """ISSUE-018 model: analyst is a global reviewer (allowed with no case)."""
     from src.documents.redaction_routes import check_document_access
 
-    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is False
+    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is True
+
+
+def test_check_document_access_plain_user_no_case_denies() -> None:
+    """A plain `user` with no case context is denied via the fall-through."""
+    from src.documents.redaction_routes import check_document_access
+
+    assert check_document_access({}, {"id": "u", "role": "user"}, case=None) is False
 
 
 # ---------------------------------------------------------------------------

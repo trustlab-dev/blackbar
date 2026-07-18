@@ -1180,9 +1180,10 @@ class TestGetDocumentAuditLogs:
         authed_client_factory,
         patch_routes_db,
     ) -> None:
-        """Analyst who passes the role gate but isn't on the case team
-        gets 403 via check_document_access."""
-        client = await authed_client_factory(role="analyst", email="off-audit@example.test")
+        """A `user` who passes the role gate but isn't on the case team gets
+        403 via check_document_access. (Under the ISSUE-018 model analysts are
+        global, so the off-team subject here must be a plain `user`.)"""
+        client = await authed_client_factory(role="user", email="off-audit@example.test")
         case = make_case(
             case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}],
         )
@@ -1191,6 +1192,21 @@ class TestGetDocumentAuditLogs:
         await db.documents.insert_one(doc)
         r = await client.get(f"/api/v1/documents/{doc['id']}/audit-logs")
         assert r.status_code == 403
+
+    async def test_audit_logs_analyst_global_access(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Analysts are global reviewers and reach any case's audit logs."""
+        client = await authed_client_factory(role="analyst", email="global-audit@example.test")
+        case = make_case(case_team=[])
+        await db.cases.insert_one(case)
+        doc = make_document(case_id=case["id"])
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/audit-logs")
+        assert r.status_code == 200, r.text
 
 
 # ---------------------------------------------------------------------------
@@ -1226,11 +1242,17 @@ class TestModuleHelpers:
         assert check_document_access(doc, {"id": "u1", "role": "guest"}) is True
         assert check_document_access(doc, {"id": "u2", "role": "guest"}) is False
 
-    def test_check_document_access_no_case_for_non_special_role(self) -> None:
+    def test_check_document_access_analyst_is_global(self) -> None:
         from src.documents.routes import check_document_access
 
-        # analyst with no case -> falls through to return False
-        assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is False
+        # ISSUE-018 model: analyst is a global reviewer, allowed with no case.
+        assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is True
+
+    def test_check_document_access_no_case_for_plain_user(self) -> None:
+        from src.documents.routes import check_document_access
+
+        # A plain `user` with no case -> falls through to return False
+        assert check_document_access({}, {"id": "u", "role": "user"}, case=None) is False
 
     def test_check_document_access_user_on_case_team(self) -> None:
         from src.documents.routes import check_document_access

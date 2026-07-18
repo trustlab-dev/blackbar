@@ -731,6 +731,29 @@ class TestConfirmRecordsComplete:
 
 
 class TestTransferCase:
+    async def test_transfer_forbidden_for_user_role(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018: transfer_case had NO role gate — any authenticated user
+        could transfer any case to an external org. It is now gated to
+        owner/admin/analyst; a plain `user` (even a case-team member) is 403."""
+        case_id = await _seed_case(db, tracking_number="FOI-2026-0002")
+        client: AsyncClient = await authed_client_factory(role="user")
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/transfer",
+            json={
+                "recipient_organization": "Rogue Body",
+                "recipient_email": "rogue@example.com",
+                "recipient_name": "Rogue",
+                "transfer_reason": "x",
+                "include_documents": True,
+            },
+        )
+        assert r.status_code == 403, r.text
+
     async def test_transfer_happy_path_updates_case_and_returns_url(
         self,
         db: AsyncIOMotorDatabase,

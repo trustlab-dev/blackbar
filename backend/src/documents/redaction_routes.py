@@ -15,34 +15,12 @@ from ..cases.permissions import (
     get_user_role_on_case,
     is_case_team_member,
 )
+from ..core.authz import check_document_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
 
-
-def check_document_access(doc: dict, current_user: dict, case: dict = None) -> bool:
-    """
-    Check if user has access to a document.
-    - Owner/Admin: always has access
-    - Guest: only if document is shared with them
-    - Others: if on case team
-    """
-    user_role = current_user.get("role")
-    user_id = current_user["id"]
-
-    # Owner and Admin always have access
-    if user_role in ["owner", "admin"]:
-        return True
-
-    # Guest: check if document is shared with them
-    if user_role == "guest":
-        shared_with = doc.get("shared_with", [])
-        return any(share.get("user_id") == user_id for share in shared_with)
-
-    # Others: check case team membership
-    if case:
-        return is_case_team_member(case.get("case_team", []), user_id)
-
-    return False
+# check_document_access / assert_document_access are imported from
+# ..core.authz (single canonical implementation).
 
 
 router = APIRouter()

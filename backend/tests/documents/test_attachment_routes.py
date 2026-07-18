@@ -271,6 +271,59 @@ class TestGetAttachment:
         assert r.headers["content-type"] == "application/pdf"
         assert 'filename="report.pdf"' in r.headers["content-disposition"]
 
+    async def test_get_attachment_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """IDOR guard: a `user` not on the parent document's case team must
+        not fetch raw attachment bytes by ID."""
+        client = await authed_client_factory(role="user", email="off-getatt@example.com")
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}]
+        )
+        parent_id, att_ids = await _seed_doc_with_attachments(
+            db, case_id, attachments=[{"filename": "secret.pdf", "content": b"%PDF-secret"}]
+        )
+        r = await client.get(f"/api/v1/documents/{parent_id}/attachments/{att_ids[0]}")
+        assert r.status_code == 403, r.text
+        assert b"%PDF-secret" not in r.content
+
+    async def test_get_attachment_user_on_team_can_access(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="on-getatt@example.com")
+        me = await db.users.find_one({"email": "on-getatt@example.com"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        parent_id, att_ids = await _seed_doc_with_attachments(
+            db, case_id, attachments=[{"filename": "ok.pdf", "content": b"%PDF-ok"}]
+        )
+        r = await client.get(f"/api/v1/documents/{parent_id}/attachments/{att_ids[0]}")
+        assert r.status_code == 200, r.text
+        assert r.content == b"%PDF-ok"
+
+    async def test_get_attachment_analyst_global_access(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Analysts are global reviewers — reach any case's attachment even
+        without team membership (ISSUE-018 access model)."""
+        client = await authed_client_factory(role="analyst", email="global-att@example.com")
+        case_id = await _seed_case(db, case_team=[])
+        parent_id, att_ids = await _seed_doc_with_attachments(
+            db, case_id, attachments=[{"filename": "a.pdf", "content": b"%PDF-a"}]
+        )
+        r = await client.get(f"/api/v1/documents/{parent_id}/attachments/{att_ids[0]}")
+        assert r.status_code == 200, r.text
+
     async def test_get_attachment_not_in_parent_attachment_ids(
         self,
         db: AsyncIOMotorDatabase,
@@ -446,12 +499,19 @@ def test_check_document_access_owner_and_admin_always_allowed() -> None:
     assert check_document_access({}, {"id": "u", "role": "admin"}) is True
 
 
-def test_check_document_access_others_no_case_denies() -> None:
-    """Non-owner/admin/guest user with no case context -> falls through
-    to `return False`."""
+def test_check_document_access_analyst_is_global() -> None:
+    """ISSUE-018 model: analysts are global reviewers, so they have access
+    even with no case context."""
     from src.documents.attachment_routes import check_document_access
 
-    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is False
+    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is True
+
+
+def test_check_document_access_user_no_case_denies() -> None:
+    """A plain `user` with no case context falls through to deny."""
+    from src.documents.attachment_routes import check_document_access
+
+    assert check_document_access({}, {"id": "u", "role": "user"}, case=None) is False
 
 
 def test_check_document_access_guest_share_match() -> None:

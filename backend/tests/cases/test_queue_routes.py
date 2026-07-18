@@ -353,6 +353,53 @@ class TestSearch:
 
 
 # ---------------------------------------------------------------------------
+# GET /{case_id}/search-documents  (object-level access, ISSUE-018)
+# ---------------------------------------------------------------------------
+
+
+class TestSearchCaseDocuments:
+    async def test_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A `user` not on the case team cannot search its documents."""
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}]
+        )
+        client: AsyncClient = await authed_client_factory(role="user", email="off-qs@example.com")
+        r = await client.get(f"/api/v1/cases/{case_id}/search-documents?q=anything")
+        assert r.status_code == 403, r.text
+
+    async def test_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="user", email="on-qs@example.com")
+        me = await db.users.find_one({"email": "on-qs@example.com"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        r = await client.get(f"/api/v1/cases/{case_id}/search-documents?q=anything")
+        assert r.status_code == 200, r.text
+
+    async def test_analyst_global_access(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Analysts are global reviewers — reach any case's document search."""
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="analyst")
+        r = await client.get(f"/api/v1/cases/{case_id}/search-documents?q=anything")
+        assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
 # GET /search/advanced
 # ---------------------------------------------------------------------------
 

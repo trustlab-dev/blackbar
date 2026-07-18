@@ -12,6 +12,7 @@ from typing import Any
 from bson.objectid import ObjectId
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from ..core.authz import assert_case_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
 from ..utils.deadline_tracker import (
@@ -477,6 +478,10 @@ async def search_case_documents(
     case = await db.cases.find_one({"id": case_id})
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    # Object-level access: a `user` may only search cases they belong to
+    # (owner/admin/analyst are global readers).
+    assert_case_access(case, current_user)
 
     # Search documents in this case
     doc_query = search_documents(q, {"case_id": case_id}, limit)

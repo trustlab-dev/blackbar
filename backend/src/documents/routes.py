@@ -45,6 +45,7 @@ from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
     get_text_summary,
 )
 
+from ..core.authz import check_document_access
 from ..database import db
 from ..dependencies import check_role, get_current_user
 
@@ -67,34 +68,6 @@ router = APIRouter()
 async def get_db(request: Request):
     """Get database from request"""
     return await get_database_from_request(request)
-
-
-def check_document_access(doc: dict, current_user: dict, case: dict = None) -> bool:
-    """
-    Check if user has access to a document.
-    - Owner/Admin: always has access
-    - Guest: only if document is shared with them
-    - Others: if on case team
-    """
-    user_role = current_user.get("role")
-    user_id = current_user["id"]
-
-    # Owner and Admin always have access
-    if user_role in ["owner", "admin"]:
-        return True
-
-    # Guest: check if document is shared with them
-    if user_role == "guest":
-        shared_with = doc.get("shared_with", [])
-        return any(share.get("user_id") == user_id for share in shared_with)
-
-    # Others: check case team membership
-    if case:
-        from ..cases.permissions import is_case_team_member
-
-        return is_case_team_member(case.get("case_team", []), user_id)
-
-    return False
 
 
 # LIST DOCUMENTS
