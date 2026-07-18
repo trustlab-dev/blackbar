@@ -38,9 +38,13 @@ def test_app_is_fastapi(app: FastAPI):
 
 
 def test_api_router_includes_versioned_prefix(app: FastAPI):
-    """Smoke-check that at least some routes are mounted under /api/v1."""
-    paths = [r.path for r in app.routes if hasattr(r, "path")]
-    api_paths = [p for p in paths if p.startswith("/api/v1")]
+    """Smoke-check that at least some routes are mounted under /api/v1.
+
+    Starlette ≥1.3 / FastAPI ≥0.139 mount included routers lazily
+    (`_IncludedRouter`), so `app.routes` no longer flattens them — assert
+    via the OpenAPI schema, which resolves the full route table.
+    """
+    api_paths = [p for p in app.openapi()["paths"] if p.startswith("/api/v1")]
     assert len(api_paths) > 0
 
 
@@ -55,8 +59,8 @@ def test_health_route_registered(app: FastAPI):
 
 
 def test_metrics_route_registered(app: FastAPI):
-    paths = [r.path for r in app.routes if hasattr(r, "path")]
-    assert "/metrics" in paths
+    # Via the OpenAPI schema — see test_api_router_includes_versioned_prefix.
+    assert "/metrics" in app.openapi()["paths"]
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +100,56 @@ async def test_health_endpoint_healthy(main_client: httpx.AsyncClient):
     assert body["database"] == "connected"
     assert "timestamp" in body
     assert "correlation_id" in body
+
+
+class _StubDb:
+    """Stand-in for `src.database.db` with a controllable user count.
+
+    Same monkeypatch seam as `_BrokenDb` below: the /health handler and the
+    startup event both do `from src.database import db` inside the function
+    body, so patching the module attribute takes effect. Using a stub (not
+    the `db` fixture) matters here — the module-level motor client is
+    pinned to the first event loop that used it AND hard-codes the
+    "blackbar" database name, so going through it makes these tests
+    order-dependent (see tests/conftest.py notes)."""
+
+    def __init__(self, user_count: int):
+        self.users = MagicMock()
+        self.users.estimated_document_count = AsyncMock(return_value=user_count)
+        self.users.count_documents = AsyncMock(return_value=user_count)
+
+    async def command(self, *args, **kwargs):
+        return {"ok": 1}
+
+
+async def test_health_flags_setup_required_when_no_users(
+    monkeypatch: pytest.MonkeyPatch, main_client: httpx.AsyncClient
+):
+    """Fresh install (no user accounts) is un-loginable — /health must
+    surface `setup_required` so an installer can see why."""
+    import src.database as db_mod
+
+    monkeypatch.setattr(db_mod, "db", _StubDb(user_count=0))
+
+    r = await main_client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["setup_required"] is True
+    assert "setup.sh" in body["setup_hint"]
+
+
+async def test_health_omits_setup_required_when_users_exist(
+    monkeypatch: pytest.MonkeyPatch, main_client: httpx.AsyncClient
+):
+    import src.database as db_mod
+
+    monkeypatch.setattr(db_mod, "db", _StubDb(user_count=1))
+
+    r = await main_client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert "setup_required" not in body
+    assert "setup_hint" not in body
 
 
 async def test_health_endpoint_unhealthy_when_db_down(
@@ -143,6 +197,12 @@ async def test_startup_event_runs_without_exception(monkeypatch: pytest.MonkeyPa
         "src.users.repository.UsersRepository.create_indexes",
         AsyncMock(return_value=None),
     )
+    # The bootstrap check counts users via the module-level db handle,
+    # whose motor client may be pinned to a previous test's (closed) event
+    # loop — stub it like the /health tests do.
+    import src.database as db_mod
+
+    monkeypatch.setattr(db_mod, "db", _StubDb(user_count=0))
 
     # The startup handlers are registered via @app.on_event. They live on
     # app.router.on_startup. Find ours and invoke it.

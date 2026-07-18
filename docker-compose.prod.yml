@@ -5,33 +5,34 @@
 services:
 
   backend:
-    # Remove dev volume mounts
-    volumes: []
+    # Remove dev volume mounts. `!reset` (Compose v2.24+) is required: a plain
+    # empty list merges as a no-op and the dev bind mounts survive into prod.
+    volumes: !reset []
     environment:
       - PYTHONPATH=/app/src
       - LLM_API_KEY_ENCRYPTION_KEY=${LLM_API_KEY_ENCRYPTION_KEY}
-      # Add any prod-specific env vars here
+      # The backend gates on ENVIRONMENT (not NODE_ENV): disables /docs,
+      # /redoc, /openapi.json and requires a persisted JWT_SECRET.
+      - ENVIRONMENT=production
+    # Dev image CMD uses --reload; never run the auto-reloader in production.
+    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
   frontend:
-    # Remove dev volume mounts
-    volumes: []
-    environment:
-      # Vite reads VITE_* env vars; the prior REACT_APP_API_URL was a
-      # CRA-era hold-over (audit B55) silently ignored by the build.
-      - VITE_API_URL=/api
-      # Remove dev-specific vars
-      - NODE_ENV=production
+    # Static nginx image serving the compiled bundle (see frontend/Dockerfile).
+    # The API URL is relative and proxied by nginx, so no runtime env is needed.
+    build:
+      context: ./frontend
+      target: production
+    # Remove dev volume mounts (see backend note re: !reset)
+    volumes: !reset []
 
   mongodb:
     # Production volume configuration
     volumes:
       - mongodb_data:/data/db
 
-  grafana:
-    # Keep provisioning mount, update data volume
-    volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
-      - grafana_data:/var/lib/grafana
+# Grafana/Prometheus are not part of this stack — the observability bundle
+# lives in observability/ with its own compose file. See observability/README.
 
 # Production volume definitions
 volumes:
@@ -41,9 +42,3 @@ volumes:
       type: none
       o: bind
       device: ${BLACKBAR_DATA_DIR:-./data}/mongodb
-  grafana_data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${BLACKBAR_DATA_DIR:-./data}/grafana

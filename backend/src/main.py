@@ -86,6 +86,18 @@ async def startup_event():
 
     await seed_default_templates(templates)
 
+    # There is no self-service registration: the first admin account can only
+    # be created by setup.sh. Starting the stack without it yields a running
+    # app nobody can log in to, so make that state loud instead of silent.
+    user_count = await db.users.count_documents({})
+    if user_count == 0:
+        logger.warning(
+            "No user accounts exist — login is impossible until the first admin "
+            "is created. Run 'bash setup.sh' from the repository root "
+            "(see SETUP_GUIDE.md, 'First-Time Setup').",
+            startup_phase="bootstrap_check",
+        )
+
     logger.info("Application startup complete", startup_phase="complete")
 
 
@@ -179,7 +191,7 @@ async def health_check(request: Request):
 
         await db.command("ping")
 
-        return {
+        payload = {
             "status": "healthy",
             "service": "blackbar-backend",
             "version": os.getenv("SERVICE_VERSION", "1.0.0"),
@@ -188,6 +200,14 @@ async def health_check(request: Request):
             "timestamp": datetime.utcnow().isoformat(),
             "correlation_id": correlation_id,
         }
+
+        # Flag the un-loginable fresh-install state (no users, so no way to
+        # log in or create users) where an installer will actually look.
+        if await db.users.estimated_document_count() == 0:
+            payload["setup_required"] = True
+            payload["setup_hint"] = "No user accounts exist. Run 'bash setup.sh' to create the first admin (see SETUP_GUIDE.md)."
+
+        return payload
     except Exception as e:
         logger.error("Health check failed", error=str(e), correlation_id=correlation_id)
         from fastapi.responses import JSONResponse

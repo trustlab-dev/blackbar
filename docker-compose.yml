@@ -24,7 +24,11 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      # Vite dev server with HMR; docker-compose.prod.yml overrides this
+      # to the static nginx `production` stage.
+      target: dev
     ports:
       - "3000:3000"
     volumes:
