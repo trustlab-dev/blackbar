@@ -863,6 +863,60 @@ class TestUploadDocument:
         # Uploaded_by is the seeded admin user's id (uuid)
         assert captured["uploaded_by"]
 
+    async def test_upload_into_case_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018 wave 3: the gate admits `user`; a team-scoped user must
+        not be able to inject a document into an existing case they are not
+        a member of. The processing service must never be reached."""
+        case = make_case(
+            case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        client = await authed_client_factory(role="user", email="off-up@example.test")
+
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": case["id"]},
+            )
+        assert r.status_code == 403, r.text
+
+    async def test_upload_into_case_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="on-up@example.test")
+        me = await db.users.find_one({"email": "on-up@example.test"})
+        case = make_case(
+            case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        from src.documents.processing_service import ProcessingResult, ProcessingStatus
+
+        mock_result = ProcessingResult(
+            status=ProcessingStatus.SUCCESS, document_id="ok-1", filename="x.pdf"
+        )
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": case["id"]},
+            )
+        assert r.status_code == 200, r.text
+
 
 # ---------------------------------------------------------------------------
 # DELETE /{document_id}  delete_document
@@ -1059,6 +1113,41 @@ class TestGetProcessingStatus:
         client = await authed_client_factory(role="admin")
         r = await client.get("/api/v1/documents/ghost/processing_status")
         assert r.status_code == 404
+
+    async def test_processing_status_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018 wave 3: the gate admits `user`; a team-scoped user must
+        not learn another case's document progress by id enumeration."""
+        case = make_case(
+            case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        doc = make_document(case_id=case["id"], total_attachments=4, processed_attachments=2)
+        await db.documents.insert_one(doc)
+        client = await authed_client_factory(role="user", email="off-ps@example.test")
+        r = await client.get(f"/api/v1/documents/{doc['id']}/processing_status")
+        assert r.status_code == 403, r.text
+
+    async def test_processing_status_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="on-ps@example.test")
+        me = await db.users.find_one({"email": "on-ps@example.test"})
+        case = make_case(
+            case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        doc = make_document(case_id=case["id"], total_attachments=2, processed_attachments=2)
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/processing_status")
+        assert r.status_code == 200, r.text
 
 
 # ---------------------------------------------------------------------------

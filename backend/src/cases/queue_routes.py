@@ -349,6 +349,10 @@ async def get_case_deadline_info(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
+    # Route role gate admits `user`; enforce object-level access so a
+    # team-scoped user can't read another case's deadline/SLA info.
+    assert_case_access(case, current_user)
+
     # Get or calculate deadline info
     created_at = case.get("created_at", datetime.utcnow())
     if not isinstance(created_at, datetime):

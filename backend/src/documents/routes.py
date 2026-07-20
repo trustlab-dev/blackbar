@@ -45,7 +45,7 @@ from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
     get_text_summary,
 )
 
-from ..core.authz import check_document_access
+from ..core.authz import assert_case_access, check_document_access
 from ..database import db
 from ..dependencies import check_role, get_current_user
 
@@ -637,6 +637,16 @@ async def upload_document(
     """
     from .processing_service import DocumentProcessingService, ProcessingStatus, UploadContext
 
+    # If uploading into an existing case, enforce object-level access: the
+    # route role gate admits `user`, so a team-scoped user must not be able
+    # to inject a document into a case they are not a member of. A missing
+    # case doc is left to the processing service (preserves the historical
+    # behaviour where a document may carry a case_id with no case row yet).
+    if case_id:
+        case = await db.cases.find_one({"id": case_id})
+        if case is not None:
+            assert_case_access(case, current_user)
+
     # Read file content
     content = await file.read()
 
@@ -919,7 +929,12 @@ async def delete_document(request: Request, document_id: str, db=Depends(get_db)
     "/{document_id}/processing_status",
     dependencies=[Depends(check_role(["owner", "admin", "analyst", "user"]))],
 )
-async def get_processing_status(request: Request, document_id: str, db=Depends(get_db)):
+async def get_processing_status(
+    request: Request,
+    document_id: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
     """Get the processing status of a document's attachments."""
     try:
         # Phase 4 Batch 4.4 (audit B38): include the legacy-doc fields
@@ -927,6 +942,10 @@ async def get_processing_status(request: Request, document_id: str, db=Depends(g
         # the fallback branch below can actually inspect them. The
         # prior 2-field projection masked those keys, leaving the
         # legacy-fallback dead code.
+        # ISSUE-018 wave 3: `case_id`/`shared_with` are also projected so
+        # the object-level access check below has the fields it needs —
+        # the route role gate admits `user`, so a team-scoped user must
+        # not learn another case's document progress by id enumeration.
         doc = await db.documents.find_one(
             {"id": document_id},
             {
@@ -934,11 +953,17 @@ async def get_processing_status(request: Request, document_id: str, db=Depends(g
                 "processed_attachments": 1,
                 "has_attachments": 1,
                 "attachment_ids": 1,
+                "case_id": 1,
+                "shared_with": 1,
             },
         )
 
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
+
+        case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
+        if not check_document_access(doc, current_user, case):
+            raise HTTPException(status_code=403, detail="You don't have access to this document")
 
         total = doc.get("total_attachments", 0)
         processed = doc.get("processed_attachments", 0)

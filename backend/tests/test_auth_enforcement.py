@@ -18,6 +18,9 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from tests.factories import make_case, make_document
 
 # Paths that are exactly public by design (middleware public_routes_exact,
 # plus "/" and app-level docs endpoints).
@@ -81,6 +84,37 @@ async def anon_client(app: FastAPI):
         yield client
 
 
+@pytest.fixture
+def patch_all_routes_db(monkeypatch: pytest.MonkeyPatch, db: AsyncIOMotorDatabase, app):
+    """Redirect every router touched by the IDOR matrix to the per-test db.
+
+    Handlers resolve the real `blackbar` database at runtime, but the `db`
+    fixture is the isolated `blackbar_test` database — so, like each module's
+    own `patch_routes_db`, we override every relevant router's `get_db`
+    dependency and rebind the `users` collection used by `get_current_user`.
+    """
+    import src.database as db_mod
+    import src.dependencies as deps_mod
+    from src.cases import queue_routes
+    from src.documents import redaction_routes
+    from src.documents import routes as documents_routes
+    from src.workflow import routes as workflow_routes
+
+    async def _override_get_db():
+        return db
+
+    for module in (documents_routes, redaction_routes, queue_routes, workflow_routes):
+        app.dependency_overrides[module.get_db] = _override_get_db
+
+    monkeypatch.setattr(deps_mod, "users", db.users)
+    monkeypatch.setattr(db_mod, "users", db.users)
+
+    yield db
+
+    for module in (documents_routes, redaction_routes, queue_routes, workflow_routes):
+        app.dependency_overrides.pop(module.get_db, None)
+
+
 async def test_protected_endpoints_reject_anonymous_requests(
     app: FastAPI, anon_client: httpx.AsyncClient
 ):
@@ -113,6 +147,87 @@ async def test_token_in_request_endpoints_reject_bare_probes(
             f"{method.upper()} {template} returned {r.status_code} to an "
             "anonymous request with no credential of any kind"
         )
+
+
+# ---------------------------------------------------------------------------
+# Authenticated cross-object (IDOR) matrix — ISSUE-018
+#
+# Being authenticated is not enough: an object-scoped endpoint must also
+# enforce that the caller may reach THIS object. Under the access model,
+# owner/admin/analyst are global reviewers; a plain `user` is team-scoped.
+# The matrix below drives a `user` who is NOT on the case team against a
+# curated set of object endpoints and pins that every one returns 403 (never
+# a 2xx and never a 500). It is deliberately explicit — a new object endpoint
+# that needs a check should be added here as a reviewed decision.
+# ---------------------------------------------------------------------------
+
+
+async def test_authenticated_off_team_user_cannot_reach_objects(
+    db: AsyncIOMotorDatabase,
+    authed_client_factory,
+    patch_all_routes_db,
+):
+    """A `user` off the case team is forbidden from every object-scoped
+    endpoint below, even though authentication and the role gate pass."""
+    # Case owned by someone else; our probe user is deliberately not on it.
+    case = make_case(
+        case_team=[{"user_id": "insider-only", "role": "analyst", "status": "active"}]
+    )
+    await db.cases.insert_one(case)
+    cid = case["id"]
+
+    doc = make_document(
+        case_id=cid,
+        redactions=[{"id": "red-1", "page": 1, "reason": "x"}],
+    )
+    await db.documents.insert_one(doc)
+    did = doc["id"]
+
+    client = await authed_client_factory(role="user", email="idor-probe@example.test")
+
+    # (method, path, json-body-or-None)
+    matrix = [
+        ("GET", f"/api/v1/documents/{did}/processing_status", None),
+        ("GET", f"/api/v1/documents/{did}/export", None),
+        ("PUT", f"/api/v1/documents/{did}/redactions/red-1/edit", {"reason": "hijack"}),
+        ("GET", f"/api/v1/cases/{cid}/deadline-info", None),
+        ("GET", f"/api/v1/cases/{cid}/clock/history", None),
+        ("GET", f"/api/v1/cases/{cid}/contributors", None),
+        ("GET", f"/api/v1/cases/{cid}/records-confirmation", None),
+        ("GET", f"/api/v1/cases/{cid}/transfers", None),
+        ("GET", f"/api/v1/cases/{cid}/search-documents?q=anything", None),
+    ]
+
+    leaks: list[str] = []
+    for method, path, body in matrix:
+        r = await client.request(method, path, json=body)
+        if r.status_code != 403:
+            leaks.append(f"{method} {path} -> {r.status_code}")
+
+    assert not leaks, "object endpoints reachable by an off-team user:\n" + "\n".join(leaks)
+
+
+async def test_authenticated_analyst_has_global_object_access(
+    db: AsyncIOMotorDatabase,
+    authed_client_factory,
+    patch_all_routes_db,
+):
+    """The mirror of the matrix: an analyst (global reviewer) reaches the
+    same objects on a case they are NOT a team member of."""
+    case = make_case(case_team=[])
+    await db.cases.insert_one(case)
+    cid = case["id"]
+
+    client = await authed_client_factory(role="analyst", email="idor-analyst@example.test")
+    for path in (
+        f"/api/v1/cases/{cid}/deadline-info",
+        f"/api/v1/cases/{cid}/clock/history",
+        f"/api/v1/cases/{cid}/contributors",
+        f"/api/v1/cases/{cid}/records-confirmation",
+        f"/api/v1/cases/{cid}/transfers",
+    ):
+        r = await client.get(path)
+        assert r.status_code == 200, f"{path} -> {r.status_code}: {r.text}"
 
 
 async def test_public_surface_matches_expected_contract(app: FastAPI):

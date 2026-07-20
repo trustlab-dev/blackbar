@@ -498,6 +498,33 @@ class TestCaseDeadlineInfo:
         r = await client.get("/api/v1/cases/ghost-case/deadline-info")
         assert r.status_code == 404
 
+    async def test_deadline_info_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018 wave 3: the gate admits `user`; a team-scoped user must
+        not read another case's deadline/SLA info."""
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="user", email="off-dl@example.com")
+        r = await client.get(f"/api/v1/cases/{case_id}/deadline-info")
+        assert r.status_code == 403, r.text
+
+    async def test_deadline_info_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="user", email="on-dl@example.com")
+        me = await db.users.find_one({"email": "on-dl@example.com"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        r = await client.get(f"/api/v1/cases/{case_id}/deadline-info")
+        assert r.status_code == 200, r.text
+
 
 # ---------------------------------------------------------------------------
 # POST /{case_id}/request-extension

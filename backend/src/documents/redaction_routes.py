@@ -370,8 +370,12 @@ async def update_redaction(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Get case for audit logging
+    # Get case for audit logging + object-level access check. The route
+    # role gate admits `user`, so a plain user off the case team must be
+    # blocked here from editing/moving redactions on another case's doc.
     case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
+    if not check_document_access(doc, current_user, case):
+        raise HTTPException(status_code=403, detail="You don't have access to this document")
 
     # Find and update the redaction
     redactions = doc.get("redactions", [])
