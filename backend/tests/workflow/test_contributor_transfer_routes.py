@@ -849,3 +849,130 @@ class TestListTransfers:
         client: AsyncClient = await authed_client_factory(role="admin")
         r = await client.get("/api/v1/cases/ghost/transfers")
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Object-level authorization (ISSUE-018 wave 2)
+#
+# Contributor + transfer-list endpoints are case-scoped. A plain `user` off
+# the case team is forbidden; on-team is allowed; analysts are global. The
+# per-contributor mutations (update/remind/delete) also verify the
+# contributor belongs to the path case_id, so a contributor from a DIFFERENT
+# case cannot be reached even by a team member of the path case.
+# ---------------------------------------------------------------------------
+
+
+class TestContributorObjectLevelAuthz:
+    async def test_invite_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="user", email="off-inv@example.com")
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/contributors",
+            json={"name": "C", "email": "c@example.com"},
+        )
+        assert r.status_code == 403, r.text
+
+    async def test_list_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="user", email="on-lst@example.com")
+        me = await db.users.find_one({"email": "on-lst@example.com"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        r = await client.get(f"/api/v1/cases/{case_id}/contributors")
+        assert r.status_code == 200, r.text
+
+    async def test_list_analyst_global_access(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="analyst")
+        r = await client.get(f"/api/v1/cases/{case_id}/contributors")
+        assert r.status_code == 200, r.text
+
+    async def test_delete_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        cid = await _seed_contributor(db, case_id=case_id)
+        client: AsyncClient = await authed_client_factory(role="user", email="off-del@example.com")
+        r = await client.delete(f"/api/v1/cases/{case_id}/contributors/{cid}")
+        assert r.status_code == 403, r.text
+
+    async def test_delete_cross_case_contributor_404(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A contributor belonging to case B cannot be deleted via case A,
+        even by an analyst with global access to case A."""
+        case_a = await _seed_case(db, case_team=[])
+        case_b = await _seed_case(db, case_team=[])
+        cid_b = await _seed_contributor(db, case_id=case_b)
+        client: AsyncClient = await authed_client_factory(role="analyst")
+        r = await client.delete(f"/api/v1/cases/{case_a}/contributors/{cid_b}")
+        assert r.status_code == 404, r.text
+        # Contributor B must still exist
+        assert (await db.case_contributors.find_one({"id": cid_b})) is not None
+
+    async def test_update_cross_case_contributor_404(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_a = await _seed_case(db, case_team=[])
+        case_b = await _seed_case(db, case_team=[])
+        cid_b = await _seed_contributor(db, case_id=case_b, name="Original")
+        client: AsyncClient = await authed_client_factory(role="analyst")
+        r = await client.put(
+            f"/api/v1/cases/{case_a}/contributors/{cid_b}",
+            json={"name": "Hijacked"},
+        )
+        assert r.status_code == 404, r.text
+        # Contributor B must be unchanged
+        doc = await db.case_contributors.find_one({"id": cid_b})
+        assert doc["name"] == "Original"
+
+
+class TestListTransfersAuthz:
+    async def test_list_transfers_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="user", email="off-lt@example.com")
+        r = await client.get(f"/api/v1/cases/{case_id}/transfers")
+        assert r.status_code == 403, r.text
+
+    async def test_list_transfers_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="user", email="on-lt@example.com")
+        me = await db.users.find_one({"email": "on-lt@example.com"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        r = await client.get(f"/api/v1/cases/{case_id}/transfers")
+        assert r.status_code == 200, r.text
