@@ -90,6 +90,22 @@ npm run lint                # eslint
 
 The frontend coverage gate is **≥ 70%**.
 
+### End-to-end tests (Playwright)
+
+A separate `e2e/` package drives the real docker-compose stack in a browser.
+Bring the stack up and bootstrap an admin first (see
+[`e2e/README.md`](e2e/README.md)), then:
+
+```bash
+cd e2e
+npm install
+npm run install:browsers    # one-time: Chromium runtime
+npm test
+```
+
+There is no coverage gate here — the suite is a smoke/regression check across
+the main user journeys, complementing the unit suites above.
+
 ## Branch naming
 
 Branches follow a `type/short-description` pattern, matching the commit-type

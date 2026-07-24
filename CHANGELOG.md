@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **End-to-end test suite (Playwright).** New self-contained `e2e/` package
+  drives the real docker-compose stack across 13 flows (login, user/case
+  management, team, contributors, statutory clock, document upload, transfers,
+  the public request and contributor portals, and role/object-level access
+  control). Seeds via the API and runs against a bootstrapped stack — see
+  `e2e/README.md`.
+
+### Fixed
+
+- **Case-team UserPicker was unusable** — options rendered blank labels and
+  MUI's client-side filter dropped every server result once the user typed.
+  Now displays the user's name/email and relies on the backend name/email
+  search.
+- **Removed team members stayed visible** — the case-team listing now excludes
+  soft-deleted (`removed`) members.
+- **Accessibility** — the statutory-clock reason, user/team role, and case
+  status/priority selects now carry proper `<label>` associations.
+
+### Security
+
+- **Object-level authorization hardening (IDOR).** Systematic per-object
+  access enforcement across document, case, and workflow endpoints: analysts
+  are global reviewers while `user`/`guest` remain case-team-scoped; the
+  previously ungated workflow router and the remaining `user`-reachable
+  endpoints now verify membership. Adds a shared `core/authz` helper, an
+  authenticated cross-object (IDOR) test matrix, and per-endpoint regression
+  tests.
+
 ### Changed
 
 - **Licence: AGPL-3.0-or-later → Apache-2.0.** The repo's LICENSE

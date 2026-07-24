@@ -159,6 +159,22 @@ npm run test:coverage    # with coverage report
 
 Coverage gate: **≥70%** lines/statements, ≥65% functions/branches (`vite.config.ts`).
 
+### End-to-end (Playwright)
+
+Full-stack browser tests that drive the running docker-compose stack
+(frontend → backend → MongoDB) across the core journeys — login, user and case
+management, team, contributors, the statutory clock, document upload,
+transfers, the public request + contributor portals, and role/object-level
+access control. Requires a bootstrapped stack; see
+[`e2e/README.md`](e2e/README.md) for prerequisites and details.
+
+```bash
+cd e2e
+npm install
+npm run install:browsers   # one-time: downloads the Chromium runtime
+npm test
+```
+
 ## Technology Stack
 
 | Layer | Technology | Purpose |

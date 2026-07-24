@@ -6,6 +6,14 @@
 
 > ⚠️ **Stale content notice:** Sections describing Tenant Management (create/edit/suspend/delete tenants), tenant subdomain routing, and multi-tenant isolation tests describe flows that no longer exist post single-tenant cleanup. A rewrite to match the current single-instance UI is scheduled alongside the testing-guide overhaul in Task 1.16.
 
+> 🤖 **Automated coverage:** Many of the flows below are now exercised
+> automatically by the Playwright suite in [`e2e/`](../../e2e/README.md) —
+> login, user/case management, team, contributors, statutory clock, document
+> upload, transfers, the public request + contributor portals, and role/
+> object-level access control. Prefer this manual checklist for the areas the
+> automated suite does not yet cover (redaction viewer, exports, performance,
+> email delivery).
+
 ---
 
 ## 1. Global Admin Portal (`admin.blackbar.app`)
