@@ -188,6 +188,35 @@ class TestListDocuments:
         r = await client.get("/api/v1/documents/")
         assert r.status_code == 403
 
+    async def test_list_user_scoped_to_own_case_team(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A `user` must only see documents whose parent case they are an
+        active team member of — not every document in the system. Regression
+        for the unscoped `find({})` that amplified the export IDOR."""
+        client = await authed_client_factory(role="user", email="scoped@example.test")
+        user_doc = await db.users.find_one({"email": "scoped@example.test"})
+
+        mine = make_case(
+            case_team=[{"user_id": user_doc["id"], "role": "analyst", "status": "active"}]
+        )
+        theirs = make_case(case_team=[])
+        await db.cases.insert_many([mine, theirs])
+        await db.documents.insert_many(
+            [
+                make_document(filename="mine.pdf", case_id=mine["id"]),
+                make_document(filename="theirs.pdf", case_id=theirs["id"]),
+            ]
+        )
+
+        r = await client.get("/api/v1/documents/")
+        assert r.status_code == 200, r.text
+        filenames = {d["filename"] for d in r.json()}
+        assert filenames == {"mine.pdf"}, f"user saw documents outside their team: {filenames}"
+
 
 # ---------------------------------------------------------------------------
 # GET /{document_id}  get_document (PDF content)
@@ -541,6 +570,60 @@ class TestExportDocumentWithRedactions:
         r = await client.get("/api/v1/documents/anyid/export")
         assert r.status_code == 403
 
+    async def test_export_idor_user_cannot_export_other_case_document(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A `user` who is NOT on a document's case team must not be able to
+        export it (and thereby read its bytes) by ID. Regression for the
+        IDOR where export skipped `check_document_access` — a low-priv user
+        on case A could pull unredacted originals from case B.
+        """
+        client = await authed_client_factory(role="user", email="outsider@example.test")
+        pdf = _make_minimal_pdf_bytes()
+        # Case the user is NOT a member of.
+        other_case = make_case(case_team=[])
+        await db.cases.insert_one(other_case)
+        doc = make_document(
+            filename="secret.pdf", content=pdf, case_id=other_case["id"], redactions=[]
+        )
+        await db.documents.insert_one(doc)
+
+        r = await client.get(f"/api/v1/documents/{doc['id']}/export")
+        assert r.status_code == 403, (
+            f"IDOR: non-team user exported another case's document "
+            f"(status {r.status_code})"
+        )
+        # And the original bytes must not have leaked in the body.
+        assert pdf not in r.content
+
+    async def test_export_user_on_case_team_can_export(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Positive control: a `user` who IS an active case-team member can
+        export the document — the access check must not over-block."""
+        client = await authed_client_factory(role="user", email="member@example.test")
+        # Recover the seeded user's id to add them to the case team.
+        user_doc = await db.users.find_one({"email": "member@example.test"})
+        pdf = _make_minimal_pdf_bytes()
+        case = make_case(
+            case_team=[{"user_id": user_doc["id"], "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        doc = make_document(
+            filename="mine.pdf", content=pdf, case_id=case["id"], redactions=[]
+        )
+        await db.documents.insert_one(doc)
+
+        r = await client.get(f"/api/v1/documents/{doc['id']}/export")
+        assert r.status_code == 200, r.text
+        assert r.content == pdf
+
 
 # ---------------------------------------------------------------------------
 # POST /  upload_document
@@ -780,6 +863,60 @@ class TestUploadDocument:
         # Uploaded_by is the seeded admin user's id (uuid)
         assert captured["uploaded_by"]
 
+    async def test_upload_into_case_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018 wave 3: the gate admits `user`; a team-scoped user must
+        not be able to inject a document into an existing case they are not
+        a member of. The processing service must never be reached."""
+        case = make_case(
+            case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        client = await authed_client_factory(role="user", email="off-up@example.test")
+
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": case["id"]},
+            )
+        assert r.status_code == 403, r.text
+
+    async def test_upload_into_case_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="on-up@example.test")
+        me = await db.users.find_one({"email": "on-up@example.test"})
+        case = make_case(
+            case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        from src.documents.processing_service import ProcessingResult, ProcessingStatus
+
+        mock_result = ProcessingResult(
+            status=ProcessingStatus.SUCCESS, document_id="ok-1", filename="x.pdf"
+        )
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": case["id"]},
+            )
+        assert r.status_code == 200, r.text
+
 
 # ---------------------------------------------------------------------------
 # DELETE /{document_id}  delete_document
@@ -977,6 +1114,41 @@ class TestGetProcessingStatus:
         r = await client.get("/api/v1/documents/ghost/processing_status")
         assert r.status_code == 404
 
+    async def test_processing_status_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018 wave 3: the gate admits `user`; a team-scoped user must
+        not learn another case's document progress by id enumeration."""
+        case = make_case(
+            case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        doc = make_document(case_id=case["id"], total_attachments=4, processed_attachments=2)
+        await db.documents.insert_one(doc)
+        client = await authed_client_factory(role="user", email="off-ps@example.test")
+        r = await client.get(f"/api/v1/documents/{doc['id']}/processing_status")
+        assert r.status_code == 403, r.text
+
+    async def test_processing_status_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="on-ps@example.test")
+        me = await db.users.find_one({"email": "on-ps@example.test"})
+        case = make_case(
+            case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        await db.cases.insert_one(case)
+        doc = make_document(case_id=case["id"], total_attachments=2, processed_attachments=2)
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/processing_status")
+        assert r.status_code == 200, r.text
+
 
 # ---------------------------------------------------------------------------
 # GET /{document_id}/audit-logs  get_document_audit_logs
@@ -1097,9 +1269,10 @@ class TestGetDocumentAuditLogs:
         authed_client_factory,
         patch_routes_db,
     ) -> None:
-        """Analyst who passes the role gate but isn't on the case team
-        gets 403 via check_document_access."""
-        client = await authed_client_factory(role="analyst", email="off-audit@example.test")
+        """A `user` who passes the role gate but isn't on the case team gets
+        403 via check_document_access. (Under the ISSUE-018 model analysts are
+        global, so the off-team subject here must be a plain `user`.)"""
+        client = await authed_client_factory(role="user", email="off-audit@example.test")
         case = make_case(
             case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}],
         )
@@ -1108,6 +1281,21 @@ class TestGetDocumentAuditLogs:
         await db.documents.insert_one(doc)
         r = await client.get(f"/api/v1/documents/{doc['id']}/audit-logs")
         assert r.status_code == 403
+
+    async def test_audit_logs_analyst_global_access(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Analysts are global reviewers and reach any case's audit logs."""
+        client = await authed_client_factory(role="analyst", email="global-audit@example.test")
+        case = make_case(case_team=[])
+        await db.cases.insert_one(case)
+        doc = make_document(case_id=case["id"])
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/audit-logs")
+        assert r.status_code == 200, r.text
 
 
 # ---------------------------------------------------------------------------
@@ -1143,11 +1331,17 @@ class TestModuleHelpers:
         assert check_document_access(doc, {"id": "u1", "role": "guest"}) is True
         assert check_document_access(doc, {"id": "u2", "role": "guest"}) is False
 
-    def test_check_document_access_no_case_for_non_special_role(self) -> None:
+    def test_check_document_access_analyst_is_global(self) -> None:
         from src.documents.routes import check_document_access
 
-        # analyst with no case -> falls through to return False
-        assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is False
+        # ISSUE-018 model: analyst is a global reviewer, allowed with no case.
+        assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is True
+
+    def test_check_document_access_no_case_for_plain_user(self) -> None:
+        from src.documents.routes import check_document_access
+
+        # A plain `user` with no case -> falls through to return False
+        assert check_document_access({}, {"id": "u", "role": "user"}, case=None) is False
 
     def test_check_document_access_user_on_case_team(self) -> None:
         from src.documents.routes import check_document_access

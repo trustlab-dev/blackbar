@@ -45,6 +45,7 @@ from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
     get_text_summary,
 )
 
+from ..core.authz import assert_case_access, check_document_access
 from ..database import db
 from ..dependencies import check_role, get_current_user
 
@@ -69,40 +70,27 @@ async def get_db(request: Request):
     return await get_database_from_request(request)
 
 
-def check_document_access(doc: dict, current_user: dict, case: dict = None) -> bool:
-    """
-    Check if user has access to a document.
-    - Owner/Admin: always has access
-    - Guest: only if document is shared with them
-    - Others: if on case team
-    """
-    user_role = current_user.get("role")
-    user_id = current_user["id"]
-
-    # Owner and Admin always have access
-    if user_role in ["owner", "admin"]:
-        return True
-
-    # Guest: check if document is shared with them
-    if user_role == "guest":
-        shared_with = doc.get("shared_with", [])
-        return any(share.get("user_id") == user_id for share in shared_with)
-
-    # Others: check case team membership
-    if case:
-        from ..cases.permissions import is_case_team_member
-
-        return is_case_team_member(case.get("case_team", []), user_id)
-
-    return False
-
-
 # LIST DOCUMENTS
 @router.get("/", dependencies=[Depends(check_role(["owner", "admin", "analyst", "user"]))])
 async def list_documents(
     request: Request, current_user=Depends(get_current_user), db=Depends(get_db)
 ):
-    cursor = db.documents.find({}, {"content": 0})  # Exclude binary content
+    # Object-level scoping: admin/analyst see all documents (mirrors
+    # list_cases); a plain `user` sees only documents whose parent case
+    # they are an active team member of. Without this, an unscoped listing
+    # hands a low-priv user every document ID in the system.
+    user_role = current_user.get("role")
+    if user_role in ["owner", "admin", "analyst"]:
+        query: dict = {}
+    else:
+        team_cases = await db.cases.find(
+            {"case_team": {"$elemMatch": {"user_id": current_user["id"], "status": "active"}}},
+            {"id": 1},
+        ).to_list(length=None)
+        accessible_case_ids = [c["id"] for c in team_cases]
+        query = {"case_id": {"$in": accessible_case_ids}}
+
+    cursor = db.documents.find(query, {"content": 0})  # Exclude binary content
     docs = await cursor.to_list(length=None)
     return [
         {
@@ -305,13 +293,28 @@ async def get_document_metadata(
     "/{document_id}/export",
     dependencies=[Depends(check_role(["owner", "admin", "analyst", "user"]))],
 )
-async def export_document_with_redactions(request: Request, document_id: str, db=Depends(get_db)):
+async def export_document_with_redactions(
+    request: Request,
+    document_id: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
     """Export a document with redactions applied permanently."""
     try:
         # Get the document
         doc = await db.documents.find_one({"id": document_id})
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
+
+        # Object-level authorization: the role gate above is not enough —
+        # a caller must also be allowed to access THIS document, or any
+        # user could export (and read the unredacted bytes of) any document
+        # by ID. Mirrors get_document / download_original_file.
+        case = await db.cases.find_one({"id": doc.get("case_id")}) if doc.get("case_id") else None
+        if not check_document_access(doc, current_user, case):
+            raise HTTPException(
+                status_code=403, detail="You don't have access to this document"
+            )
 
         # Get the redactions
         redactions = doc.get("redactions", [])
@@ -634,6 +637,16 @@ async def upload_document(
     """
     from .processing_service import DocumentProcessingService, ProcessingStatus, UploadContext
 
+    # If uploading into an existing case, enforce object-level access: the
+    # route role gate admits `user`, so a team-scoped user must not be able
+    # to inject a document into a case they are not a member of. A missing
+    # case doc is left to the processing service (preserves the historical
+    # behaviour where a document may carry a case_id with no case row yet).
+    if case_id:
+        case = await db.cases.find_one({"id": case_id})
+        if case is not None:
+            assert_case_access(case, current_user)
+
     # Read file content
     content = await file.read()
 
@@ -916,7 +929,12 @@ async def delete_document(request: Request, document_id: str, db=Depends(get_db)
     "/{document_id}/processing_status",
     dependencies=[Depends(check_role(["owner", "admin", "analyst", "user"]))],
 )
-async def get_processing_status(request: Request, document_id: str, db=Depends(get_db)):
+async def get_processing_status(
+    request: Request,
+    document_id: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
     """Get the processing status of a document's attachments."""
     try:
         # Phase 4 Batch 4.4 (audit B38): include the legacy-doc fields
@@ -924,6 +942,10 @@ async def get_processing_status(request: Request, document_id: str, db=Depends(g
         # the fallback branch below can actually inspect them. The
         # prior 2-field projection masked those keys, leaving the
         # legacy-fallback dead code.
+        # ISSUE-018 wave 3: `case_id`/`shared_with` are also projected so
+        # the object-level access check below has the fields it needs —
+        # the route role gate admits `user`, so a team-scoped user must
+        # not learn another case's document progress by id enumeration.
         doc = await db.documents.find_one(
             {"id": document_id},
             {
@@ -931,11 +953,17 @@ async def get_processing_status(request: Request, document_id: str, db=Depends(g
                 "processed_attachments": 1,
                 "has_attachments": 1,
                 "attachment_ids": 1,
+                "case_id": 1,
+                "shared_with": 1,
             },
         )
 
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
+
+        case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
+        if not check_document_access(doc, current_user, case):
+            raise HTTPException(status_code=403, detail="You don't have access to this document")
 
         total = doc.get("total_attachments", 0)
         processed = doc.get("processed_attachments", 0)

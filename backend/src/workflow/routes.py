@@ -23,8 +23,9 @@ from fastapi import (
     UploadFile,
 )
 
+from src.core.authz import assert_case_access
 from src.core.database import get_database_from_request
-from src.dependencies import get_current_user
+from src.dependencies import check_role, get_current_user
 from src.utils.email_service import EmailService
 
 from .models import (
@@ -104,6 +105,8 @@ async def pause_clock(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
+    assert_case_access(case, current_user)
+
     # Check if already paused
     if case.get("clock_status") == "paused":
         raise HTTPException(status_code=400, detail="Clock is already paused")
@@ -165,6 +168,8 @@ async def resume_clock(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
+    assert_case_access(case, current_user)
+
     # Check if actually paused
     if case.get("clock_status") != "paused":
         raise HTTPException(status_code=400, detail="Clock is not paused")
@@ -219,6 +224,8 @@ async def get_clock_history(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
+    assert_case_access(case, current_user)
+
     repo = ClockEventsRepository(db)
     return await repo.get_clock_status(case_id)
 
@@ -247,6 +254,8 @@ async def invite_contributor(
     case = await db.cases.find_one({"id": case_id})
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
 
     repo = ContributorsRepository(db)
     contributor, raw_token = await repo.create(
@@ -303,6 +312,8 @@ async def bulk_invite_contributors(
     case = await db.cases.find_one({"id": case_id})
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
 
     repo = ContributorsRepository(db)
     results = await repo.bulk_create(
@@ -365,6 +376,8 @@ async def list_contributors(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
+    assert_case_access(case, current_user)
+
     repo = ContributorsRepository(db)
     return await repo.get_by_case(case_id)
 
@@ -382,7 +395,20 @@ async def update_contributor(
     Update a contributor's details or status.
     """
 
+    # Verify case exists and the caller may access it
+    case = await db.cases.find_one({"id": case_id})
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
+
     repo = ContributorsRepository(db)
+
+    # Ensure the contributor belongs to this case (prevent cross-case edits)
+    existing = await repo.get_by_id(contributor_id)
+    if not existing or existing.case_id != case_id:
+        raise HTTPException(status_code=404, detail="Contributor not found")
+
     contributor = await repo.update(contributor_id, update_data)
 
     if not contributor:
@@ -425,6 +451,12 @@ async def remind_contributor(
     case = await db.cases.find_one({"id": case_id})
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
+
+    # Ensure the contributor belongs to this case (prevent cross-case reminders)
+    if contributor.case_id != case_id:
+        raise HTTPException(status_code=404, detail="Contributor not found")
 
     # Generate a new token for the reminder (we can't recover the
     # original raw token). Phase 4 Batch 4.4 (audit B44): the token
@@ -497,7 +529,20 @@ async def delete_contributor(
     Delete a contributor invitation.
     """
 
+    # Verify case exists and the caller may access it
+    case = await db.cases.find_one({"id": case_id})
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
+
     repo = ContributorsRepository(db)
+
+    # Ensure the contributor belongs to this case (prevent cross-case deletes)
+    existing = await repo.get_by_id(contributor_id)
+    if not existing or existing.case_id != case_id:
+        raise HTTPException(status_code=404, detail="Contributor not found")
+
     deleted = await repo.delete(contributor_id)
 
     if not deleted:
@@ -697,7 +742,11 @@ async def confirm_records_complete(contributor_id: str, token: str, request: Req
 # =============================================================================
 
 
-@router.get("/queue/prioritized", response_model=list[CasePriorityScore])
+@router.get(
+    "/queue/prioritized",
+    response_model=list[CasePriorityScore],
+    dependencies=[Depends(check_role(["owner", "admin", "analyst"]))],
+)
 async def get_prioritized_queue(
     request: Request,
     analyst_id: str | None = None,
@@ -733,7 +782,11 @@ async def get_prioritized_queue(
     return await repo.get_prioritized_queue(filters)
 
 
-@router.get("/queue/workload/{analyst_id}", response_model=list[CasePriorityScore])
+@router.get(
+    "/queue/workload/{analyst_id}",
+    response_model=list[CasePriorityScore],
+    dependencies=[Depends(check_role(["owner", "admin", "analyst"]))],
+)
 async def get_analyst_workload(
     analyst_id: str,
     request: Request,
@@ -778,6 +831,8 @@ async def confirm_all_records_uploaded(
     case = await db.cases.find_one({"id": case_id})
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
 
     now = datetime.utcnow()
     user_name = current_user.get("name", current_user.get("email", "Unknown"))
@@ -828,6 +883,8 @@ async def get_records_confirmation(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
+    assert_case_access(case, current_user)
+
     return RecordsConfirmation(
         confirmed=case.get("all_records_uploaded", False),
         confirmed_by=case.get("all_records_confirmed_by"),
@@ -851,6 +908,8 @@ async def revoke_records_confirmation(
     case = await db.cases.find_one({"id": case_id})
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
 
     await db.cases.update_one(
         {"id": case_id},
@@ -879,7 +938,11 @@ async def revoke_records_confirmation(
 # =============================================================================
 
 
-@router.post("/cases/{case_id}/transfer", response_model=dict)
+@router.post(
+    "/cases/{case_id}/transfer",
+    response_model=dict,
+    dependencies=[Depends(check_role(["owner", "admin", "analyst"]))],
+)
 async def transfer_case(
     case_id: str,
     transfer_data: TransferCreate,
@@ -962,6 +1025,8 @@ async def list_transfers(
     case = await db.cases.find_one({"id": case_id})
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
+
+    assert_case_access(case, current_user)
 
     repo = TransfersRepository(db)
     return await repo.get_by_case(case_id)

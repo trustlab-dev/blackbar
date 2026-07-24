@@ -1264,6 +1264,47 @@ class TestUpdateRedaction:
         )
         assert r.status_code == 403
 
+    async def test_edit_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018 wave 3: the /edit gate admits `user`, but a plain user
+        off the case team must not be able to move/relabel redactions on
+        another case's document."""
+        client = await authed_client_factory(role="user", email="off-edit@example.com")
+        case_id = await _seed_case_with_team_member(db, "someone-else", "analyst")
+        doc_id = await _seed_document(
+            db, case_id, redactions=[{"id": "r-x", "page": 1, "reason": "old"}]
+        )
+        r = await client.put(
+            f"/api/v1/documents/{doc_id}/redactions/r-x/edit",
+            json={"reason": "hijacked", "x": "999"},
+        )
+        assert r.status_code == 403, r.text
+        # Redaction must be unchanged
+        doc = await db.documents.find_one({"id": doc_id})
+        assert doc["redactions"][0]["reason"] == "old"
+
+    async def test_edit_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="on-edit@example.com")
+        me = await db.users.find_one({"email": "on-edit@example.com"})
+        case_id = await _seed_case_with_team_member(db, me["id"], "analyst")
+        doc_id = await _seed_document(
+            db, case_id, redactions=[{"id": "r-y", "page": 1, "reason": "old"}]
+        )
+        r = await client.put(
+            f"/api/v1/documents/{doc_id}/redactions/r-y/edit",
+            json={"reason": "new"},
+        )
+        assert r.status_code == 200, r.text
+
 
 # ---------------------------------------------------------------------------
 # DELETE /{document_id}/redactions/{redaction_id}
@@ -1399,12 +1440,18 @@ def test_check_document_access_owner_always_allowed() -> None:
     assert check_document_access({}, {"id": "u", "role": "admin"}) is True
 
 
-def test_check_document_access_others_no_case_denies() -> None:
-    """A user with no case context and no admin/guest role is denied
-    via the fall-through `return False`."""
+def test_check_document_access_analyst_is_global() -> None:
+    """ISSUE-018 model: analyst is a global reviewer (allowed with no case)."""
     from src.documents.redaction_routes import check_document_access
 
-    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is False
+    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is True
+
+
+def test_check_document_access_plain_user_no_case_denies() -> None:
+    """A plain `user` with no case context is denied via the fall-through."""
+    from src.documents.redaction_routes import check_document_access
+
+    assert check_document_access({}, {"id": "u", "role": "user"}, case=None) is False
 
 
 # ---------------------------------------------------------------------------

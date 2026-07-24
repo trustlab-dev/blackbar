@@ -383,8 +383,9 @@ const UserManagement: React.FC = () => {
                 onChange={handleInputChange}
               />
               <FormControl fullWidth margin="dense">
-                <InputLabel>Role</InputLabel>
+                <InputLabel id="user-role-label">Role</InputLabel>
                 <Select
+                  labelId="user-role-label"
                   value={newUser.role}
                   onChange={handleRoleChange}
                   label="Role"

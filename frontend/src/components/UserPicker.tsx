@@ -6,10 +6,17 @@ import api from '../api/client';
 
 interface User {
   id: string;
-  username: string;
+  // The team-search API returns `name`; older callers/tests use `username`.
+  // Accept either and fall back to the email for display.
+  name?: string;
+  username?: string;
   email: string;
   role: string;
 }
+
+/** Best available human label for an option. */
+const displayName = (option: User): string =>
+  option.name || option.username || option.email || '';
 
 interface UserPickerProps {
   value: string;
@@ -70,7 +77,12 @@ const UserPicker: React.FC<UserPickerProps> = ({
       inputValue={inputValue}
       onInputChange={handleInputChange}
       options={users}
-      getOptionLabel={(option) => option.username || ''}
+      getOptionLabel={displayName}
+      isOptionEqualToValue={(option, val) => option.id === val.id}
+      // The backend already filters by name/email server-side; disable MUI's
+      // client-side filtering so results aren't dropped when the typed text
+      // doesn't match the (display-only) option label.
+      filterOptions={(opts) => opts}
       loading={loading}
       renderOption={(props, option) => {
         const { key, ...otherProps } = props;
@@ -79,7 +91,7 @@ const UserPicker: React.FC<UserPickerProps> = ({
             <Box sx={{ display: 'flex', flexDirection: 'column', width: '100%' }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                  {option.username}
+                  {displayName(option)}
                 </Typography>
                 <Chip
                   label={option.role}

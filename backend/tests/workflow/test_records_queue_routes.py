@@ -323,4 +323,97 @@ class TestQueueWorkload:
         client: AsyncClient = await authed_client_factory(role="admin")
         r = await client.get("/api/v1/queue/workload/ghost")
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Object-level authorization (ISSUE-018 wave 2)
+#
+# records-confirmation endpoints are case-scoped: a `user` off the team is
+# forbidden, on-team is allowed, analysts are global. The cross-case queue
+# views (prioritized / workload) aggregate over ALL cases, so they are
+# gated to global roles only (owner/admin/analyst) — a `user` gets 403.
+# ---------------------------------------------------------------------------
+
+
+class TestRecordsConfirmationAuthz:
+    async def test_confirm_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="user", email="off-rc@example.com")
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/records-confirmation", json={"notes": "x"}
+        )
+        assert r.status_code == 403, r.text
+
+    async def test_confirm_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="user", email="on-rc@example.com")
+        me = await db.users.find_one({"email": "on-rc@example.com"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/records-confirmation", json={"notes": "x"}
+        )
+        assert r.status_code == 200, r.text
+
+    async def test_get_confirmation_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="user", email="off-gc@example.com")
+        r = await client.get(f"/api/v1/cases/{case_id}/records-confirmation")
+        assert r.status_code == 403, r.text
+
+    async def test_revoke_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="user", email="off-rv@example.com")
+        r = await client.delete(f"/api/v1/cases/{case_id}/records-confirmation")
+        assert r.status_code == 403, r.text
+
+
+class TestQueueGlobalRoleGate:
+    async def test_prioritized_forbidden_for_user_role(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Cross-case queue is global-only; a plain `user` is rejected."""
+        client: AsyncClient = await authed_client_factory(role="user")
+        r = await client.get("/api/v1/queue/prioritized")
+        assert r.status_code == 403, r.text
+
+    async def test_workload_forbidden_for_user_role(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="user")
+        r = await client.get("/api/v1/queue/workload/alice")
+        assert r.status_code == 403, r.text
+
+    async def test_prioritized_allowed_for_analyst(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="analyst")
+        r = await client.get("/api/v1/queue/prioritized")
+        assert r.status_code == 200, r.text
         assert r.json() == []

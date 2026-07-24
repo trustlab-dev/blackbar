@@ -24,10 +24,10 @@ Endpoints under test (mounted at `/api/v1/documents/...` via
   must monkeypatch `src.documents.search_routes.db` for the POST
   endpoint to hit the per-test motor database. Same class as B30.
 
-- **GET endpoint asymmetry:** the GET endpoint does NOT run
-  `check_document_access` (only role decorator). The POST endpoint
-  DOES. So a non-team user with role=user can GET-search any doc but
-  POST-search only docs they have access to. Same family as B34.
+- **Object-level access (ISSUE-018 fix):** both GET and POST now run
+  `assert_document_access` / `check_document_access` after the role gate.
+  A non-team `user` gets 403 on either verb; owner/admin/analyst are
+  global reviewers. (Previously the GET verb skipped the check — an IDOR.)
 
 - **Module logger uses f-string in `logger.warning`** — fine, but
   pin the OCR-data validation chain:
@@ -107,6 +107,42 @@ def _text_data_with_words(text: str, page_num: int = 1) -> dict:
 
 
 class TestSearchDocumentTextGet:
+    async def test_get_search_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """ISSUE-018: GET search must enforce object-level access — a `user`
+        not on the doc's case team cannot read its text/context."""
+        client = await authed_client_factory(role="user", email="off-search@example.com")
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}]
+        )
+        doc_id = await _seed_document(
+            db, case_id=case_id, text_data={"pages": [{"page_num": 1, "text": "secret text"}]}
+        )
+        r = await client.get(f"/api/v1/documents/{doc_id}/search", params={"query": "secret"})
+        assert r.status_code == 403, r.text
+        assert "secret" not in r.text
+
+    async def test_get_search_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="on-search@example.com")
+        me = await db.users.find_one({"email": "on-search@example.com"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
+        )
+        doc_id = await _seed_document(
+            db, case_id=case_id, text_data={"pages": [{"page_num": 1, "text": "hello world"}]}
+        )
+        r = await client.get(f"/api/v1/documents/{doc_id}/search", params={"query": "hello"})
+        assert r.status_code == 200, r.text
+
     async def test_basic_search_finds_matches_with_context(
         self,
         db: AsyncIOMotorDatabase,
@@ -467,7 +503,14 @@ def test_check_document_access_guest_share_matches() -> None:
     assert check_document_access(doc, {"id": "u2", "role": "guest"}) is False
 
 
-def test_check_document_access_others_no_case_denies() -> None:
+def test_check_document_access_analyst_is_global() -> None:
+    # ISSUE-018 model: analysts are global reviewers.
     from src.documents.search_routes import check_document_access
 
-    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is False
+    assert check_document_access({}, {"id": "u", "role": "analyst"}, case=None) is True
+
+
+def test_check_document_access_user_no_case_denies() -> None:
+    from src.documents.search_routes import check_document_access
+
+    assert check_document_access({}, {"id": "u", "role": "user"}, case=None) is False

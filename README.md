@@ -124,6 +124,13 @@ deduplication, manual redaction, release packages — in
    - Write all initial passwords to `INITIAL_CREDS.txt` (mode `600`, gitignored)
    - Start the frontend
 
+   > **`setup.sh` is not optional.** BlackBar has no self-service registration: every
+   > account is created by an admin, and the *first* admin only exists once `setup.sh`
+   > creates it. If you start the stack with `docker compose up -d` alone, everything
+   > will appear to run but no one will be able to log in or create an account
+   > (`GET http://localhost:8000/health` will report `"setup_required": true`).
+   > Run `bash setup.sh` — it is safe to run against an already-started stack.
+
 3. Access BlackBar at `http://localhost:3000` and log in with the admin credentials you provided.
 
 4. Copy the credentials from `INITIAL_CREDS.txt` to your password manager and **delete the file** before exposing the deployment to production traffic. See [`SETUP_GUIDE.md`](SETUP_GUIDE.md) for the full flow.
@@ -151,6 +158,22 @@ npm run test:coverage    # with coverage report
 ```
 
 Coverage gate: **≥70%** lines/statements, ≥65% functions/branches (`vite.config.ts`).
+
+### End-to-end (Playwright)
+
+Full-stack browser tests that drive the running docker-compose stack
+(frontend → backend → MongoDB) across the core journeys — login, user and case
+management, team, contributors, the statutory clock, document upload,
+transfers, the public request + contributor portals, and role/object-level
+access control. Requires a bootstrapped stack; see
+[`e2e/README.md`](e2e/README.md) for prerequisites and details.
+
+```bash
+cd e2e
+npm install
+npm run install:browsers   # one-time: downloads the Chromium runtime
+npm test
+```
 
 ## Technology Stack
 

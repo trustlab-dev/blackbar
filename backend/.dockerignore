@@ -1,0 +1,16 @@
+# Never bake the local virtualenv into the image — the image installs its own
+# dependencies from requirements.txt. Copying .venv in doubles every package
+# (and every package vulnerability) and adds gigabytes.
+.venv*
+venv*
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage
+tests
+Dockerfile
+.dockerignore

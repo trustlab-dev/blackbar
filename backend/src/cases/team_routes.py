@@ -90,6 +90,10 @@ async def get_case_team(
     # Get full user details for each team member
     team_members = []
     for member in case.get("case_team", []):
+        # Skip soft-deleted members: removal sets status to "removed" (see
+        # remove_team_member) and they must not surface in the team listing.
+        if member.get("status") == "removed":
+            continue
         # Try to find user by id field first, then by _id (for backwards compatibility)
         user = await users.find_one({"id": member["user_id"]}, {"password_hash": 0})
         if not user:

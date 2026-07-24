@@ -9,6 +9,7 @@ import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from ..core.authz import assert_document_access, check_document_access
 from ..core.database import get_database_from_request
 from ..database import db
 from ..dependencies import check_role, get_current_user
@@ -24,43 +25,29 @@ async def get_db(request: Request):
     return await get_database_from_request(request)
 
 
-def check_document_access(doc: dict, current_user: dict, case: dict = None) -> bool:
-    """
-    Check if user has access to a document.
-    - Owner/Admin: always has access
-    - Guest: only if document is shared with them
-    - Others: if on case team
-    """
-    user_role = current_user.get("role")
-    user_id = current_user["id"]
-
-    # Owner and Admin always have access
-    if user_role in ["owner", "admin"]:
-        return True
-
-    # Guest: check if document is shared with them
-    if user_role == "guest":
-        shared_with = doc.get("shared_with", [])
-        return any(share.get("user_id") == user_id for share in shared_with)
-
-    # Others: check case team membership
-    if case:
-        from ..cases.permissions import is_case_team_member
-
-        return is_case_team_member(case.get("case_team", []), user_id)
-
-    return False
+# check_document_access / assert_document_access are imported from
+# ..core.authz (single canonical implementation).
 
 
 @router.get(
     "/{document_id}/search",
     dependencies=[Depends(check_role(["owner", "admin", "analyst", "user"]))],
 )
-async def search_document_text(request: Request, document_id: str, query: str, db=Depends(get_db)):
+async def search_document_text(
+    request: Request,
+    document_id: str,
+    query: str,
+    current_user=Depends(get_current_user),
+    db=Depends(get_db),
+):
     """Search for text within a document."""
     doc = await db.documents.find_one({"id": document_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Object-level access check before returning document text/context.
+    case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
+    assert_document_access(doc, current_user, case)
 
     text_data = doc.get("text_data", {})
     results = []

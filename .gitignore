@@ -166,3 +166,5 @@ INITIAL_CREDS.txt
 
 # Screenshot scratch output — the committed gallery lives in docs/screenshots/
 deploy/demo/screenshots/
+# Local project-management tracker (issues/epics) — not synced to the repo
+ProjectMgmt/

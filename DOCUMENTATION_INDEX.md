@@ -40,9 +40,10 @@ Quick map of the project's docs. Everything else is read-as-you-need.
 - **[docs/STYLEGUIDE.md](docs/STYLEGUIDE.md)** — UI/UX design guidelines
 - **[docs/AGENTS.md](docs/AGENTS.md)** — repo-level rules for AI coding agents
 
-## Testing (`docs/testing/`)
+## Testing
 
-- **[END-TO-END.md](docs/testing/END-TO-END.md)** — end-to-end test plan and conventions
+- **[e2e/README.md](e2e/README.md)** — automated Playwright end-to-end suite (runs against the docker-compose stack)
+- **[docs/testing/END-TO-END.md](docs/testing/END-TO-END.md)** — manual end-to-end test checklist (for areas the automated suite doesn't yet cover)
 
 ---
 

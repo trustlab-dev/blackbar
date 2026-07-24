@@ -239,3 +239,74 @@ class TestClockHistory:
     async def test_history_unauthenticated_401(self, client) -> None:
         r = client.get("/api/v1/cases/foo/clock/history")
         assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Object-level authorization (ISSUE-018 wave 2)
+#
+# Access model: owner/admin/analyst are global reviewers; `user`/`guest`
+# are team-scoped. A plain `user` off the case team must NOT be able to
+# read or mutate another case's clock; a `user` on the team may.
+# ---------------------------------------------------------------------------
+
+
+class TestClockObjectLevelAuthz:
+    async def test_pause_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(
+            db,
+            clock_status="running",
+            case_team=[{"user_id": "someone-else", "role": "analyst", "status": "active"}],
+        )
+        client: AsyncClient = await authed_client_factory(role="user", email="off-clk@example.com")
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/clock/pause",
+            json={"event_type": "pause", "reason": "manual"},
+        )
+        assert r.status_code == 403, r.text
+
+    async def test_pause_user_on_team_allowed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="user", email="on-clk@example.com")
+        me = await db.users.find_one({"email": "on-clk@example.com"})
+        case_id = await _seed_case(
+            db,
+            clock_status="running",
+            case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}],
+        )
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/clock/pause",
+            json={"event_type": "pause", "reason": "manual"},
+        )
+        assert r.status_code == 200, r.text
+
+    async def test_history_user_off_team_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="user", email="off-hist@example.com")
+        r = await client.get(f"/api/v1/cases/{case_id}/clock/history")
+        assert r.status_code == 403, r.text
+
+    async def test_history_analyst_global_access(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Analysts are global reviewers — reach any case's clock history."""
+        case_id = await _seed_case(db, case_team=[])
+        client: AsyncClient = await authed_client_factory(role="analyst")
+        r = await client.get(f"/api/v1/cases/{case_id}/clock/history")
+        assert r.status_code == 200, r.text

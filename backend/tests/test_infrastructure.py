@@ -30,9 +30,12 @@ async def test_db_isolation_between_tests_part_2(db) -> None:
 
 
 def test_app_imports(app) -> None:
-    """FastAPI app boots without errors under test env."""
-    routes = [r.path for r in app.routes if hasattr(r, "path")]
-    assert any("/api/v1" in r for r in routes), "API router missing"
+    """FastAPI app boots without errors under test env.
+
+    Route table asserted via the OpenAPI schema: Starlette ≥1.3 mounts
+    included routers lazily, so `app.routes` no longer flattens them.
+    """
+    assert any("/api/v1" in p for p in app.openapi()["paths"]), "API router missing"
 
 
 def test_unauth_client(client) -> None:

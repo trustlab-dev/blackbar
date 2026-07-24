@@ -1,0 +1,7 @@
+# Dependencies are installed inside the image from package-lock.json;
+# host artifacts only add bloat and stale-version noise to image scans.
+node_modules
+build
+coverage
+Dockerfile
+.dockerignore
