@@ -63,8 +63,9 @@ The setup script performs the following steps in order:
 5. **Starts MongoDB and the backend** — `docker compose up -d mongodb backend` plus a short wait for both to be reachable.
 6. **Creates database indexes, the admin user, default system configuration, and seeds default templates** — executed inside the backend container.
 7. **Optionally seeds demo data** — if you opt in at the prompt (or set `SEED_DEMO=y`), creates three demo users (`analyst@example.com`, `reviewer@example.com`, `staff@example.com`), a sample team, and a set of sample cases. Demo passwords are randomly generated (16 chars, no ambiguous characters).
-8. **Writes `INITIAL_CREDS.txt`** — contains the admin password and any demo-user passwords, with file mode `600`. Listed in `.gitignore`.
-9. **Starts the frontend** — `docker compose up -d frontend`.
+8. **Optionally seeds the TrustLab demo FOI case** — if you opt in at the prompt (or set `SEED_TRUSTLAB=y`), generates the fixture documents on the host (needs `python-docx`) and seeds one realistic FOI case with 8 documents through the API (needs `httpx`). If either package is missing the script tells you how to install it and skips this step. Seeding this case also sets `BLACKBAR_DEMO_MODE=true` in `.env` and restarts the backend, which enables the one-click demo-login button on the public login page.
+9. **Writes `INITIAL_CREDS.txt`** — contains the admin password and any demo-user passwords, with file mode `600`. Listed in `.gitignore`.
+10. **Starts the frontend** — `docker compose up -d frontend`.
 
 After the script finishes, all three services are running and the application is ready for use.
 
@@ -128,8 +129,15 @@ ADMIN_NAME=Admin
 # Organisation name displayed throughout the application (used by setup.sh on first run)
 ORG_NAME=Freedom of Information Office
 
-# Optional: skip the demo-data prompt
+# Optional: skip the demo-data prompts
 SEED_DEMO=N
+SEED_TRUSTLAB=N
+
+# Enables POST /api/v1/auth/public/demo-login and the one-click demo-login
+# button on the public login page. setup.sh sets this to true automatically
+# when you opt into seeding the TrustLab demo case. Leave unset/false in
+# production.
+BLACKBAR_DEMO_MODE=false
 ```
 
 ### Production-only variables
@@ -177,9 +185,11 @@ Stored on `user.role` and defined in `backend/src/auth/roles.py`. Listed from mo
 
 ### Case-team roles (7-tier)
 
-Per-case assignments stored on `case.team[*].role`, defined in `backend/src/cases/permissions.py`: `manager`, `analyst`, `legal`, `sme`, `reviewer`, `approver`, `third_party`. These grant per-case permissions independent of the system role.
+Per-case assignments stored on `case.case_team[*].role`, defined in `backend/src/cases/permissions.py`: `manager`, `analyst`, `legal`, `sme`, `reviewer`, `approver`, `third_party`. These grant per-case permissions independent of the system role.
 
-> The system "analyst" and the case-team "analyst" share a name but are separate concepts. A user with system role `user` can still be added to a case team as `manager` and gain manager-level permissions on that case. The canonical write-up of both taxonomies lives in `docs/standards/ROLES.md` (forthcoming — Phase 4 Batch 4.5).
+> The system "analyst" and the case-team "analyst" share a name but are separate concepts. A user with system role `user` can still be added to a case team as `manager` and gain manager-level permissions on that case. The canonical write-up of both taxonomies lives in [`docs/standards/ROLES.md`](docs/standards/ROLES.md).
+
+**Object-level access.** `admin` and `analyst` are global reviewers — they can reach any case or document. `user` and `guest` are scoped: a `user` sees only cases whose case team they belong to, and a `guest` only documents explicitly shared with them. Adding someone to a case team is therefore what grants a `user` access to that case.
 
 ---
 
