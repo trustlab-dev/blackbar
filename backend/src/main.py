@@ -205,7 +205,9 @@ async def health_check(request: Request):
         # log in or create users) where an installer will actually look.
         if await db.users.estimated_document_count() == 0:
             payload["setup_required"] = True
-            payload["setup_hint"] = "No user accounts exist. Run 'bash setup.sh' to create the first admin (see SETUP_GUIDE.md)."
+            payload["setup_hint"] = (
+                "No user accounts exist. Run 'bash setup.sh' to create the first admin (see SETUP_GUIDE.md)."
+            )
 
         return payload
     except Exception as e:

@@ -21,7 +21,11 @@
     "noFallthroughCasesInSwitch": true,
     "noImplicitAny": false,
 
-    "types": ["vite/client", "node", "vitest/globals"],
+    /* `vitest/globals` is referenced from src/vite-env.d.ts instead of here:
+       entries in `types` are resolved against `typeRoots` below, which cannot
+       reach a package subpath export, so listing it here fails with
+       "Cannot find type definition file for 'vitest/globals'". */
+    "types": ["vite/client", "node"],
     "typeRoots": ["./node_modules/@types", "./src/types"],
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,

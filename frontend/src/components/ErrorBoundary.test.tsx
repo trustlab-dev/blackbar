@@ -7,7 +7,9 @@ vi.mock('../utils/telemetry', () => ({
   captureError: vi.fn(),
 }));
 
-function BoomChild(): JSX.Element {
+// Returns `never` rather than `JSX.Element`: React 19's types no longer
+// provide a global `JSX` namespace, and this component only ever throws.
+function BoomChild(): never {
   throw new Error('boom');
 }
 

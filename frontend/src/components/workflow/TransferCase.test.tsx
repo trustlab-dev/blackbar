@@ -319,7 +319,7 @@ describe('TransferCase', () => {
     const heading = await screen.findByRole('heading', {
       name: /transfer initiated/i,
     });
-    const dialog = heading.closest('.MuiDialog-root')!;
+    const dialog = heading.closest('.MuiDialog-root') as HTMLElement;
     await user.click(within(dialog).getByTestId('ContentCopyIcon'));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(

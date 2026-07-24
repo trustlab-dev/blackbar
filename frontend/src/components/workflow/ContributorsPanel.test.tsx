@@ -334,7 +334,7 @@ describe('ContributorsPanel', () => {
     const urlDialog = await screen.findByRole('heading', {
       name: /invitation sent/i,
     });
-    const dialog = urlDialog.closest('.MuiDialog-root')!;
+    const dialog = urlDialog.closest('.MuiDialog-root') as HTMLElement;
     await user.click(within(dialog).getByTestId('ContentCopyIcon'));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(

@@ -312,9 +312,7 @@ async def export_document_with_redactions(
         # by ID. Mirrors get_document / download_original_file.
         case = await db.cases.find_one({"id": doc.get("case_id")}) if doc.get("case_id") else None
         if not check_document_access(doc, current_user, case):
-            raise HTTPException(
-                status_code=403, detail="You don't have access to this document"
-            )
+            raise HTTPException(status_code=403, detail="You don't have access to this document")
 
         # Get the redactions
         redactions = doc.get("redactions", [])

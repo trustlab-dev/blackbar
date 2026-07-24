@@ -18,6 +18,7 @@ import Snackbar from '@mui/material/Snackbar';
 import LinearProgress from '@mui/material/LinearProgress';
 import List from '@mui/material/List';
 import ListItem from '@mui/material/ListItem';
+import ListItemButton from '@mui/material/ListItemButton';
 import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
 import BuildIcon from '@mui/icons-material/Build';
@@ -424,26 +425,26 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
             <Paper variant="outlined" sx={{ maxHeight: 200, overflow: 'auto', mt: 1, mb: 2 }}>
               <List dense>
                 {approvedDocuments.map((doc) => (
-                  <ListItem
-                    key={doc.id}
-                    button
-                    onClick={() => toggleDocSelection(doc.id)}
-                  >
-                    <ListItemIcon>
-                      <Checkbox
-                        edge="start"
-                        checked={selectedDocIds.includes(doc.id)}
-                        tabIndex={-1}
-                        disableRipple
+                  // MUI v6 removed ListItem's `button` prop; ListItemButton is
+                  // the supported way to make a row clickable.
+                  <ListItem key={doc.id} disablePadding>
+                    <ListItemButton onClick={() => toggleDocSelection(doc.id)}>
+                      <ListItemIcon>
+                        <Checkbox
+                          edge="start"
+                          checked={selectedDocIds.includes(doc.id)}
+                          tabIndex={-1}
+                          disableRipple
+                        />
+                      </ListItemIcon>
+                      <ListItemIcon>
+                        <DescriptionIcon fontSize="small" />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={doc.filename}
+                        secondary={`${doc.redactions?.length || 0} redactions`}
                       />
-                    </ListItemIcon>
-                    <ListItemIcon>
-                      <DescriptionIcon fontSize="small" />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={doc.filename}
-                      secondary={`${doc.redactions?.length || 0} redactions`}
-                    />
+                    </ListItemButton>
                   </ListItem>
                 ))}
               </List>

@@ -92,7 +92,21 @@ async def test_root_response_has_security_headers(main_client: httpx.AsyncClient
     assert r.headers["Content-Security-Policy"] == "default-src 'self'"
 
 
-async def test_health_endpoint_healthy(main_client: httpx.AsyncClient):
+async def test_health_endpoint_healthy(
+    monkeypatch: pytest.MonkeyPatch, main_client: httpx.AsyncClient
+):
+    """Goes through `_StubDb` rather than the real module-level motor client.
+
+    That client is pinned to the first event loop that touched it (see the
+    `_StubDb` docstring below), so routing this test through it made it
+    order-dependent: in full-suite runs it intermittently failed with
+    "Event loop is closed" and a 503. Real Mongo connectivity is covered by
+    the route integration tests; here we only need the handler's healthy path.
+    """
+    import src.database as db_mod
+
+    monkeypatch.setattr(db_mod, "db", _StubDb(user_count=1))
+
     r = await main_client.get("/health")
     assert r.status_code == 200
     body = r.json()
