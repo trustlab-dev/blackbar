@@ -136,8 +136,9 @@ const CaseForm: React.FC = () => {
             
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth disabled={loading || success}>
-                <InputLabel>Status</InputLabel>
+                <InputLabel id="case-status-label">Status</InputLabel>
                 <Select
+                  labelId="case-status-label"
                   name="status"
                   value={formData.status || 'new'}
                   onChange={handleChange}
@@ -155,8 +156,9 @@ const CaseForm: React.FC = () => {
             
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth disabled={loading || success}>
-                <InputLabel>Priority</InputLabel>
+                <InputLabel id="case-priority-label">Priority</InputLabel>
                 <Select
+                  labelId="case-priority-label"
                   name="priority"
                   value={formData.priority || 'medium'}
                   onChange={handleChange}

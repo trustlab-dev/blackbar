@@ -245,8 +245,9 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
             Pausing the clock will stop the countdown toward the due date. The due date will be automatically adjusted when the clock is resumed.
           </Typography>
           <FormControl fullWidth sx={{ mb: 2 }}>
-            <InputLabel>Reason for Pause</InputLabel>
+            <InputLabel id="pause-reason-label">Reason for Pause</InputLabel>
             <Select
+              labelId="pause-reason-label"
               value={pauseReason}
               onChange={(e) => setPauseReason(e.target.value)}
               label="Reason for Pause"

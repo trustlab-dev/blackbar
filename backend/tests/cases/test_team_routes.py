@@ -115,6 +115,32 @@ class TestGetCaseTeam:
         assert len(body["team_members"]) == 1
         assert body["team_members"][0]["user_name"] == "Member A"
 
+    async def test_get_team_excludes_removed_members(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Soft-deleted (status == 'removed') members must not appear in the
+        team listing — only the active member is returned."""
+        active_uid = await _seed_user(db, role="user", name="Active Member")
+        removed_uid = await _seed_user(db, role="user", name="Removed Member")
+        case_id = await _seed_case(
+            db,
+            case_team=[
+                {"user_id": active_uid, "role": "analyst", "status": "active"},
+                {"user_id": removed_uid, "role": "reviewer", "status": "removed"},
+            ],
+        )
+
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.get(f"/api/v1/cases/{case_id}/team")
+        assert r.status_code == 200, r.text
+        members = r.json()["team_members"]
+        assert len(members) == 1
+        assert members[0]["user_id"] == active_uid
+        assert all(m["user_id"] != removed_uid for m in members)
+
     async def test_non_admin_non_team_member_forbidden(
         self,
         db: AsyncIOMotorDatabase,

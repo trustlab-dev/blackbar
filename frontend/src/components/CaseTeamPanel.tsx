@@ -301,8 +301,9 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
             />
             
             <FormControl fullWidth>
-              <InputLabel>Role</InputLabel>
+              <InputLabel id="team-member-role-label">Role</InputLabel>
               <Select
+                labelId="team-member-role-label"
                 value={newMemberRole}
                 label="Role"
                 onChange={(e) => setNewMemberRole(e.target.value)}
