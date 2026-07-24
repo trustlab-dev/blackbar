@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-24
+
+First tagged release. Everything below shipped in `v0.1.0`, on top of the
+open-source preparation arc and the `0.1.0-rc*` candidates summarized further
+down this file.
+
 ### Added
 
 - **End-to-end test suite (Playwright).** New self-contained `e2e/` package
@@ -25,6 +31,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   soft-deleted (`removed`) members.
 - **Accessibility** — the statutory-clock reason, user/team role, and case
   status/priority selects now carry proper `<label>` associations.
+- **Type-checking and build health.** Removed `frontend/src/types/material-ui.d.ts`,
+  a hand-written stub that redeclared `react`, `react-router-dom` and
+  `react/jsx-runtime`, overriding those packages' real types and causing 31 of
+  40 `tsc` errors. Completed the React 19 / MUI 6 migration fallout (global
+  `JSX` namespace removal, `ListItem button` → `ListItemButton`, stale
+  duplicate `@types/react` v18 pins) and de-flaked two order-dependent tests
+  (`SectionPicker`, `test_health_endpoint_healthy`).
 
 ### Security
 
@@ -35,6 +48,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   endpoints now verify membership. Adds a shared `core/authz` helper, an
   authenticated cross-object (IDOR) test matrix, and per-endpoint regression
   tests.
+- **Dropped the unused `pypdf` dependency**, which carried 35 known CVEs. It
+  was never imported — PDF handling uses PyMuPDF (`fitz`) and `reportlab`.
 
 ### Changed
 
@@ -148,12 +163,12 @@ fixes, and a documentation+help refresh on top of `v0.1.0-rc1`.
   `frontend/package.json` and `package-lock.json`. Not imported
   anywhere in source.
 
-## [0.1.0] - Unreleased
+## Open-source preparation
 
-Initial open-source release. The release tag (`v0.1.0`) lands at the end of
-the OSS-preparation arc; this entry summarizes the changes made across that
-work so contributors landing in the repo for the first time can see the shape
-of what they're inheriting.
+Not a released version of its own — this entry summarizes the OSS-preparation
+arc that preceded the `0.1.0-rc*` candidates, so contributors landing in the
+repo for the first time can see the shape of what they're inheriting. It
+shipped as part of [0.1.0](#010---2026-07-24).
 
 ### Added
 

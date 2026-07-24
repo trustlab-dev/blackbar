@@ -1,6 +1,6 @@
 [project]
 name = "blackbar-backend"
-version = "0.1.0rc2"
+version = "0.1.0"
 description = "BlackBar Freedom of Information case management and document redaction system — backend"
 # Note: top-level LICENSE/README live at the repo root one level above this
 # package. Modern setuptools refuses `file = "../LICENSE"` references that
