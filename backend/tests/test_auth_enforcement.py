@@ -78,9 +78,7 @@ def _is_public(path: str) -> bool:
 @pytest.fixture
 async def anon_client(app: FastAPI):
     transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://testserver"
-    ) as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client
 
 
@@ -170,9 +168,7 @@ async def test_authenticated_off_team_user_cannot_reach_objects(
     """A `user` off the case team is forbidden from every object-scoped
     endpoint below, even though authentication and the role gate pass."""
     # Case owned by someone else; our probe user is deliberately not on it.
-    case = make_case(
-        case_team=[{"user_id": "insider-only", "role": "analyst", "status": "active"}]
-    )
+    case = make_case(case_team=[{"user_id": "insider-only", "role": "analyst", "status": "active"}])
     await db.cases.insert_one(case)
     cid = case["id"]
 
@@ -247,6 +243,6 @@ async def test_public_surface_matches_expected_contract(app: FastAPI):
             unexpected.append(template)
     # Informational ceiling: if the public surface grows past this, a new
     # endpoint slid under a public prefix — review it and bump consciously.
-    assert len(unexpected) <= 25, (
-        "public-by-prefix surface grew unexpectedly:\n" + "\n".join(unexpected)
+    assert len(unexpected) <= 25, "public-by-prefix surface grew unexpectedly:\n" + "\n".join(
+        unexpected
     )

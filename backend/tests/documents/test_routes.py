@@ -593,8 +593,7 @@ class TestExportDocumentWithRedactions:
 
         r = await client.get(f"/api/v1/documents/{doc['id']}/export")
         assert r.status_code == 403, (
-            f"IDOR: non-team user exported another case's document "
-            f"(status {r.status_code})"
+            f"IDOR: non-team user exported another case's document " f"(status {r.status_code})"
         )
         # And the original bytes must not have leaked in the body.
         assert pdf not in r.content
@@ -615,9 +614,7 @@ class TestExportDocumentWithRedactions:
             case_team=[{"user_id": user_doc["id"], "role": "analyst", "status": "active"}]
         )
         await db.cases.insert_one(case)
-        doc = make_document(
-            filename="mine.pdf", content=pdf, case_id=case["id"], redactions=[]
-        )
+        doc = make_document(filename="mine.pdf", content=pdf, case_id=case["id"], redactions=[])
         await db.documents.insert_one(doc)
 
         r = await client.get(f"/api/v1/documents/{doc['id']}/export")
@@ -897,9 +894,7 @@ class TestUploadDocument:
     ) -> None:
         client = await authed_client_factory(role="user", email="on-up@example.test")
         me = await db.users.find_one({"email": "on-up@example.test"})
-        case = make_case(
-            case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
-        )
+        case = make_case(case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}])
         await db.cases.insert_one(case)
         from src.documents.processing_service import ProcessingResult, ProcessingStatus
 
@@ -1140,9 +1135,7 @@ class TestGetProcessingStatus:
     ) -> None:
         client = await authed_client_factory(role="user", email="on-ps@example.test")
         me = await db.users.find_one({"email": "on-ps@example.test"})
-        case = make_case(
-            case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
-        )
+        case = make_case(case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}])
         await db.cases.insert_one(case)
         doc = make_document(case_id=case["id"], total_attachments=2, processed_attachments=2)
         await db.documents.insert_one(doc)

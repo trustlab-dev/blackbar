@@ -25,6 +25,9 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 ).toString();
 
 interface Redaction {
+  // Present on persisted redactions; absent on ones not yet saved. The resize
+  // affordance below keys off it, so it must be part of the type.
+  id?: string;
   x: number;
   y: number;
   width: number;

@@ -344,9 +344,7 @@ class TestRecordsConfirmationAuthz:
     ) -> None:
         case_id = await _seed_case(db, case_team=[])
         client: AsyncClient = await authed_client_factory(role="user", email="off-rc@example.com")
-        r = await client.post(
-            f"/api/v1/cases/{case_id}/records-confirmation", json={"notes": "x"}
-        )
+        r = await client.post(f"/api/v1/cases/{case_id}/records-confirmation", json={"notes": "x"})
         assert r.status_code == 403, r.text
 
     async def test_confirm_user_on_team_allowed(
@@ -360,9 +358,7 @@ class TestRecordsConfirmationAuthz:
         case_id = await _seed_case(
             db, case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}]
         )
-        r = await client.post(
-            f"/api/v1/cases/{case_id}/records-confirmation", json={"notes": "x"}
-        )
+        r = await client.post(f"/api/v1/cases/{case_id}/records-confirmation", json={"notes": "x"})
         assert r.status_code == 200, r.text
 
     async def test_get_confirmation_user_off_team_forbidden(

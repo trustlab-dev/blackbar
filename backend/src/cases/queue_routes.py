@@ -59,9 +59,7 @@ def convert_mongo_doc_to_json(doc: dict[str, Any]) -> dict[str, Any]:
                 (
                     convert_mongo_doc_to_json(item)
                     if isinstance(item, dict)
-                    else str(item)
-                    if isinstance(item, ObjectId)
-                    else item
+                    else str(item) if isinstance(item, ObjectId) else item
                 )
                 for item in value
             ]

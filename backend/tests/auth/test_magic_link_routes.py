@@ -343,9 +343,7 @@ class TestDemoLogin:
     it upserts the Jordan Park public user, marks email_verified=true, and
     issues a public-realm JWT."""
 
-    async def test_returns_404_when_flag_unset(
-        self, app, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_returns_404_when_flag_unset(self, app, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("BLACKBAR_DEMO_MODE", raising=False)
         async with _client(app) as c:
             r = await c.post("/api/v1/auth/public/demo-login")
@@ -369,9 +367,9 @@ class TestDemoLogin:
             monkeypatch.setenv("BLACKBAR_DEMO_MODE", value)
             async with _client(app) as c:
                 r = await c.post("/api/v1/auth/public/demo-login")
-            assert r.status_code == 404, (
-                f"BLACKBAR_DEMO_MODE={value!r} should NOT enable demo-login"
-            )
+            assert (
+                r.status_code == 404
+            ), f"BLACKBAR_DEMO_MODE={value!r} should NOT enable demo-login"
 
     async def test_returns_token_when_flag_true(
         self,

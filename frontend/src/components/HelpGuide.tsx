@@ -701,7 +701,9 @@ const HelpGuide: React.FC = () => {
       return (
         item.question.toLowerCase().includes(query) ||
         item.tags.some(tag => tag.toLowerCase().includes(query)) ||
-        (typeof item.answer === 'string' && item.answer.toLowerCase().includes(query))
+        // Every answer is currently JSX, so this narrows to `never`; String()
+        // keeps the branch valid if plain-string answers are added later.
+        (typeof item.answer === 'string' && String(item.answer).toLowerCase().includes(query))
       );
     })
   })).filter(section => section.content.length > 0);

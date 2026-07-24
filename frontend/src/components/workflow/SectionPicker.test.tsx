@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import userEvent from '@testing-library/user-event';
 import { server } from '../../test-utils/msw-handlers';
-import { renderWithProviders, screen, waitFor } from '../../test-utils/render';
+import { renderWithProviders, screen, waitFor, within } from '../../test-utils/render';
 import SectionPicker from './SectionPicker';
 
 beforeEach(() => {
@@ -138,12 +138,18 @@ describe('SectionPicker', () => {
         onChange={onChange}
       />,
     );
+    // Wait for BOTH chips to render, then delete the s13 chip by identifying it
+    // from its content. Indexing into getAllByTestId('CancelIcon') was flaky:
+    // it could run before the second chip mounted, and assumed a chip order.
     await waitFor(() =>
-      expect(screen.getAllByText('s13').length).toBeGreaterThan(0),
+      expect(screen.getAllByTestId('CancelIcon')).toHaveLength(2),
     );
-    // each chip has a delete (cancel) icon button
-    const cancelIcons = screen.getAllByTestId('CancelIcon');
-    await user.click(cancelIcons[0]);
+    const s13Chip = screen
+      .getAllByTestId('CancelIcon')
+      .map((icon) => icon.closest('.MuiChip-root') as HTMLElement | null)
+      .find((chip) => chip?.textContent?.includes('s13'));
+    expect(s13Chip).toBeTruthy();
+    await user.click(within(s13Chip!).getByTestId('CancelIcon'));
     // s13 removed -> remaining s14 becomes primary
     expect(onChange).toHaveBeenCalledWith(['s14'], 's14');
   });
