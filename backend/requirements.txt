@@ -9,7 +9,7 @@ motor>=3.3.0,<4.0.0
 pymongo>=4.6.0,<5.0.0
 # pypdf removed: not imported anywhere (PDF work uses PyMuPDF/fitz and
 # reportlab) and the pinned 4.x line carried 35 known CVEs.
-reportlab>=4.0.0,<5.0.0
+reportlab>=4.0.0,<6.0.0
 openai>=1.10.0,<2.0.0
 anthropic>=0.18.0,<1.0.0
 cohere>=4.0.0,<6.0.0
