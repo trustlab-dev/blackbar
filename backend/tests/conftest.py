@@ -21,7 +21,7 @@ import respx
 from fastapi.testclient import TestClient
 from httpx import ASGITransport
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from testcontainers.mongodb import MongoDbContainer
+from testcontainers.community.mongodb import MongoDbContainer
 
 # Sample fixtures directory (populated in Phase 1 Task 1.16)
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "redaction-samples"
