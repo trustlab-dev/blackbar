@@ -84,8 +84,11 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     correlation_id = generate_correlation_id()
 
     # If the exception already has our standard format, use it
+    # Keep headers such as Retry-After and WWW-Authenticate.
+    headers = getattr(exc, "headers", None)
+
     if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=headers)
 
     # Otherwise, wrap it in standard format
     error_response = create_error_response(
@@ -105,7 +108,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         },
     )
 
-    return JSONResponse(status_code=exc.status_code, content=error_response)
+    return JSONResponse(status_code=exc.status_code, content=error_response, headers=headers)
 
 
 async def validation_exception_handler(

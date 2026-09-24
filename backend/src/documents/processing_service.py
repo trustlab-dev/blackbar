@@ -716,7 +716,9 @@ class DocumentProcessingService:
             return summary
 
         except Exception as e:
-            logger.error(f"AI summary generation failed for {filename}: {str(e)}")
+            # Logged, not swallowed silently (LLM-18); no exception text,
+            # which can carry provider details.
+            logger.error(f"AI summary generation failed: {type(e).__name__}", exc_info=False)
             return None
 
     # =========================================================================
@@ -1131,4 +1133,4 @@ class DocumentProcessingService:
             )
 
         except Exception as e:
-            logger.error(f"Error queuing AI processing: {str(e)}")
+            logger.error(f"Error queuing AI processing for {document_id}: {type(e).__name__}")

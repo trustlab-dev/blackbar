@@ -276,3 +276,109 @@ class TestSentryContextHelpers:
         telemetry.add_sentry_breadcrumb("msg")
         _, kwargs = mock.call_args
         assert kwargs["data"] == {}
+
+
+# ---------------------------------------------------------------------------
+# LLM-15: Sentry init must not crash and must not capture sensitive data
+# ---------------------------------------------------------------------------
+
+
+class TestSentryInitLLM15:
+    def test_real_sdk_init_with_fake_dsn_does_not_crash(self, tmp_path):
+        """Runs the real sentry_sdk.init in a subprocess (so the global SDK
+        state and its integrations do not leak into this test process).
+        `request_bodies` used to raise TypeError and abort startup."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        backend = Path(__file__).resolve().parents[2]
+        env = {
+            **os.environ,
+            "SENTRY_DSN": "https://public@example.invalid/1",
+            "ENVIRONMENT": "test",
+            "PYTHONPATH": str(backend),
+        }
+        code = (
+            "import sentry_sdk\n"
+            "from src.core import telemetry\n"
+            "telemetry._init_sentry()\n"
+            "client = sentry_sdk.get_client()\n"
+            "assert client.is_active(), 'sentry client not active'\n"
+            "opts = client.options\n"
+            "assert opts['send_default_pii'] is False\n"
+            "assert opts['max_request_body_size'] == 'never'\n"
+            "assert opts['include_local_variables'] is False\n"
+            "print('SENTRY_OK')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=backend,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert "SENTRY_OK" in result.stdout, result.stderr[-2000:]
+
+    def test_options_are_valid_sdk_options(self, monkeypatch: pytest.MonkeyPatch):
+        import inspect
+
+        from sentry_sdk.consts import ClientConstructor
+
+        from src.core import telemetry
+
+        monkeypatch.setattr(telemetry, "SENTRY_DSN", "https://public@example.invalid/1")
+        valid = set(inspect.signature(ClientConstructor.__init__).parameters)
+        options = telemetry._sentry_options()
+        assert set(options) <= valid
+        assert "request_bodies" not in options
+
+    def test_init_failure_does_not_raise(self, monkeypatch: pytest.MonkeyPatch):
+        from src.core import telemetry
+
+        monkeypatch.setattr(telemetry, "SENTRY_DSN", "https://public@example.invalid/1")
+        with patch.object(telemetry.sentry_sdk, "init", side_effect=TypeError("bad option")):
+            telemetry._init_sentry()  # must not raise
+
+    def test_before_send_strips_bodies_auth_and_llm_extras(self):
+        from src.core.telemetry import _sentry_before_send
+
+        event = {
+            "request": {
+                "url": "https://generativelanguage.googleapis.com/v1/m?key=AIzaSECRETSECRETSECRET1",
+                "headers": {"Authorization": "Bearer abc", "X-Goog-Api-Key": "AIzaX"},
+                "data": {"document_text": "Alice Smith SIN 123"},
+                "query_string": "key=AIzaSECRET",
+                "cookies": {"session": "s"},
+            },
+            "extra": {"document_text": "Alice Smith", "llm_prompt": "p", "case_id": "c1"},
+            "contexts": {"llm": {"prompt": "x"}, "runtime": {"name": "CPython"}},
+            "exception": {
+                "values": [
+                    {
+                        "value": "Client error for url '...?key=AIzaSECRETSECRETSECRET1'",
+                        "stacktrace": {"frames": [{"function": "f", "vars": {"text": "Alice"}}]},
+                    }
+                ]
+            },
+            "breadcrumbs": {
+                "values": [
+                    {"category": "httplib", "data": {"url": "u", "http.query": "key=x"}},
+                    {"category": "log", "message": "Bearer sk-abcdefghijklmnop"},
+                ]
+            },
+        }
+        out = _sentry_before_send(event, hint=None)
+        dumped = str(out)
+        assert "Alice" not in dumped
+        assert "AIzaSECRET" not in dumped
+        assert "sk-abcdefghijklmnop" not in dumped
+        assert out["request"]["headers"]["Authorization"] == "[FILTERED]"
+        assert out["request"]["headers"]["X-Goog-Api-Key"] == "[FILTERED]"
+        assert out["request"]["data"] == "[FILTERED]"
+        assert out["extra"]["case_id"] == "c1"
+        assert out["contexts"]["llm"] == "[FILTERED]"
+        assert out["contexts"]["runtime"] == {"name": "CPython"}
+        assert len(out["breadcrumbs"]["values"]) == 1

@@ -16,13 +16,10 @@ Strategy:
   variants reach 100% on their own.
 
 Source-API pinning notes (candidates for audit Section 11):
-- `src.admin.config_routes.get_system_config()` is a 0-arg coroutine,
-  but `processing_service` calls it as `get_system_config(self.db)`.
-  In production this raises TypeError, which is then swallowed by the
-  surrounding `try/except` in both `_generate_summary` and
-  `_queue_ai_processing`. Net effect: AI summary and background AI
-  processing are silently disabled regardless of org settings. Tests
-  pin this by mocking `get_system_config` with a flexible signature.
+- `src.admin.config_routes.get_system_config(database=None)` accepts the
+  service's db handle (LLM-18: it used to take no arguments, so the call
+  raised TypeError and upload-time AI never ran). `TestUploadTimeAIWithRealConfig`
+  exercises the unpatched path.
 - `_generate_summary` and `_queue_ai_processing` catch all exceptions
   and return None / no-op rather than propagating. Tests pin the
   swallow behavior.
@@ -1119,6 +1116,63 @@ class TestQueueAIProcessing:
             # Should not raise.
             await service._queue_ai_processing("d1", bg)
         assert len(bg.tasks) == 0
+
+
+class TestUploadTimeAIWithRealConfig:
+    """LLM-18: the real get_system_config(self.db) call works, reads the org
+    settings document (not the neighbouring global_llm_config document),
+    and upload-time AI runs only when auto-generate is on."""
+
+    async def _seed(self, db, auto_generate: bool) -> None:
+        # Inserted first so a find_one({}) lookup would have picked it.
+        await db.system_config.insert_one({"id": "global_llm_config", "default_llm_id": "x"})
+        await db.system_config.insert_one(
+            {"id": "system_configuration", "auto_generate_ai_suggestions": auto_generate}
+        )
+
+    async def test_summary_runs_when_enabled(self, service, db) -> None:
+        await self._seed(db, True)
+        with patch(
+            "src.documents.routes.generate_document_summary",
+            AsyncMock(return_value="AI summary text"),
+        ) as gen:
+            summary = await service._generate_summary(b"%PDF", "doc.pdf", "application/pdf")
+        assert summary == "AI summary text"
+        gen.assert_awaited_once()
+
+    async def test_summary_skipped_when_disabled(self, service, db) -> None:
+        await self._seed(db, False)
+        with patch("src.documents.routes.generate_document_summary", AsyncMock()) as gen:
+            summary = await service._generate_summary(b"%PDF", "doc.pdf", "application/pdf")
+        assert summary is None
+        gen.assert_not_called()
+
+    async def test_background_suggestions_queued_when_enabled(
+        self, service, db, monkeypatch
+    ) -> None:
+        from fastapi import BackgroundTasks
+
+        import src.database as db_mod
+
+        monkeypatch.setattr(db_mod, "db", db, raising=False)
+        await self._seed(db, True)
+        await db.documents.insert_one({"id": "d-real"})
+        bg = BackgroundTasks()
+        with patch("src.documents.routes.generate_ai_suggestions_async", AsyncMock()):
+            await service._queue_ai_processing("d-real", bg)
+        assert len(bg.tasks) == 1
+
+    async def test_failure_is_logged(self, service, caplog) -> None:
+        import logging
+
+        caplog.set_level(logging.ERROR)
+        with patch(
+            "src.admin.config_routes.get_system_config",
+            AsyncMock(side_effect=RuntimeError("secret detail")),
+        ):
+            assert await service._generate_summary(b"%PDF", "doc.pdf", "application/pdf") is None
+        assert "AI summary generation failed: RuntimeError" in caplog.text
+        assert "secret detail" not in caplog.text
 
 
 # ===========================================================================

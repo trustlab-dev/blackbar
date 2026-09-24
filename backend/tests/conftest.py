@@ -55,6 +55,8 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ.setdefault("JWT_EXPIRATION", "60")
     os.environ.setdefault("LLM_API_KEY_ENCRYPTION_KEY", _stable_fernet_key())
     os.environ.setdefault("ENVIRONMENT", "test")
+    # No real backoff sleeps when LLM retries are exercised against mocks.
+    os.environ.setdefault("LLM_RETRY_BASE_DELAY", "0")
     os.environ.setdefault("MONGODB_DB_NAME", "blackbar_test")
     os.environ.setdefault("ALLOWED_ORIGINS", "http://testserver")
     # MONGODB_URI gets overwritten by `mongo_uri` fixture once the
@@ -255,6 +257,25 @@ def _reset_rate_limits() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
+# LLM endpoint DNS isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_llm_endpoint_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM endpoint validation resolves hostnames to reject private ranges.
+    Tests must not depend on real DNS: by default every name is treated as
+    unresolvable (accepted); tests that need an answer patch
+    ``src.llm.safety._resolve`` themselves."""
+    import src.llm.safety as llm_safety
+
+    async def _unresolvable(host: str) -> list[str]:
+        raise OSError(f"DNS disabled in tests ({host})")
+
+    monkeypatch.setattr(llm_safety, "_resolve", _unresolvable)
+
+
+# ---------------------------------------------------------------------------
 # External service mocks
 # ---------------------------------------------------------------------------
 
@@ -289,7 +310,7 @@ def mock_anthropic(respx_mock: respx.MockRouter) -> respx.MockRouter:
             "type": "message",
             "role": "assistant",
             "content": [{"type": "text", "text": "ok"}],
-            "model": "claude-3-5-sonnet-20241022",
+            "model": "claude-sonnet-5",
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 1, "output_tokens": 1},
         }

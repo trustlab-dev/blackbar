@@ -78,6 +78,125 @@ def public_base_url() -> str:
     return base.rstrip("/")
 
 
+def llm_encryption_key_problem(raw: str) -> str | None:
+    """Why ``raw`` (one Fernet key, or several comma-separated) is unusable."""
+    from cryptography.fernet import Fernet
+
+    keys = _split_csv(raw)
+    if not keys:
+        return "is empty"
+    for key in keys:
+        try:
+            Fernet(key.encode())
+        except (ValueError, TypeError):
+            return "is not a valid Fernet key (32 url-safe base64-encoded bytes)"
+    return None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
+class LLMRuntimeSettings:
+    """LLM egress settings, read from the environment at call time so that
+    deployments and tests can change them without a reload.
+
+    LLM_ALLOW_PRIVATE_ENDPOINTS   allow loopback/private-network endpoints
+                                  (local model servers); default false
+    LLM_SEND_CASE_CONTEXT         include case title / filename in prompts;
+                                  default false (data minimisation)
+    LLM_MAX_ANALYSIS_CHARS        cap on characters analysed per document
+                                  (default 200000)
+    LLM_CHUNK_CHARS / LLM_CHUNK_OVERLAP   chunk size and overlap for long
+                                  documents (default 12000 / 400)
+    LLM_MAX_SUGGESTIONS           cap on suggestions kept per document (200)
+    LLM_MAX_RETRIES               retries on 429/5xx/connect errors (2)
+    LLM_RETRY_BASE_DELAY          first backoff delay in seconds (1.0)
+    LLM_CONNECT_TIMEOUT / LLM_READ_TIMEOUT  httpx timeouts (10 / 120 s)
+    RATE_LIMIT_LLM                per-user limit on user-triggered LLM calls
+                                  ("10/minute")
+    LLM_REGENERATE_COOLDOWN_SECONDS  per-document cooldown between LLM
+                                  analyses (60)
+    AI_FEEDBACK_RETENTION_DAYS    TTL for ai_feedback records (90)
+    """
+
+    @property
+    def allow_private_endpoints(self) -> bool:
+        return _env_bool("LLM_ALLOW_PRIVATE_ENDPOINTS")
+
+    @property
+    def send_case_context(self) -> bool:
+        return _env_bool("LLM_SEND_CASE_CONTEXT")
+
+    @property
+    def max_analysis_chars(self) -> int:
+        return _env_int("LLM_MAX_ANALYSIS_CHARS", 200_000, minimum=1)
+
+    @property
+    def chunk_chars(self) -> int:
+        return _env_int("LLM_CHUNK_CHARS", 12_000, minimum=500)
+
+    @property
+    def chunk_overlap(self) -> int:
+        return min(_env_int("LLM_CHUNK_OVERLAP", 400), self.chunk_chars // 2)
+
+    @property
+    def max_suggestions(self) -> int:
+        return _env_int("LLM_MAX_SUGGESTIONS", 200, minimum=1)
+
+    @property
+    def max_retries(self) -> int:
+        return _env_int("LLM_MAX_RETRIES", 2)
+
+    @property
+    def retry_base_delay(self) -> float:
+        return _env_float("LLM_RETRY_BASE_DELAY", 1.0)
+
+    @property
+    def connect_timeout(self) -> float:
+        return _env_float("LLM_CONNECT_TIMEOUT", 10.0, minimum=0.1)
+
+    @property
+    def read_timeout(self) -> float:
+        return _env_float("LLM_READ_TIMEOUT", 120.0, minimum=0.1)
+
+    @property
+    def user_rate_limit(self) -> str:
+        return os.getenv("RATE_LIMIT_LLM", "10/minute")
+
+    @property
+    def regenerate_cooldown_seconds(self) -> int:
+        return _env_int("LLM_REGENERATE_COOLDOWN_SECONDS", 60)
+
+    @property
+    def feedback_retention_days(self) -> int:
+        return _env_int("AI_FEEDBACK_RETENTION_DAYS", 90, minimum=1)
+
+    @property
+    def is_production(self) -> bool:
+        return is_production_environment(os.getenv("ENVIRONMENT", "development"))
+
+
+llm_settings = LLMRuntimeSettings()
+
+
 class Config:
     """Application configuration with validation"""
 
@@ -92,8 +211,8 @@ class Config:
         # JWT Secret
         self.JWT_SECRET = self._load_jwt_secret()
 
-        # Optional OpenAI key — primary configuration is in the admin LLM settings
-        self.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+        # Fernet key(s) protecting stored LLM provider API keys (LLM-19).
+        self.LLM_API_KEY_ENCRYPTION_KEY = self._load_llm_encryption_key()
 
         # CORS - Allow localhost for development
         origins = _split_csv(os.getenv("ALLOWED_ORIGINS", ""))
@@ -148,6 +267,31 @@ class Config:
         warnings.warn(message, RuntimeWarning, stacklevel=2)
         return secrets.token_urlsafe(48)
 
+    def _load_llm_encryption_key(self) -> str | None:
+        """Validate LLM_API_KEY_ENCRYPTION_KEY once at startup (LLM-19).
+
+        There is no fallback key. In production a missing or malformed key
+        stops the process; elsewhere it is reported and LLM key storage
+        fails closed on first use.
+        """
+        raw = os.getenv("LLM_API_KEY_ENCRYPTION_KEY") or ""
+        problem = "is not set" if not raw else llm_encryption_key_problem(raw)
+        if problem is None:
+            return raw
+        guidance = (
+            'Generate one with: python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"'
+        )
+        if self.IS_PRODUCTION:
+            raise ValueError(
+                f"LLM_API_KEY_ENCRYPTION_KEY {problem}; refusing to start in production. {guidance}"
+            )
+        logger.warning(
+            f"LLM_API_KEY_ENCRYPTION_KEY {problem}. LLM provider keys cannot be stored or "
+            f"used until it is fixed. {guidance}"
+        )
+        return None
+
     def _load_access_token_minutes(self) -> int:
         raw = os.getenv("JWT_EXPIRATION")
         if not raw:
@@ -186,6 +330,5 @@ config = Config()
 JWT_SECRET = config.JWT_SECRET
 ALGORITHM = config.ALGORITHM
 MONGODB_URI = config.MONGODB_URI
-OPENAI_API_KEY = config.OPENAI_API_KEY
 ALLOWED_ORIGINS = config.ALLOWED_ORIGINS
 ACCESS_TOKEN_EXPIRE_MINUTES = config.ACCESS_TOKEN_EXPIRE_MINUTES

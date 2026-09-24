@@ -2083,7 +2083,13 @@ class TestGenerateAISuggestionsAsync:
         await db.documents.insert_one(doc)
 
         async def fake_suggestions(text, ctx=None):
-            return {"suggestions": [{"text": "Alice", "category": "name"}], "summary": "1 PII"}
+            return {
+                "suggestions": [{"text": "Alice", "category": "name"}],
+                "summary": "1 PII",
+                "provider": "openai",
+                "model": "test-model",
+                "analysis_truncated": False,
+            }
 
         def fake_enrich(suggestions, pdf, text_data):
             return suggestions
@@ -2097,6 +2103,10 @@ class TestGenerateAISuggestionsAsync:
         assert updated["processing_status"] == "ai_complete"
         assert updated["ai_suggestions"]["suggestions"] == [{"text": "Alice", "category": "name"}]
         assert updated["ai_suggestions"]["summary"] == "1 PII"
+        # LLM-16: provenance recorded
+        assert updated["ai_suggestions"]["method"] == "llm"
+        assert updated["ai_suggestions"]["provider"] == "openai"
+        assert updated["ai_suggestions"]["model"] == "test-model"
 
     async def test_doc_not_found_returns_early(
         self, db: AsyncIOMotorDatabase, patch_routes_db
@@ -2178,8 +2188,13 @@ class TestGenerateAISuggestionsAsync:
             lambda s, p, t: s,
         )
 
+        # LLM-17: the case title is not sent by default...
         await generate_ai_suggestions_async("ai-with-case", db=db)
-        assert captured["ctx"] is not None
+        assert captured["ctx"] is None
+
+        # ...only when LLM_SEND_CASE_CONTEXT opts in.
+        monkeypatch.setenv("LLM_SEND_CASE_CONTEXT", "true")
+        await generate_ai_suggestions_async("ai-with-case", db=db)
         assert "Records about Contract X" in captured["ctx"]
 
     async def test_timeout_writes_timeout_status(
@@ -2223,7 +2238,27 @@ class TestGenerateAISuggestionsAsync:
 
         updated = await db.documents.find_one({"id": "ai-err"})
         assert updated["processing_status"] == "ai_error"
-        assert "exploded" in updated["ai_suggestions"]["error"]
+        # LLM-02: no raw exception text is stored
+        assert "exploded" not in str(updated["ai_suggestions"])
+        assert updated["ai_suggestions"]["error"] == "analysis_failed"
+        assert updated["ai_suggestions"]["reference"] in updated["ai_suggestions"]["summary"]
+
+    async def test_no_egress_error_is_not_cached(
+        self, db: AsyncIOMotorDatabase, patch_routes_db, monkeypatch
+    ) -> None:
+        from src.documents import routes as documents_routes
+        from src.documents.routes import generate_ai_suggestions_async
+
+        await db.documents.insert_one(make_document(id="ai-off", extracted_text="text"))
+
+        async def disabled(text, ctx=None):
+            return {"suggestions": [], "summary": "AI disabled", "error_code": "ai_disabled"}
+
+        monkeypatch.setattr(documents_routes, "get_redaction_suggestions", disabled)
+        await generate_ai_suggestions_async("ai-off", timeout=5, db=db)
+        updated = await db.documents.find_one({"id": "ai-off"})
+        assert updated["processing_status"] == "ai_unavailable"
+        assert "ai_suggestions" not in updated
 
     async def test_no_db_provided_uses_get_database(
         self, db: AsyncIOMotorDatabase, patch_routes_db, monkeypatch

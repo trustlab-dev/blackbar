@@ -2,7 +2,8 @@
 
 Phase 2.7. Target >=80% line coverage on `src/admin/llm_routes.py`.
 
-Endpoint surface (8 endpoints; all admin-gated via `require_role(['admin'])`,
+Endpoint surface (8 endpoints; all gated via `require_role(['owner', 'admin'])`
+(DB-backed role, LLM-20),
 all mounted at /api/v1/llm/...):
     POST   /llm/configs                  -> create
     GET    /llm/configs                  -> list (with ?enabled_only=)
@@ -17,8 +18,7 @@ Reality pins:
 - `LLMRepository(db)` is constructed inside Depends() helpers at request
   time, so patching `src.admin.llm_routes.db` is sufficient for full
   isolation — no module-level collection capture (unlike admin/routes.py).
-- `require_role(['admin'])` uses `request.state.roles` (set by
-  AuthMiddleware), NOT `get_current_user`. JWT realm-based gate.
+- `require_role(['owner', 'admin'])` re-reads the role from the DB.
 - DELETE protection: deleting the configured global default returns 400
   with explicit message; other deletes return success {"message": ...}.
 - LLM /test endpoint exercises the FULL provider HTTP path via
@@ -28,8 +28,8 @@ Reality pins:
   human-friendly success/failure message.
 - A disabled config returns `{"success": False, "message": "...
   disabled"}` without calling the LLM (early return).
-- Error paths in /test return success=False with the failure message
-  baked into the response (no 500 surfacing).
+- Error paths in /test return success=False with a generic message and a
+  reference id; provider error text never reaches the response (LLM-02).
 """
 
 from __future__ import annotations
@@ -535,14 +535,14 @@ class TestLLMTestConnection:
             config_id="ok-anthropic",
             request_format="anthropic",
             api_endpoint="https://api.anthropic.com/v1/messages",
-            model_name="claude-3-5-sonnet-20241022",
+            model_name="claude-sonnet-5",
         )
         respx.post("https://api.anthropic.com/v1/messages").mock(
             return_value=Response(
                 200,
                 json={
                     "content": [{"type": "text", "text": "Anthropic OK"}],
-                    "model": "claude-3-5-sonnet-20241022",
+                    "model": "claude-sonnet-5",
                 },
             )
         )
@@ -565,13 +565,11 @@ class TestLLMTestConnection:
             db,
             config_id="ok-google",
             request_format="google",
-            api_endpoint="https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent",
-            model_name="gemini-pro",
+            api_endpoint="https://generativelanguage.googleapis.com/v1beta/models/test-gemini-model:generateContent",
+            model_name="test-gemini-model",
         )
-        # Google appends ?key=<api_key> to the URL; respx.post pattern
-        # matches the base URL regardless of query string by default
         respx.post(
-            url__startswith="https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/test-gemini-model:generateContent"
         ).mock(
             return_value=Response(
                 200,
@@ -607,7 +605,7 @@ class TestLLMTestConnection:
             config_id="ok-cohere",
             request_format="cohere",
             api_endpoint="https://api.cohere.com/v1/chat",
-            model_name="command-r",
+            model_name="test-command-model",
         )
         respx.post("https://api.cohere.com/v1/chat").mock(
             return_value=Response(200, json={"text": "Cohere OK"})
@@ -666,3 +664,231 @@ class TestLLMTestConnection:
         client: AsyncClient = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/llm/test", json={"config_id": "rbac-1"})
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Security-review 2026-09: LLM-02, LLM-05, LLM-09, LLM-20
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerAccess:
+    async def test_owner_can_list(self, authed_client_factory, patch_routes_db) -> None:
+        client: AsyncClient = await authed_client_factory(role="owner")
+        r = await client.get("/api/v1/llm/configs")
+        assert r.status_code == 200
+
+
+class TestEndpointValidation:
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://api.example.com/v1/chat/completions",
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.0.0.5/v1/chat/completions",
+            "http://127.0.0.1:11434/v1/chat/completions",
+            "https://metadata.google.internal/computeMetadata",
+            "https://api.example.com/v1/chat?key=AIzaSECRET",
+        ],
+    )
+    async def test_create_rejects_unsafe_endpoints(
+        self, authed_client_factory, patch_routes_db, endpoint: str
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post("/api/v1/llm/configs", json=_create_payload(api_endpoint=endpoint))
+        assert r.status_code == 422, r.text
+
+    async def test_hostname_resolving_to_private_range_rejected(
+        self, authed_client_factory, patch_routes_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import src.llm.safety as llm_safety
+
+        async def _private(host: str) -> list[str]:
+            return ["192.168.1.20"]
+
+        monkeypatch.setattr(llm_safety, "_resolve", _private)
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post(
+            "/api/v1/llm/configs",
+            json=_create_payload(api_endpoint="https://llm.corp.example/v1/chat"),
+        )
+        assert r.status_code == 422
+        assert "LLM_ALLOW_PRIVATE_ENDPOINTS" in r.text
+
+    async def test_private_endpoint_allowed_with_opt_in(
+        self, authed_client_factory, patch_routes_db, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_ALLOW_PRIVATE_ENDPOINTS", "true")
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post(
+            "/api/v1/llm/configs",
+            json=_create_payload(api_endpoint="http://localhost:11434/v1/chat/completions"),
+        )
+        assert r.status_code == 200, r.text
+        # Link-local stays blocked even with the opt-in.
+        r = await client.post(
+            "/api/v1/llm/configs",
+            json=_create_payload(api_endpoint="https://169.254.169.254/x"),
+        )
+        assert r.status_code == 422
+
+
+class TestKeyReentryAndMasking:
+    async def test_endpoint_change_clears_key_and_reports_it(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        await _seed_config(db, config_id="k-1")
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.put(
+            "/api/v1/llm/configs/k-1",
+            json={"api_endpoint": "https://proxy.example.com/v1/chat/completions"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["api_key_set"] is False
+        stored = await db.llm_configs.find_one({"id": "k-1"})
+        assert stored["api_key_encrypted"] == ""
+
+    async def test_endpoint_change_with_key_keeps_config_usable(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        await _seed_config(db, config_id="k-2")
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.put(
+            "/api/v1/llm/configs/k-2",
+            json={
+                "api_endpoint": "https://proxy.example.com/v1/chat/completions",
+                "api_key": "sk-new-key",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["api_key_set"] is True
+
+    async def test_update_to_unsafe_endpoint_rejected(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        await _seed_config(db, config_id="k-3")
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.put(
+            "/api/v1/llm/configs/k-3", json={"api_endpoint": "http://attacker.example/v1"}
+        )
+        assert r.status_code == 422
+        stored = await db.llm_configs.find_one({"id": "k-3"})
+        assert stored["api_endpoint"] == "https://api.openai.com/v1/chat/completions"
+
+    async def test_header_values_masked_in_responses(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post(
+            "/api/v1/llm/configs",
+            json=_create_payload(headers={"api-key": "azure-secret-value"}),
+        )
+        assert r.status_code == 200
+        assert "azure-secret-value" not in r.text
+        config_id = r.json()["id"]
+        r = await client.get(f"/api/v1/llm/configs/{config_id}")
+        assert r.json()["headers"] == {"api-key": "********"}
+        r = await client.get("/api/v1/llm/configs")
+        assert "azure-secret-value" not in r.text
+        stored = await db.llm_configs.find_one({"id": config_id})
+        assert stored["headers"] == {"api-key": "azure-secret-value"}
+
+
+class TestAuditLog:
+    async def test_every_change_is_audited_without_secrets(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post(
+            "/api/v1/llm/configs", json=_create_payload(api_key="sk-audit-secret-1234")
+        )
+        config_id = r.json()["id"]
+        await client.put(
+            f"/api/v1/llm/configs/{config_id}",
+            json={"api_endpoint": "https://proxy.example.com/v1/chat", "model_name": "m2"},
+        )
+        await _seed_config(db, config_id="other")
+        await client.put("/api/v1/llm/default/other")
+        await client.delete(f"/api/v1/llm/configs/{config_id}")
+
+        entries = await db.audit_logs.find({"category": "llm_config"}).to_list(None)
+        actions = [e["action"] for e in entries]
+        assert actions == [
+            "llm_config_created",
+            "llm_config_updated",
+            "llm_default_set",
+            "llm_config_deleted",
+        ]
+        assert all(e["actor_id"] for e in entries)
+        update = entries[1]["details"]
+        assert update["endpoint_host_before"] == "api.openai.com"
+        assert update["endpoint_host_after"] == "proxy.example.com"
+        assert update["api_key_cleared"] is True
+        assert "api_endpoint" in update["changed_fields"]
+        assert "sk-audit-secret-1234" not in str(entries)
+
+
+class TestConnectionTestSafety:
+    @respx.mock
+    async def test_google_401_does_not_leak_key(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        endpoint = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "test-gemini-model:generateContent"
+        )
+        await _seed_config(
+            db,
+            config_id="g-401",
+            request_format="google",
+            api_endpoint=endpoint,
+            api_key_plaintext="AIzaSyROUTELEAKROUTELEAKROUTE12",
+        )
+        respx.post(endpoint).mock(
+            return_value=Response(
+                401,
+                json={"error": {"message": "key AIzaSyROUTELEAKROUTELEAKROUTE12 is invalid"}},
+            )
+        )
+        caplog.set_level(logging.DEBUG)
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post("/api/v1/llm/test", json={"config_id": "g-401"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is False
+        assert body["reference"]
+        assert "AIzaSyROUTELEAK" not in r.text
+        assert "AIzaSyROUTELEAK" not in caplog.text
+        # The key travels in a header, not the URL.
+        sent = respx.calls.last.request
+        assert "key=" not in str(sent.url)
+
+    @respx.mock
+    async def test_connection_test_sends_system_and_user_messages(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        import json
+
+        await _seed_config(
+            db,
+            config_id="a-sys",
+            request_format="anthropic",
+            api_endpoint="https://api.anthropic.com/v1/messages",
+            model_name="claude-sonnet-5",
+        )
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=Response(
+                200, json={"content": [{"type": "text", "text": '{"status": "ok"}'}]}
+            )
+        )
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post("/api/v1/llm/test", json={"config_id": "a-sys"})
+        assert r.json()["success"] is True
+        sent = json.loads(respx.calls.last.request.content)
+        assert sent["system"]
+        assert [m["role"] for m in sent["messages"]] == ["user"]

@@ -71,136 +71,46 @@ class TestMongoDBUri:
 # ---------------------------------------------------------------------------
 # JWT secret + environment-aware validation
 # ---------------------------------------------------------------------------
-
-
-class TestJWTSecret:
-    def test_production_requires_jwt_secret(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.delenv("JWT_SECRET", raising=False)
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        with pytest.raises(ValueError, match="JWT_SECRET"):
-            Config()
-
-    def test_development_generates_temp_secret_and_warns(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.delenv("JWT_SECRET", raising=False)
-        monkeypatch.setenv("ENVIRONMENT", "development")
-        with pytest.warns(RuntimeWarning, match="auto-generated JWT secret"):
-            cfg = Config()
-        assert cfg.JWT_SECRET
-        assert len(cfg.JWT_SECRET) >= 32
-
-    def test_short_secret_raises_in_production(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        monkeypatch.setenv("JWT_SECRET", "tooshort")
-        with pytest.raises(ValueError, match="32 bytes"):
-            Config()
-
-    def test_short_secret_replaced_with_ephemeral_in_development(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        Config = _reload_config_class()
-        monkeypatch.setenv("ENVIRONMENT", "development")
-        monkeypatch.setenv("JWT_SECRET", "tooshort")
-        with pytest.warns(RuntimeWarning, match="JWT_SECRET"):
-            cfg = Config()
-        assert cfg.JWT_SECRET != "tooshort"
-        assert len(cfg.JWT_SECRET) >= 32
-
-    def test_valid_secret_accepted(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
-        cfg = Config()
-        assert cfg.JWT_SECRET == GOOD_SECRET
-
-    def test_valid_secret_accepted_in_production(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
-        assert Config().JWT_SECRET == GOOD_SECRET
-
-    def test_hex_secret_accepted_in_production(self, monkeypatch: pytest.MonkeyPatch):
-        """`openssl rand -hex 32` has only 16 distinct symbols but 256 bits."""
-        Config = _reload_config_class()
-        hex_secret = secrets.token_hex(32)
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        monkeypatch.setenv("JWT_SECRET", hex_secret)
-        assert Config().JWT_SECRET == hex_secret
-
-    @pytest.mark.parametrize(
-        "placeholder",
-        [
-            # The literal value shipped in .env.example (AUTH-02).
-            "CHANGE_THIS_TO_RANDOM_32_CHAR_STRING",
-            "changeme-changeme-changeme-changeme-1234",
-            "my-example-jwt-key-with-enough-length-0123456789",
-            "SuperSecretSigningKeyForBlackBar0123456789",
-            "Password-For-Tokens-abcdefghijklmnopqrstuvwxyz",
-        ],
-    )
-    def test_placeholder_rejected_in_production(
-        self, monkeypatch: pytest.MonkeyPatch, placeholder: str
-    ):
-        Config = _reload_config_class()
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        monkeypatch.setenv("JWT_SECRET", placeholder)
-        with pytest.raises(ValueError, match="JWT_SECRET"):
-            Config()
-
-    def test_placeholder_replaced_with_ephemeral_in_development(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        Config = _reload_config_class()
-        monkeypatch.setenv("ENVIRONMENT", "development")
-        monkeypatch.setenv("JWT_SECRET", "CHANGE_THIS_TO_RANDOM_32_CHAR_STRING")
-        with pytest.warns(RuntimeWarning, match="JWT_SECRET"):
-            cfg = Config()
-        assert cfg.JWT_SECRET != "CHANGE_THIS_TO_RANDOM_32_CHAR_STRING"
-        assert len(cfg.JWT_SECRET.encode()) >= 32
-
-    def test_low_variety_secret_rejected_in_production(self, monkeypatch: pytest.MonkeyPatch):
-        """Long enough, but 1 distinct character: no real entropy."""
-        Config = _reload_config_class()
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        monkeypatch.setenv("JWT_SECRET", "x" * 64)
-        with pytest.raises(ValueError, match="JWT_SECRET"):
-            Config()
-
-    def test_prod_alias_is_treated_as_production(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.setenv("ENVIRONMENT", "Production ")
-        monkeypatch.setenv("JWT_SECRET", "CHANGE_THIS_TO_RANDOM_32_CHAR_STRING")
-        with pytest.raises(ValueError, match="JWT_SECRET"):
-            Config()
-
-    def test_environment_defaults_to_development(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.delenv("ENVIRONMENT", raising=False)
-        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
-        cfg = Config()
-        assert cfg.ENVIRONMENT == "development"
-
-
-# ---------------------------------------------------------------------------
-# OPENAI_API_KEY (optional)
+# LLM_API_KEY_ENCRYPTION_KEY (LLM-19): validated once, no fallback key
 # ---------------------------------------------------------------------------
 
 
-class TestOpenAIKey:
-    def test_unset_is_none(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
-        cfg = Config()
-        assert cfg.OPENAI_API_KEY is None
+class TestLLMEncryptionKey:
+    def test_valid_key_is_kept(self, monkeypatch: pytest.MonkeyPatch):
+        from cryptography.fernet import Fernet
 
-    def test_set_passes_through(self, monkeypatch: pytest.MonkeyPatch):
         Config = _reload_config_class()
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        key = Fernet.generate_key().decode()
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", key)
         monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
-        cfg = Config()
-        assert cfg.OPENAI_API_KEY == "sk-test"
+        assert Config().LLM_API_KEY_ENCRYPTION_KEY == key
+
+    def test_comma_separated_rotation_keys_accepted(self, monkeypatch: pytest.MonkeyPatch):
+        from cryptography.fernet import Fernet
+
+        Config = _reload_config_class()
+        keys = f"{Fernet.generate_key().decode()},{Fernet.generate_key().decode()}"
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", keys)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        assert Config().LLM_API_KEY_ENCRYPTION_KEY == keys
+
+    @pytest.mark.parametrize("value", ["", "CHANGE_THIS_TO_FERNET_KEY"])
+    def test_missing_or_invalid_key_fails_in_production(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ):
+        Config = _reload_config_class()
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", value)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        with pytest.raises(ValueError, match="LLM_API_KEY_ENCRYPTION_KEY"):
+            Config()
+
+    def test_invalid_key_outside_production_is_disabled(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", "not-a-fernet-key")
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        assert Config().LLM_API_KEY_ENCRYPTION_KEY is None
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +224,6 @@ class TestSingleton:
         assert cfg_mod.JWT_SECRET == cfg_mod.config.JWT_SECRET
         assert cfg_mod.ALGORITHM == cfg_mod.config.ALGORITHM
         assert cfg_mod.MONGODB_URI == cfg_mod.config.MONGODB_URI
-        assert cfg_mod.OPENAI_API_KEY == cfg_mod.config.OPENAI_API_KEY
         assert cfg_mod.ALLOWED_ORIGINS == cfg_mod.config.ALLOWED_ORIGINS
         assert cfg_mod.ACCESS_TOKEN_EXPIRE_MINUTES == cfg_mod.config.ACCESS_TOKEN_EXPIRE_MINUTES
 

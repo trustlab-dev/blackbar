@@ -8,7 +8,7 @@ from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from .encryption import encrypt_api_key
-from .models import LLMConfig, LLMConfigCreate, LLMConfigUpdate
+from .models import MASKED_HEADER_VALUE, LLMConfig, LLMConfigCreate, LLMConfigUpdate, RequestFormat
 
 
 class LLMRepository:
@@ -48,23 +48,48 @@ class LLMRepository:
         return configs
 
     async def update(self, config_id: str, update_data: LLMConfigUpdate) -> LLMConfig | None:
-        """Update an LLM configuration"""
+        """Update an LLM configuration.
+
+        LLM-05: changing ``api_endpoint`` or ``request_format`` without
+        supplying a new ``api_key`` clears the stored key, so a stored
+        credential is never sent to a new destination. Header values equal
+        to ``MASKED_HEADER_VALUE`` keep their stored value.
+        """
+        current = await self.get_by_id(config_id)
+        if current is None:
+            return None
+
         update_dict = {k: v for k, v in update_data.model_dump().items() if v is not None}
-
         if not update_dict:
-            return await self.get_by_id(config_id)
+            return current
 
-        # Handle API key re-encryption if provided
-        if "api_key" in update_dict:
+        if "headers" in update_dict:
+            stored = current.headers or {}
+            update_dict["headers"] = {
+                name: (stored.get(name, "") if value == MASKED_HEADER_VALUE else value)
+                for name, value in update_dict["headers"].items()
+            }
+
+        endpoint_changed = (
+            "api_endpoint" in update_dict and update_dict["api_endpoint"] != current.api_endpoint
+        )
+        format_changed = "request_format" in update_dict and (
+            RequestFormat(update_dict["request_format"]) != current.request_format
+        )
+
+        if update_dict.get("api_key"):
             update_dict["api_key_encrypted"] = encrypt_api_key(update_dict.pop("api_key"))
+        else:
+            update_dict.pop("api_key", None)
+            if endpoint_changed or format_changed:
+                update_dict["api_key_encrypted"] = ""
 
         update_dict["updated_at"] = datetime.utcnow()
 
         result = await self.collection.update_one({"id": config_id}, {"$set": update_dict})
-
-        if result.modified_count > 0:
-            return await self.get_by_id(config_id)
-        return None
+        if result.matched_count == 0:
+            return None
+        return await self.get_by_id(config_id)
 
     async def delete(self, config_id: str) -> bool:
         """Delete an LLM configuration"""

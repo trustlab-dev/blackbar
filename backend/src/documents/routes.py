@@ -63,8 +63,8 @@ from .redaction_store import assert_not_conversion_failed, load_document_pdf
 # module. Long-term direction: processing_service should import the
 # originals directly from utils/. Until then, these re-exports must stay.
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Module logger only: configuring the root logger here overrode the app's
+# logging setup on import (LLM-10).
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -723,42 +723,34 @@ async def generate_ai_suggestions_async(
     db=None,  # Accept existing connection
 ):
     """
-    Background task to generate AI suggestions for a document.
+    Background task to generate AI suggestions for a document (upload-time,
+    only queued when the org's auto-generate setting is on).
 
-    Args:
-        document_id: Document ID
-        timeout: Timeout in seconds for AI generation
-        db: Existing database connection (optional)
+    Stored results record the provider/model that received the text
+    (LLM-16) and never contain raw exception or provider text (LLM-02).
     """
-    import asyncio
+    from src.config import llm_settings
+    from src.llm.safety import new_error_reference
+
+    from .redaction_suggestion_routes import _ANALYSIS_FIELDS, _NO_EGRESS_ERRORS
 
     try:
         logger.info(f"Starting AI suggestion generation for document {document_id}")
 
-        # Get database if not provided
         if db is None:
             from ..core.database import get_database
 
             db = get_database()
 
-        # Update status to show AI is processing
         await db.documents.update_one(
             {"id": document_id}, {"$set": {"processing_status": "ai_processing"}}
         )
-        logger.info(f"✓ Document {document_id} - Status: AI_PROCESSING (background task started)")
 
-        # Get document
         doc = await db.documents.find_one({"id": document_id})
         if not doc:
-            logger.error(
-                f"Document {document_id} not found for AI suggestion generation in database {db.name}"
-            )
-            # Try to list all documents to debug
-            all_docs = await db.documents.find({}).to_list(length=10)
-            logger.error(f"Available documents: {[d.get('id') for d in all_docs]}")
+            logger.error(f"Document {document_id} not found for AI suggestion generation")
             return
 
-        # Check if text has been extracted
         extracted_text = doc.get("extracted_text")
         if not extracted_text:
             text_data = doc.get("text_data")
@@ -769,47 +761,60 @@ async def generate_ai_suggestions_async(
             logger.warning(f"No text extracted for document {document_id}, skipping AI suggestions")
             return
 
-        # Get case context if available
+        # Data minimisation (LLM-17): no case title unless opted in.
         context = None
-        if doc.get("case_id"):
+        if llm_settings.send_case_context and doc.get("case_id"):
             case = await db.cases.find_one({"id": doc["case_id"]})
             if case:
                 context = f"Case: {case.get('title', 'Unknown')}. Type: FOI Request"
 
-        # Generate suggestions with timeout
         result = await asyncio.wait_for(
             get_redaction_suggestions(extracted_text, context), timeout=timeout
         )
 
+        if result.get("error_code") in _NO_EGRESS_ERRORS:
+            # Nothing was sent; do not cache, so a later view or regenerate
+            # can run once AI is available.
+            await db.documents.update_one(
+                {"id": document_id}, {"$set": {"processing_status": "ai_unavailable"}}
+            )
+            logger.info(
+                f"Document {document_id} - AI unavailable ({result.get('error_code')}), not cached"
+            )
+            return
+
         suggestions = result.get("suggestions", [])
 
-        # Enrich with coordinates
-        pdf_content = doc.get("content")
+        # Enrich with coordinates off the event loop (LLM-13).
+        pdf_content = await load_document_pdf(doc, db)
         text_data = doc.get("text_data")
         if pdf_content:
-            suggestions = enrich_suggestions_with_coordinates(suggestions, pdf_content, text_data)
-            result["suggestions"] = suggestions
+            suggestions = await asyncio.to_thread(
+                enrich_suggestions_with_coordinates, suggestions, pdf_content, text_data
+            )
 
-        # Cache the results
         cache_data = {
             "suggestions": suggestions,
             "summary": result.get("summary", ""),
-            "method": "openai_gpt4",
+            "method": "llm",
             "generated_at": datetime.utcnow(),
             "auto_generated": True,
+            **{k: result[k] for k in _ANALYSIS_FIELDS if k in result},
         }
+        status = "ai_error" if result.get("error") else "ai_complete"
 
         await db.documents.update_one(
             {"id": document_id},
-            {"$set": {"ai_suggestions": cache_data, "processing_status": "ai_complete"}},
+            {"$set": {"ai_suggestions": cache_data, "processing_status": status}},
         )
 
         logger.info(
-            f"✓ Document {document_id} - Status: AI_COMPLETE ({len(suggestions)} suggestions generated)"
+            f"Document {document_id} - Status: {status.upper()} "
+            f"({len(suggestions)} suggestions generated)"
         )
 
     except TimeoutError:
-        logger.error(f"✗ Document {document_id} - Status: AI_TIMEOUT (generation timed out)")
+        logger.error(f"Document {document_id} - Status: AI_TIMEOUT (generation timed out)")
         await db.documents.update_one(
             {"id": document_id},
             {
@@ -818,6 +823,7 @@ async def generate_ai_suggestions_async(
                         "suggestions": [],
                         "summary": "AI suggestion generation timed out",
                         "error": "timeout",
+                        "error_code": "timeout",
                         "generated_at": datetime.utcnow(),
                     },
                     "processing_status": "ai_timeout",
@@ -825,15 +831,23 @@ async def generate_ai_suggestions_async(
             },
         )
     except Exception as e:
-        logger.error(f"✗ Document {document_id} - Status: AI_ERROR - {str(e)}")
+        reference = new_error_reference()
+        logger.error(
+            f"Document {document_id} - Status: AI_ERROR (reference {reference}): "
+            f"{type(e).__name__}"
+        )
+        if db is None:
+            return
         await db.documents.update_one(
             {"id": document_id},
             {
                 "$set": {
                     "ai_suggestions": {
                         "suggestions": [],
-                        "summary": f"Error: {str(e)}",
-                        "error": str(e),
+                        "summary": f"AI suggestion generation failed (reference {reference}).",
+                        "error": "analysis_failed",
+                        "error_code": "analysis_failed",
+                        "reference": reference,
                         "generated_at": datetime.utcnow(),
                     },
                     "processing_status": "ai_error",

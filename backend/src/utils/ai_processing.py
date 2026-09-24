@@ -2,12 +2,35 @@ import logging
 import re
 from typing import Any
 
+from src.config import llm_settings
 from src.database import documents
+from src.llm.safety import LLMDisabledError, LLMError, new_error_reference, redact_secrets
 from src.utils.conversion import extract_text_from_pdf
 from src.utils.llm_client import get_llm_client
 
-logging.basicConfig(level=logging.INFO)
+# Library module: never configure the root logger here (LLM-10).
 logger = logging.getLogger(__name__)
+
+
+def _file_context(filename: str, mime_type: str) -> str:
+    """Filename and type are only sent to the provider when
+    LLM_SEND_CASE_CONTEXT is on (LLM-17): filenames often name people."""
+    if not llm_settings.send_case_context:
+        return ""
+    return f"Filename: {filename}\nMIME Type: {mime_type}\n\n"
+
+
+def _failure_message(prefix: str, exc: Exception) -> str:
+    """Generic, secret-free message for storage/display (LLM-02)."""
+    if isinstance(exc, LLMError):
+        reference = exc.reference
+        logger.error("%s failed (reference %s): %s", prefix, reference, exc)
+        return f"{prefix} failed: {exc.public_detail()}"
+    reference = new_error_reference()
+    logger.error("%s failed (reference %s): %s", prefix, reference, type(exc).__name__)
+    logger.debug("%s failure detail (reference %s): %s", prefix, reference, redact_secrets(exc))
+    return f"{prefix} failed (reference {reference})."
+
 
 MAX_CONTENT_LENGTH = 8000
 
@@ -25,7 +48,10 @@ async def generate_document_summary(content: bytes, filename: str, mime_type: st
         A brief summary of the content
     """
     try:
-        llm_client = await get_llm_client()
+        try:
+            llm_client = await get_llm_client()
+        except LLMDisabledError as exc:
+            return exc.public_detail()
         if not llm_client:
             return (
                 "AI summary not available - no default LLM is set. "
@@ -37,7 +63,7 @@ async def generate_document_summary(content: bytes, filename: str, mime_type: st
         if mime_type == "application/pdf":
             # Use our OCR-enhanced PDF text extraction
             text_content = extract_text_from_pdf(content)
-            logger.info(f"Extracted text from PDF using OCR: {len(text_content)} characters")
+            logger.debug(f"Extracted text from PDF for summary: {len(text_content)} characters")
         else:
             # For other formats, use simple text extraction
             text_content = content.decode("utf-8", errors="ignore")
@@ -55,10 +81,7 @@ async def generate_document_summary(content: bytes, filename: str, mime_type: st
             text_content = text_content[:MAX_CONTENT_LENGTH] + "..."
 
         system_prompt = "You are an AI assistant that generates brief, accurate document summaries."
-        user_prompt = f"""Filename: {filename}
-MIME Type: {mime_type}
-
-Please summarize the following document in AT MOST TWO SENTENCES. Focus on the main topic and key information only.
+        user_prompt = f"""{_file_context(filename, mime_type)}Please summarize the following document in AT MOST TWO SENTENCES. Focus on the main topic and key information only.
 If the content appears to be binary data, image encoding, or otherwise not meaningful text, indicate that the document appears to be primarily non-textual content.
 
 DOCUMENT CONTENT:
@@ -81,8 +104,7 @@ TWO-SENTENCE SUMMARY:"""
 
         return summary
     except Exception as e:
-        logger.error(f"Error generating document summary: {str(e)}")
-        return f"Error generating summary: {str(e)}"
+        return _failure_message("AI summary", e)
 
 
 async def generate_ai_suggestions(
@@ -100,7 +122,10 @@ async def generate_ai_suggestions(
         A list of suggestions, each with type, description, and optional location
     """
     try:
-        llm_client = await get_llm_client()
+        try:
+            llm_client = await get_llm_client()
+        except LLMDisabledError as exc:
+            return [{"type": "error", "description": exc.public_detail()}]
         if not llm_client:
             return [
                 {
@@ -118,10 +143,7 @@ async def generate_ai_suggestions(
 
         # Create messages for LLM
         system_prompt = "You are an assistant that analyzes documents for sensitive information."
-        user_prompt = f"""Filename: {filename}
-MIME Type: {mime_type}
-
-Content:
+        user_prompt = f"""{_file_context(filename, mime_type)}Content:
 {text_content}
 
 Identify up to 5 items that might require redaction or attention, such as:
@@ -164,8 +186,7 @@ Return your response as a valid JSON array."""
             return [{"type": "error", "description": "Failed to parse AI response"}]
 
     except Exception as e:
-        logger.error(f"Error generating AI suggestions: {str(e)}")
-        return [{"type": "error", "description": f"Error generating suggestions: {str(e)}"}]
+        return [{"type": "error", "description": _failure_message("AI suggestions", e)}]
 
 
 async def process_attachment(attachment: dict[str, Any]) -> dict[str, Any]:
@@ -198,12 +219,11 @@ async def process_attachment(attachment: dict[str, Any]) -> dict[str, Any]:
             "processing_error": None,
         }
     except Exception as e:
-        logger.error(f"Error processing attachment: {str(e)}")
         return {
             "summary": None,
             "ai_suggestions": [],
             "processed": True,  # Mark as processed even if there was an error
-            "processing_error": str(e),
+            "processing_error": _failure_message("Attachment processing", e),
         }
 
 
@@ -245,11 +265,11 @@ async def process_attachment_async(attachment_id: str, document_id: str) -> None
 
         logger.info(f"Completed background processing for attachment {attachment_id}")
     except Exception as e:
-        logger.error(f"Error processing attachment asynchronously: {str(e)}")
+        message = _failure_message("Attachment processing", e)
         # Try to update the attachment status even if processing failed
         try:
             await documents.update_one(
-                {"id": attachment_id}, {"$set": {"processed": True, "processing_error": str(e)}}
+                {"id": attachment_id}, {"$set": {"processed": True, "processing_error": message}}
             )
             # Still increment the counter since we've "processed" it (even with an error)
             await documents.update_one({"id": document_id}, {"$inc": {"processed_attachments": 1}})

@@ -16,11 +16,14 @@ Reality pins:
   at the bottom of the module — verified working via this test.
 - `make_llm_call()` routes by `request_format`; raises ValueError on unknown.
 - API key decryption happens inside `make_llm_call`, not the formatters.
-- Anthropic format reads `max_tokens` / `temperature` directly from settings.
-- Google format puts the API key in the URL query, converts messages to its
-  `contents` shape, and packs settings into `generationConfig`.
-- Cohere format splits messages: all but last -> `chat_history`, last ->
-  `message`. Empty messages list yields empty `message` string.
+- Anthropic format sends the system prompt in the top-level `system` field
+  and only sends `temperature` to models that still accept it (LLM-09).
+- Google format sends the key in `x-goog-api-key` (never the URL, LLM-02) and
+  the system prompt as `systemInstruction`.
+- Cohere v1 uses `preamble` + `chat_history` (USER/CHATBOT); v2 uses
+  OpenAI-style `messages`.
+- Provider failures raise `LLMProviderError`, whose text never contains the
+  key; 429/5xx are retried a bounded number of times.
 """
 
 from __future__ import annotations
@@ -41,7 +44,8 @@ from src.llm.models import (
     RequestFormat,
 )
 from src.llm.repository import LLMRepository
-from src.llm.service import LLMService
+from src.llm.safety import LLMDisabledError, LLMProviderError
+from src.llm.service import LLMKeyMissingError, LLMService
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -199,9 +203,10 @@ class TestOpenAIFormat:
         body = json.loads(sent.content)
         assert body["model"] == "gpt-4o-mini"
         assert body["messages"] == [{"role": "user", "content": "Hello"}]
-        # Default settings merged in
+        # Default settings merged in; api.openai.com uses max_completion_tokens
         assert body["temperature"] == 0.7
-        assert body["max_tokens"] == 4000
+        assert body["max_completion_tokens"] == 4000
+        assert "max_tokens" not in body
 
     @respx.mock
     async def test_openai_kwargs_override_defaults(self, db: AsyncIOMotorDatabase) -> None:
@@ -220,7 +225,7 @@ class TestOpenAIFormat:
 
         sent_body = json.loads(respx.calls.last.request.content)
         assert sent_body["temperature"] == 0.1
-        assert sent_body["max_tokens"] == 500
+        assert sent_body["max_completion_tokens"] == 500
 
     @respx.mock
     async def test_openai_custom_headers_merged(self, db: AsyncIOMotorDatabase) -> None:
@@ -245,8 +250,9 @@ class TestOpenAIFormat:
         )
 
         svc = LLMService(db)
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(LLMProviderError) as excinfo:
             await svc.make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        assert excinfo.value.status_code == 500
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +269,7 @@ class TestAnthropicFormat:
             db,
             request_format=RequestFormat.ANTHROPIC,
             api_endpoint="https://api.anthropic.com/v1/messages",
-            model_name="claude-3-5-sonnet-20241022",
+            model_name="claude-sonnet-5",
             api_key="sk-ant-key",
         )
         respx.post("https://api.anthropic.com/v1/messages").mock(
@@ -284,10 +290,10 @@ class TestAnthropicFormat:
         assert sent.headers["x-api-key"] == "sk-ant-key"
         assert sent.headers["anthropic-version"] == "2023-06-01"
         body = json.loads(sent.content)
-        assert body["model"] == "claude-3-5-sonnet-20241022"
-        # Defaults applied
+        assert body["model"] == "claude-sonnet-5"
         assert body["max_tokens"] == 4000
-        assert body["temperature"] == 0.7
+        # Sonnet 5 rejects sampling parameters
+        assert "temperature" not in body
 
     @respx.mock
     async def test_anthropic_custom_headers_merged(self, db: AsyncIOMotorDatabase) -> None:
@@ -312,20 +318,21 @@ class TestAnthropicFormat:
 
 class TestGoogleFormat:
     @respx.mock
-    async def test_google_call_uses_query_param_api_key_and_contents_shape(
+    async def test_google_call_uses_header_api_key_and_contents_shape(
         self, db: AsyncIOMotorDatabase
     ) -> None:
+        endpoint = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "test-gemini-model:generateContent"
+        )
         cfg = await _seed_config(
             db,
             request_format=RequestFormat.GOOGLE,
-            api_endpoint="https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent",
-            model_name="gemini-pro",
+            api_endpoint=endpoint,
+            model_name="test-gemini-model",
             api_key="goog-secret",
         )
-        # Google appends `?key=...` so we match the prefix
-        route = respx.post(
-            url__startswith="https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent"
-        ).mock(
+        route = respx.post(endpoint).mock(
             return_value=httpx.Response(
                 200,
                 json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
@@ -336,29 +343,25 @@ class TestGoogleFormat:
         result = await svc.make_llm_call(
             cfg,
             [
+                {"role": "system", "content": "Be terse"},
                 {"role": "user", "content": "Hi"},
                 {"role": "assistant", "content": "Hello"},
             ],
         )
         assert "candidates" in result
-        assert route.called
-
         sent = route.calls.last.request
-        # API key in query, not header
-        assert "key=goog-secret" in str(sent.url)
-        # No Authorization header for Google
+        # LLM-02: key in the header, never in the URL
+        assert "goog-secret" not in str(sent.url)
+        assert "key=" not in str(sent.url)
+        assert sent.headers["x-goog-api-key"] == "goog-secret"
         assert "Authorization" not in sent.headers
 
         body = json.loads(sent.content)
-        # Content shape: each message becomes {"role": ..., "parts": [...]}
-        assert len(body["contents"]) == 2
-        assert body["contents"][0] == {
-            "role": "user",
-            "parts": [{"text": "Hi"}],
-        }
-        # Non-"user" roles map to "model"
-        assert body["contents"][1]["role"] == "model"
-        # generationConfig packs defaults
+        assert body["systemInstruction"] == {"parts": [{"text": "Be terse"}]}
+        assert body["contents"] == [
+            {"role": "user", "parts": [{"text": "Hi"}]},
+            {"role": "model", "parts": [{"text": "Hello"}]},
+        ]
         cfg_blk = body["generationConfig"]
         assert cfg_blk["temperature"] == 0.7
         assert cfg_blk["maxOutputTokens"] == 4000
@@ -372,9 +375,7 @@ class TestGoogleFormat:
             api_endpoint="https://google.test/generate",
             headers={"X-Goog-User-Project": "proj-1"},
         )
-        respx.post(url__startswith="https://google.test/generate").mock(
-            return_value=httpx.Response(200, json={})
-        )
+        respx.post("https://google.test/generate").mock(return_value=httpx.Response(200, json={}))
         svc = LLMService(db)
         await svc.make_llm_call(cfg, [{"role": "user", "content": "x"}])
         assert respx.calls.last.request.headers["X-Goog-User-Project"] == "proj-1"
@@ -392,7 +393,7 @@ class TestCohereFormat:
             db,
             request_format=RequestFormat.COHERE,
             api_endpoint="https://api.cohere.ai/v1/chat",
-            model_name="command-r",
+            model_name="test-command-model",
             api_key="co-key",
         )
         respx.post("https://api.cohere.ai/v1/chat").mock(
@@ -412,11 +413,11 @@ class TestCohereFormat:
         sent = respx.calls.last.request
         assert sent.headers["Authorization"] == "Bearer co-key"
         body = json.loads(sent.content)
-        assert body["model"] == "command-r"
+        assert body["model"] == "test-command-model"
         assert body["message"] == "Latest"
         assert body["chat_history"] == [
-            {"role": "user", "content": "First"},
-            {"role": "assistant", "content": "Reply"},
+            {"role": "USER", "message": "First"},
+            {"role": "CHATBOT", "message": "Reply"},
         ]
         assert body["temperature"] == 0.7
         assert body["max_tokens"] == 4000
@@ -465,3 +466,267 @@ class TestCohereFormat:
         svc = LLMService(db)
         await svc.make_llm_call(cfg, [{"role": "user", "content": "x"}])
         assert respx.calls.last.request.headers["X-Client"] == "blackbar"
+
+
+# ---------------------------------------------------------------------------
+# Security-review 2026-09 (LLM-02, LLM-04, LLM-05, LLM-09, LLM-14)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultHonoursEnabled:
+    async def test_disabled_default_is_not_returned(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(db)
+        await db.system_config.insert_one({"id": "global_llm_config", "default_llm_id": cfg.id})
+        await db.llm_configs.update_one({"id": cfg.id}, {"$set": {"enabled": False}})
+        svc = LLMService(db)
+        assert await svc.get_default_llm() is None
+        included = await svc.get_default_llm(include_disabled=True)
+        assert included is not None and included.enabled is False
+
+    @respx.mock
+    async def test_disabled_config_never_calls_provider(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(db, enabled=False)
+        with pytest.raises(LLMDisabledError):
+            await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        assert len(respx.calls) == 0
+
+
+class TestKeyAndEndpointGuards:
+    @respx.mock
+    async def test_cleared_key_requires_reentry(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(db)
+        cfg.api_key_encrypted = ""
+        with pytest.raises(LLMKeyMissingError):
+            await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        assert len(respx.calls) == 0
+
+    @respx.mock
+    async def test_metadata_endpoint_is_blocked_at_call_time(
+        self, db: AsyncIOMotorDatabase
+    ) -> None:
+        from src.llm.service import LLMBlockedEndpointError
+
+        cfg = await _seed_config(db)
+        cfg.api_endpoint = "http://169.254.169.254/latest/meta-data"
+        with pytest.raises(LLMBlockedEndpointError):
+            await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        assert len(respx.calls) == 0
+
+
+class TestGoogleKeyNeverLeaks:
+    @respx.mock
+    async def test_google_401_error_text_has_no_key(
+        self, db: AsyncIOMotorDatabase, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        endpoint = "https://generativelanguage.googleapis.com/v1beta/models/m:generateContent"
+        cfg = await _seed_config(
+            db,
+            request_format=RequestFormat.GOOGLE,
+            api_endpoint=endpoint,
+            api_key="AIzaSyLEAKLEAKLEAKLEAKLEAKLEAK123",
+        )
+        # Providers echo the key back in error bodies; it must still not escape.
+        respx.post(endpoint).mock(
+            return_value=httpx.Response(
+                401,
+                json={"error": {"message": "API key AIzaSyLEAKLEAKLEAKLEAKLEAKLEAK123 invalid"}},
+            )
+        )
+        caplog.set_level(logging.DEBUG)
+        with pytest.raises(LLMProviderError) as excinfo:
+            await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        err = excinfo.value
+        assert "AIzaSyLEAK" not in str(err)
+        assert "AIzaSyLEAK" not in err.detail
+        assert "AIzaSyLEAK" not in err.public_detail()
+        assert "AIzaSyLEAK" not in caplog.text
+        assert err.status_code == 401
+
+
+class TestRetries:
+    @respx.mock
+    async def test_429_then_success_is_retried(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(db)
+        route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+            side_effect=[
+                httpx.Response(429, headers={"retry-after": "0"}),
+                httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}),
+            ]
+        )
+        result = await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        assert result["choices"][0]["message"]["content"] == "ok"
+        assert route.call_count == 2
+
+    @respx.mock
+    async def test_retries_are_bounded(
+        self, db: AsyncIOMotorDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_MAX_RETRIES", "2")
+        cfg = await _seed_config(db)
+        route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(503)
+        )
+        with pytest.raises(LLMProviderError):
+            await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        assert route.call_count == 3
+
+    @respx.mock
+    async def test_400_is_not_retried(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(db)
+        route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+            return_value=httpx.Response(400, json={"error": "bad"})
+        )
+        with pytest.raises(LLMProviderError):
+            await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        assert route.call_count == 1
+
+    async def test_explicit_timeouts(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(db)
+        seen = {}
+
+        class _Client:
+            def __init__(self, *, timeout):
+                seen["timeout"] = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def post(self, *args, **kwargs):
+                return httpx.Response(
+                    200,
+                    json={"choices": [{"message": {"content": "ok"}}]},
+                    request=httpx.Request("POST", "https://api.openai.com"),
+                )
+
+        import src.llm.service as service_mod
+
+        original = service_mod.httpx.AsyncClient
+        service_mod.httpx.AsyncClient = _Client  # type: ignore[misc]
+        try:
+            await LLMService(db).make_llm_call(cfg, [{"role": "user", "content": "x"}])
+        finally:
+            service_mod.httpx.AsyncClient = original  # type: ignore[misc]
+        assert seen["timeout"].connect == 10.0
+        assert seen["timeout"].read == 120.0
+
+
+class TestAnthropicShape:
+    @respx.mock
+    async def test_system_prompt_goes_in_top_level_field(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(
+            db,
+            request_format=RequestFormat.ANTHROPIC,
+            api_endpoint="https://api.anthropic.com/v1/messages",
+            model_name="claude-sonnet-5",
+        )
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "content": [
+                        {"type": "thinking", "thinking": ""},
+                        {"type": "text", "text": "hello"},
+                    ],
+                    "stop_reason": "end_turn",
+                },
+            )
+        )
+        completion = await LLMService(db).complete(
+            cfg,
+            [
+                {"role": "system", "content": "SYSTEM RULES"},
+                {"role": "user", "content": "Hi"},
+            ],
+        )
+        body = json.loads(respx.calls.last.request.content)
+        assert body["system"] == "SYSTEM RULES"
+        assert body["messages"] == [{"role": "user", "content": "Hi"}]
+        assert respx.calls.last.request.headers["anthropic-version"] == "2023-06-01"
+        # Thinking blocks are skipped
+        assert completion.text == "hello"
+        assert completion.truncated is False
+
+    @pytest.mark.parametrize(
+        ("model", "accepts"),
+        [
+            ("claude-haiku-4-5-20251001", True),
+            ("claude-sonnet-4-5-20250929", True),
+            ("claude-sonnet-5", False),
+            ("claude-opus-5-5", False),
+            ("claude-fable-5-1", False),
+            ("claude-opus-4-7", False),
+        ],
+    )
+    def test_sampling_parameter_support(self, model: str, accepts: bool) -> None:
+        from src.llm.service import anthropic_accepts_sampling
+
+        assert anthropic_accepts_sampling(model) is accepts
+
+    @respx.mock
+    async def test_max_tokens_stop_reason_marks_truncated(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(
+            db,
+            request_format=RequestFormat.ANTHROPIC,
+            api_endpoint="https://api.anthropic.com/v1/messages",
+            model_name="claude-sonnet-5",
+        )
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": [{"type": "text", "text": "[{"}], "stop_reason": "max_tokens"},
+            )
+        )
+        completion = await LLMService(db).complete(cfg, [{"role": "user", "content": "Hi"}])
+        assert completion.truncated is True
+
+
+class TestCohereV2Shape:
+    @respx.mock
+    async def test_v2_endpoint_uses_messages(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(
+            db,
+            request_format=RequestFormat.COHERE,
+            api_endpoint="https://api.cohere.com/v2/chat",
+        )
+        respx.post("https://api.cohere.com/v2/chat").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+                    "finish_reason": "COMPLETE",
+                },
+            )
+        )
+        completion = await LLMService(db).complete(
+            cfg,
+            [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}],
+        )
+        body = json.loads(respx.calls.last.request.content)
+        assert body["messages"] == [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "U"},
+        ]
+        assert completion.text == "hi"
+
+    @respx.mock
+    async def test_v1_system_goes_to_preamble(self, db: AsyncIOMotorDatabase) -> None:
+        cfg = await _seed_config(
+            db,
+            request_format=RequestFormat.COHERE,
+            api_endpoint="https://api.cohere.com/v1/chat",
+        )
+        respx.post("https://api.cohere.com/v1/chat").mock(
+            return_value=httpx.Response(200, json={"text": "ok"})
+        )
+        await LLMService(db).make_llm_call(
+            cfg, [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
+        )
+        body = json.loads(respx.calls.last.request.content)
+        assert body["preamble"] == "S"
+        assert body["message"] == "U"
+        assert body["chat_history"] == []

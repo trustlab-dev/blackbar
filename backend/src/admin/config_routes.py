@@ -20,17 +20,38 @@ logger = logging.getLogger(__name__)
 config_collection = db.system_config
 
 
-async def get_system_config() -> dict[str, Any]:
-    """Get current system configuration"""
-    config = await config_collection.find_one({})
+# The org settings document shares the system_config collection with
+# {"id": "global_llm_config"} and {"id": "global_ai_settings"}, so it is
+# addressed by its own id rather than find_one({}) (LLM-18).
+SYSTEM_CONFIG_ID = "system_configuration"
 
-    if not config:
-        # Create default configuration
-        default_config = SystemConfiguration().dict()
-        await config_collection.insert_one(default_config)
-        config = default_config
 
-    return config
+def _collection(database=None):
+    return database.system_config if database is not None else config_collection
+
+
+async def get_system_config(database=None) -> dict[str, Any]:
+    """Get the current system configuration.
+
+    ``database`` is optional so request-scoped callers (for example the
+    document processing service) can pass their own handle.
+    """
+    collection = _collection(database)
+    config = await collection.find_one({"id": SYSTEM_CONFIG_ID})
+    if config:
+        return config
+
+    # Pre-2026-09 deployments stored the settings without an id.
+    legacy = await collection.find_one({"id": {"$exists": False}})
+    if legacy:
+        await collection.update_one({"_id": legacy["_id"]}, {"$set": {"id": SYSTEM_CONFIG_ID}})
+        legacy["id"] = SYSTEM_CONFIG_ID
+        return legacy
+
+    default_config = SystemConfiguration().model_dump()
+    default_config["id"] = SYSTEM_CONFIG_ID
+    await collection.insert_one(default_config)
+    return default_config
 
 
 async def update_system_config(updates: dict[str, Any], user_id: str) -> dict[str, Any]:
@@ -38,8 +59,8 @@ async def update_system_config(updates: dict[str, Any], user_id: str) -> dict[st
     updates["updated_at"] = datetime.utcnow()
     updates["updated_by"] = user_id
 
-    # Upsert configuration
-    await config_collection.update_one({}, {"$set": updates}, upsert=True)
+    await get_system_config()  # adopt a legacy document before updating by id
+    await config_collection.update_one({"id": SYSTEM_CONFIG_ID}, {"$set": updates}, upsert=True)
 
     return await get_system_config()
 
@@ -85,7 +106,7 @@ async def update_configuration(
     """
     try:
         # Get only non-None fields
-        updates = {k: v for k, v in config_update.dict().items() if v is not None}
+        updates = {k: v for k, v in config_update.model_dump().items() if v is not None}
 
         if not updates:
             raise HTTPException(status_code=400, detail="No updates provided")
