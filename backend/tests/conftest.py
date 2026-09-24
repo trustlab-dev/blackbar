@@ -48,7 +48,10 @@ def pytest_configure(config: pytest.Config) -> None:
     blow up. The real MONGODB_URI is patched in by `mongo_uri` before
     `src.main` is imported via the `app` fixture.
     """
-    os.environ.setdefault("JWT_SECRET", "test-secret-" + secrets.token_hex(16))
+    # A random, full-strength secret: src.config rejects placeholders and
+    # low-entropy values (AUTH-02), and under filterwarnings=error the dev
+    # fallback warning would abort collection.
+    os.environ.setdefault("JWT_SECRET", secrets.token_urlsafe(48))
     os.environ.setdefault("JWT_EXPIRATION", "60")
     os.environ.setdefault("LLM_API_KEY_ENCRYPTION_KEY", _stable_fernet_key())
     os.environ.setdefault("ENVIRONMENT", "test")
@@ -232,6 +235,23 @@ async def authed_client_factory(
     finally:
         for c in clients:
             await c.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits() -> Iterator[None]:
+    """slowapi keeps counters in process memory; without a reset, tests that
+    exercise rate-limited routes (login, magic link, tracking) would trip
+    each other's limits depending on run order."""
+    from src.core.rate_limit import limiter
+
+    limiter.reset()
+    yield
+    limiter.reset()
 
 
 # ---------------------------------------------------------------------------

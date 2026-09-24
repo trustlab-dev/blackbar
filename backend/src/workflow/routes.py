@@ -23,6 +23,7 @@ from fastapi import (
     UploadFile,
 )
 
+from src.config import public_base_url
 from src.core.authz import assert_case_access
 from src.core.database import get_database_from_request
 from src.dependencies import check_role, get_current_user
@@ -276,7 +277,7 @@ async def invite_contributor(
     # Send invitation email
     config = await db.system_config.find_one({})
     org_name = config.get("org_name", "BlackBar") if config else "BlackBar"
-    base_url = str(request.base_url).rstrip("/")
+    base_url = public_base_url()  # never the Host header (AUTH-29)
     full_upload_url = f"{base_url}{upload_url}"
 
     email_service.send_contributor_invitation(
@@ -326,7 +327,7 @@ async def bulk_invite_contributors(
     # Send emails for each contributor
     config = await db.system_config.find_one({})
     org_name = config.get("org_name", "BlackBar") if config else "BlackBar"
-    base_url = str(request.base_url).rstrip("/")
+    base_url = public_base_url()  # never the Host header (AUTH-29)
     tracking_number = case.get("tracking_number", case_id)
 
     invitations = []
@@ -468,7 +469,7 @@ async def remind_contributor(
     token_hash = hash_token(raw_token)
 
     # Build upload URL with the new raw token
-    base_url = str(request.base_url).rstrip("/")
+    base_url = public_base_url()  # never the Host header (AUTH-29)
     upload_url = f"{base_url}/contribute/{contributor_id}?token={raw_token}"
 
     # Get org name from system config
@@ -994,7 +995,7 @@ async def transfer_case(
     # Send email to recipient with transfer link
     config = await db.system_config.find_one({})
     org_name = config.get("org_name", "BlackBar") if config else "BlackBar"
-    base_url = str(request.base_url).rstrip("/")
+    base_url = public_base_url()  # never the Host header (AUTH-29)
     full_transfer_url = f"{base_url}{transfer_url}"
 
     email_service.send_transfer_notification(

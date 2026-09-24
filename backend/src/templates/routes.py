@@ -3,6 +3,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..auth.roles import STAFF_ROLES
+from ..core.authz import assert_case_access, has_global_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
 from .models import TemplateCreate, TemplateResponse, TemplateUpdate
@@ -139,7 +141,11 @@ async def create_template(
     return template_data
 
 
-@router.get("/{template_id}", response_model=TemplateResponse)
+@router.get(
+    "/{template_id}",
+    response_model=TemplateResponse,
+    dependencies=[Depends(check_role(["owner", "admin", "analyst"]))],
+)
 async def get_template(
     template_id: str, current_user=Depends(get_current_user), db=Depends(get_database_from_request)
 ):
@@ -189,7 +195,7 @@ async def delete_template(
     return {"message": "Template deleted successfully"}
 
 
-@router.post("/{template_id}/render")
+@router.post("/{template_id}/render", dependencies=[Depends(check_role(STAFF_ROLES))])
 async def render_template_for_case(
     template_id: str,
     case_id: str,
@@ -202,10 +208,13 @@ async def render_template_for_case(
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # Get case
+    # Get case. Rendering exposes requester PII, so the caller must be able
+    # to access the case (AUTH-06). Team-scoped callers get the same 403 for
+    # a missing case as for someone else's, so this is not an existence oracle.
     case = await db.cases.find_one({"id": case_id})
-    if not case:
+    if not case and has_global_access(current_user):
         raise HTTPException(status_code=404, detail="Case not found")
+    assert_case_access(case, current_user)
 
     # Get document count
     doc_count = await db.documents.count_documents({"case_id": case_id})

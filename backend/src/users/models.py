@@ -72,6 +72,9 @@ class User(UserBase):
     activation_token_expires_at: datetime | None = Field(
         None, description="Activation token expiration"
     )
+    # Bumped on logout, password change, disable and role change; a staff
+    # token whose `tv` claim differs is refused (AUTH-14).
+    token_version: int = Field(default=0, description="Session revocation counter")
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

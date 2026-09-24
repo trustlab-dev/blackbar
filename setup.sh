@@ -41,9 +41,14 @@ if [ -z "$MONGO_PASSWORD" ]; then
     echo "Generated MONGO_PASSWORD and saved to .env"
 fi
 
-if [ -z "$JWT_SECRET" ]; then
+# The .env.example placeholder counts as unset: the backend refuses it.
+if [ -z "$JWT_SECRET" ] || [ "$JWT_SECRET" = "CHANGE_THIS_TO_RANDOM_32_CHAR_STRING" ]; then
     JWT_SECRET=$(openssl rand -base64 48)
-    echo "JWT_SECRET=$JWT_SECRET" >> .env
+    if grep -q '^JWT_SECRET=' .env; then
+        sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$JWT_SECRET|" .env
+    else
+        echo "JWT_SECRET=$JWT_SECRET" >> .env
+    fi
     echo "Generated JWT_SECRET and saved to .env"
 fi
 

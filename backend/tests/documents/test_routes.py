@@ -950,6 +950,75 @@ class TestUploadDocument:
         assert r.status_code == 200, r.text
 
 
+class TestUploadCrossCaseOracle:
+    """AUTH-08: `POST /documents/` without a case let a team-scoped user run
+    dedup, Message-ID merge and thread consolidation across every case."""
+
+    async def test_user_without_case_id_is_rejected(
+        self, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+            )
+        assert r.status_code == 400, r.text
+
+    async def test_user_with_unknown_case_id_is_forbidden(
+        self, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": "no-such-case"},
+            )
+        assert r.status_code == 403, r.text
+
+    async def test_duplicate_in_inaccessible_case_is_not_disclosed(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user", email="dup-user@example.test")
+        me = await db.users.find_one({"email": "dup-user@example.test"})
+        mine = make_case(case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}])
+        theirs = make_case(case_team=[])
+        await db.cases.insert_many([mine, theirs])
+        other_doc = make_document(case_id=theirs["id"], filename="secret-memo.pdf")
+        await db.documents.insert_one(other_doc)
+        from src.documents.processing_service import ProcessingResult, ProcessingStatus
+
+        mock_result = ProcessingResult(
+            status=ProcessingStatus.DUPLICATE,
+            is_duplicate=True,
+            duplicate_of_id=other_doc["id"],
+            duplicate_of_filename="secret-memo.pdf",
+        )
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": mine["id"]},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["is_duplicate"] is True
+        assert body["duplicate_of_id"] is None
+        assert body["duplicate_of_filename"] is None
+        assert other_doc["id"] not in r.text
+        assert "secret-memo" not in r.text
+
+
 # ---------------------------------------------------------------------------
 # DELETE /{document_id}  delete_document
 # ---------------------------------------------------------------------------

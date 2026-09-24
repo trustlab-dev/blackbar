@@ -7,6 +7,7 @@ import logging
 
 from fastapi import Request
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo.errors import PyMongoError
 
 from src.config import MONGODB_URI
 
@@ -86,6 +87,24 @@ async def create_indexes(db: AsyncIOMotorDatabase = None):
     await db.templates.create_index("id", unique=True)
     await db.templates.create_index("category")
     await db.templates.create_index("is_active")
+
+    # Public (magic-link) users: one record per email (AUTH-28). Creating a
+    # unique index fails if duplicates already exist; log loudly rather than
+    # refuse to start, so an operator can merge them.
+    try:
+        await db.public_users.create_index("email", unique=True)
+    except PyMongoError as exc:
+        logger.error(
+            "Could not create unique index on public_users.email; "
+            f"duplicate public users must be merged: {exc}"
+        )
+    # Magic-link tokens are deleted by MongoDB once expired (TTL), so token
+    # hashes, IPs and user agents are not retained indefinitely.
+    await db.magic_link_tokens.create_index("expires_at", expireAfterSeconds=0)
+    await db.magic_link_tokens.create_index([("email", 1), ("created_at", -1)])
+
+    # Auth audit trail (AUTH-24)
+    await db.audit_logs.create_index([("category", 1), ("timestamp", -1)])
 
     # Workflow indexes
     from src.workflow.indexes import create_workflow_indexes

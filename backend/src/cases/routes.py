@@ -7,8 +7,10 @@ from typing import Any
 from bson.objectid import ObjectId
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from ..core.authz import has_global_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
+from .listing import redact_case_for_listing
 from .models import (
     CaseCreate,
     CaseDB,
@@ -199,25 +201,20 @@ async def list_cases(
     if created_by:
         query["created_by"] = created_by
 
-    # Access control based on system role
-    user_system_role = current_user.get("role")
-
-    if user_system_role == "admin":
-        # Admin sees all cases
-        pass
-    elif user_system_role == "analyst":
-        # Analyst sees all cases
-        pass
-    else:  # user or guest
-        # Only see cases they're on the case team for
+    # Access control based on system role: owner/admin/analyst see all cases;
+    # user and guest only the cases they are an active team member of.
+    if not has_global_access(current_user):
         query["case_team"] = {"$elemMatch": {"user_id": current_user["id"], "status": "active"}}
 
     # Execute the query with pagination
     cursor = db.cases.find(query).skip(skip).limit(limit).sort("created_at", -1)
     raw_result = await cursor.to_list(length=limit)
 
-    # Convert MongoDB documents to JSON serializable format
-    result = [convert_mongo_doc_to_json(doc) for doc in raw_result]
+    # Convert MongoDB documents to JSON serializable format, without the
+    # fields a team-scoped caller must not see (AUTH-12).
+    result = [
+        convert_mongo_doc_to_json(redact_case_for_listing(doc, current_user)) for doc in raw_result
+    ]
 
     # Get total count
     total = await db.cases.count_documents(query)

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Request
 
 from ..core.dependencies import require_admin_access
 from ..database import db
+from ..users.serializers import SAFE_USER_PROJECTION
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -32,7 +33,7 @@ async def search_users(
     if role:
         query["role"] = role.lower()
 
-    cursor = users.find(query, {"password_hash": 0, "password": 0}).limit(limit)
+    cursor = users.find(query, SAFE_USER_PROJECTION).limit(limit)
     user_results = await cursor.to_list(length=limit)
 
     matching_users = []

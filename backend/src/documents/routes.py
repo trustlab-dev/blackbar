@@ -45,7 +45,7 @@ from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
     get_text_summary,
 )
 
-from ..core.authz import assert_case_access, check_document_access
+from ..core.authz import assert_case_access, check_document_access, has_global_access
 from ..database import db
 from ..dependencies import check_role, get_current_user
 
@@ -640,12 +640,17 @@ async def upload_document(
         read_verified_upload,
     )
 
-    # If uploading into an existing case, enforce object-level access: the
-    # route role gate admits `user`, so a team-scoped user must not be able
-    # to inject a document into a case they are not a member of. A missing
-    # case doc is left to the processing service (preserves the historical
-    # behaviour where a document may carry a case_id with no case row yet).
-    if case_id:
+    # Object-level access. The route role gate admits `user`, so:
+    # - a team-scoped caller must name a case (AUTH-08: without one, dedup,
+    #   Message-ID merge and thread consolidation ran across every case), and
+    #   the case must exist and be one they can access;
+    # - global roles may still upload without a case, or with a case_id that
+    #   has no case row yet (historical behaviour).
+    if not has_global_access(current_user):
+        if not case_id:
+            raise HTTPException(status_code=400, detail="case_id is required")
+        assert_case_access(await db.cases.find_one({"id": case_id}), current_user)
+    elif case_id:
         case = await db.cases.find_one({"id": case_id})
         if case is not None:
             assert_case_access(case, current_user)
@@ -673,11 +678,27 @@ async def upload_document(
 
     # Handle result based on status
     if result.status == ProcessingStatus.DUPLICATE:
+        # Only name the existing document if the caller could open it;
+        # otherwise the dedup answer is a cross-case oracle (AUTH-08).
+        duplicate_of_id = result.duplicate_of_id
+        duplicate_of_filename = result.duplicate_of_filename
+        if duplicate_of_id and not has_global_access(current_user):
+            dup = await db.documents.find_one(
+                {"id": duplicate_of_id}, {"_id": 0, "case_id": 1, "shared_with": 1}
+            )
+            dup_case = (
+                await db.cases.find_one({"id": dup["case_id"]})
+                if dup and dup.get("case_id")
+                else None
+            )
+            if not dup or not check_document_access(dup, current_user, dup_case):
+                duplicate_of_id = None
+                duplicate_of_filename = None
         return {
             "message": "Duplicate document detected",
             "is_duplicate": True,
-            "duplicate_of_id": result.duplicate_of_id,
-            "duplicate_of_filename": result.duplicate_of_filename,
+            "duplicate_of_id": duplicate_of_id,
+            "duplicate_of_filename": duplicate_of_filename,
             "upload_date": None,  # Could fetch from DB if needed
         }
     elif result.status == ProcessingStatus.VALIDATION_FAILED:

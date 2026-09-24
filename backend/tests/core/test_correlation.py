@@ -262,3 +262,63 @@ class TestMetricsMiddlewareNormalizePath:
 
     def test_static_unchanged(self):
         assert self.mw._normalize_path("/health") == "/health"
+
+
+# ---------------------------------------------------------------------------
+# AUTH-15: metric labels and span attributes must not carry capability tokens
+# ---------------------------------------------------------------------------
+
+
+def _make_token_app(middleware) -> FastAPI:
+    from fastapi import APIRouter
+
+    app = FastAPI()
+    app.add_middleware(middleware)
+    inner = APIRouter(prefix="/cases")
+
+    @inner.get("/collect/{token}")
+    async def collect(token: str):
+        return {"ok": True}
+
+    api = APIRouter(prefix="/api/v1")
+    api.include_router(inner)
+    app.include_router(api)
+    return app
+
+
+@pytest.mark.parametrize("middleware", [CorrelationMiddleware, MetricsMiddleware])
+async def test_metric_labels_use_route_template_not_raw_path(middleware):
+    from prometheus_client import generate_latest
+
+    app = _make_token_app(middleware)
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as c:
+        r = await c.get("/api/v1/cases/collect/Ab3LiveCollectionTokenXyz?token=QuerySecret99")
+        assert r.status_code == 200
+        miss = await c.get("/api/v1/nope/RandomUnmatchedSegment123")
+        assert miss.status_code == 404
+
+    exposition = generate_latest().decode()
+    assert "Ab3LiveCollectionTokenXyz" not in exposition
+    assert "QuerySecret99" not in exposition
+    assert "RandomUnmatchedSegment123" not in exposition
+    assert 'endpoint="/api/v1/cases/collect/{token}"' in exposition
+    assert 'endpoint="unmatched"' in exposition
+
+
+async def test_span_attributes_exclude_raw_url_and_query(monkeypatch):
+    import src.core.correlation as corr
+
+    recorded: list[dict] = []
+    monkeypatch.setattr(corr, "add_span_attributes", lambda attrs: recorded.append(dict(attrs)))
+    app = _make_token_app(CorrelationMiddleware)
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as c:
+        await c.get("/api/v1/cases/collect/Ab3LiveCollectionTokenXyz?token=QuerySecret99")
+
+    flat = repr(recorded)
+    assert "Ab3LiveCollectionTokenXyz" not in flat
+    assert "QuerySecret99" not in flat
+    assert any(a.get("http.route") == "/api/v1/cases/collect/{token}" for a in recorded)

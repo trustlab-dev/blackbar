@@ -4,9 +4,8 @@ import warnings
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 # Suppress PyMuPDF font warnings
 warnings.filterwarnings("ignore", message=".*Cannot load system font.*")
@@ -27,6 +26,9 @@ from src.cases.public_routes import router as public_case_router
 from src.cases.routes import router as case_router
 from src.cases.status_routes import router as status_router
 from src.categories.routes import router as category_router
+
+# Single shared rate limiter (proxy-aware client IP; AUTH-16)
+from src.core.rate_limit import limiter
 from src.documents.routes import router as document_router
 from src.documents.share_routes import router as document_share_router
 from src.packs.routes import router as packs_router
@@ -35,9 +37,6 @@ from src.templates.routes import router as templates_router
 
 # Workflow routes
 from src.workflow.routes import router as workflow_router
-
-# Initialize rate limiter
-limiter = Limiter(key_func=get_remote_address)
 
 _is_production = os.getenv("ENVIRONMENT", "development") == "production"
 app = FastAPI(
@@ -101,7 +100,22 @@ async def startup_event():
     logger.info("Application startup complete", startup_phase="complete")
 
 
-from src.config import ALLOWED_ORIGINS
+from src.config import ALLOWED_ORIGINS, config
+
+
+def add_trusted_host_middleware(target: FastAPI, hosts: list[str]) -> bool:
+    """Reject requests whose Host header is not in ``hosts`` (AUTH-29).
+
+    Off when ``hosts`` is empty (the default), so existing deployments keep
+    working; set TRUSTED_HOSTS (e.g. "foi.example.gov,localhost") to enable.
+    """
+    if not hosts:
+        return False
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    target.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
+    return True
+
 
 # Middleware setup
 # NOTE: Middleware executes in REVERSE order of addition
@@ -118,6 +132,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Correlation-ID", "X-Request-ID"],
 )
+add_trusted_host_middleware(app, config.TRUSTED_HOSTS)  # outermost when enabled
 
 # Create API router with /api/v1 prefix (versioned API)
 from fastapi import APIRouter
@@ -191,11 +206,12 @@ async def health_check(request: Request):
 
         await db.command("ping")
 
+        # No environment name or exception text: this endpoint is public
+        # (AUTH-30). Details go to the server log.
         payload = {
             "status": "healthy",
             "service": "blackbar-backend",
             "version": os.getenv("SERVICE_VERSION", "1.0.0"),
-            "environment": os.getenv("ENVIRONMENT", "development"),
             "database": "connected",
             "timestamp": datetime.utcnow().isoformat(),
             "correlation_id": correlation_id,
@@ -220,7 +236,6 @@ async def health_check(request: Request):
                 "status": "unhealthy",
                 "service": "blackbar-backend",
                 "database": "disconnected",
-                "error": str(e),
                 "timestamp": datetime.utcnow().isoformat(),
                 "correlation_id": correlation_id,
             },

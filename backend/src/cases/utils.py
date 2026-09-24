@@ -1,25 +1,31 @@
 """Utility functions for case management"""
 
-import random
-import string
+import secrets
 from datetime import datetime, timedelta
 
 from src.packs.loader import get_pack_terminology, get_pack_timelines
+
+# The suffix is the only unguessable part of a tracking number, which is the
+# sole credential for the anonymous /cases/public/track lookup (AUTH-05).
+# 32 symbols (no 0/O/1/I) x 8 characters = 40 bits from a CSPRNG.
+TRACKING_SUFFIX_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+TRACKING_SUFFIX_LENGTH = 8
 
 
 def generate_tracking_number(year: int = None, sequence: int = None) -> str:
     """
     Generate a tracking number using format from active pack
-    Format: {prefix}-YYYY-###-XXX where XXX is a random 3-letter code
+    Format: {prefix}-YYYY-###-XXXXXXXX where the suffix is random (secrets)
     """
     # Get terminology from pack
     terminology = get_pack_terminology()
     prefix = terminology.get("tracking_number_prefix", "FOI")
 
-    # Generate random 3-letter code
-    random_code = "".join(random.choices(string.ascii_uppercase, k=3))
+    suffix = "".join(
+        secrets.choice(TRACKING_SUFFIX_ALPHABET) for _ in range(TRACKING_SUFFIX_LENGTH)
+    )
 
-    return f"{prefix}-{year}-{sequence:03d}-{random_code}"
+    return f"{prefix}-{year}-{sequence:03d}-{suffix}"
 
 
 def calculate_due_date(received_date: datetime, days: int = None) -> datetime:

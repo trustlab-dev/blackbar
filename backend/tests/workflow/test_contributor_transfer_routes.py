@@ -144,6 +144,34 @@ async def _seed_contributor(
 
 
 class TestInviteContributor:
+    async def test_emailed_link_ignores_host_header(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTH-29: capability links emailed to third parties are built from
+        PUBLIC_BASE_URL, never from the (spoofable) Host header."""
+        from unittest.mock import MagicMock
+
+        import src.workflow.routes as wf_routes
+
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://foi.example.gov")
+        send = MagicMock(return_value=True)
+        monkeypatch.setattr(wf_routes.email_service, "send_contributor_invitation", send)
+        case_id = await _seed_case(db, tracking_number="FOI-2026-0002")
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/contributors",
+            json={"name": "Bob", "email": "bob@example.com", "token_expiration_days": 7},
+            headers={"Host": "evil.example.com"},
+        )
+        assert r.status_code == 200, r.text
+        url = send.call_args.kwargs["upload_url"]
+        assert url.startswith("https://foi.example.gov/contribute/")
+        assert "evil.example.com" not in url
+
     async def test_invite_happy_path_uses_system_config_org_name(
         self,
         db: AsyncIOMotorDatabase,

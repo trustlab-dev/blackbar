@@ -14,8 +14,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
-from src.auth.dependencies import get_current_user_public
+from src.auth.dependencies import get_active_public_user
 from src.core.database import get_database_from_request, get_shared_database
+from src.core.rate_limit import PUBLIC_LOOKUP_LIMIT, limiter
 from src.utils.log_utils import hash_email_for_logs
 
 from . import release_package_service
@@ -31,6 +32,9 @@ from .utils import calculate_due_date, generate_tracking_number, get_sla_status
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/cases/public", tags=["Public FOI Requests"])
+
+# `cases.source` value for requests filed through the anonymous portal.
+PUBLIC_PORTAL_SOURCE = "public_portal"
 
 
 def _iso(value):
@@ -124,6 +128,8 @@ async def submit_public_request(http_request: Request, request: PublicRequestCre
         "estimated_completion": None,
         "updated_at": received_date,
         "created_by": "system",
+        # Marks the case as trackable through the anonymous /track lookup.
+        "source": PUBLIC_PORTAL_SOURCE,
     }
 
     # Insert into database
@@ -167,14 +173,26 @@ async def submit_public_request(http_request: Request, request: PublicRequestCre
 
 
 @router.get("/track/{tracking_number}")
-async def track_public_request(http_request: Request, tracking_number: str):
+@limiter.limit(PUBLIC_LOOKUP_LIMIT)
+async def track_public_request(request: Request, tracking_number: str):
     """
     Public endpoint to track FOI request status.
     No authentication required.
     Returns public information only (no internal comments).
+
+    Only cases that came in through the public portal are trackable; any
+    other tracking number (unknown, or an internal case) gets the same 404,
+    and the lookup is rate limited per client IP (AUTH-05).
     """
-    db = await get_db(http_request)
-    case = await db.cases.find_one({"tracking_number": tracking_number})
+    db = await get_db(request)
+    case = await db.cases.find_one(
+        {
+            "tracking_number": tracking_number,
+            # Legacy portal cases predate the `source` marker but were all
+            # created by the "system" pseudo-user.
+            "$or": [{"source": PUBLIC_PORTAL_SOURCE}, {"created_by": "system"}],
+        }
+    )
 
     if not case:
         raise HTTPException(status_code=404, detail="Tracking number not found")
@@ -191,13 +209,13 @@ async def track_public_request(http_request: Request, tracking_number: str):
 
     return {
         "tracking_number": tracking_number,
-        "title": case["title"],
-        "status": case["status"],
-        "received_date": case["received_date"],
+        "title": case.get("title"),
+        "status": case.get("status"),
+        "received_date": case.get("received_date"),
         "due_date": case.get("due_date"),
         "sla_status": sla_status,
         "comments": public_comments,
-        "last_updated": case["updated_at"],
+        "last_updated": case.get("updated_at"),
     }
 
 
@@ -207,7 +225,7 @@ async def track_public_request(http_request: Request, tracking_number: str):
 @router.get("/my-requests")
 async def get_my_requests(
     request: Request,
-    current_user: dict = Depends(get_current_user_public),
+    current_user: dict = Depends(get_active_public_user),
     db=Depends(get_database_from_request),
 ):
     """
@@ -274,7 +292,7 @@ async def health_check():
 async def get_request_details(
     request_id: str,
     request: Request,
-    current_user: dict = Depends(get_current_user_public),
+    current_user: dict = Depends(get_active_public_user),
     db=Depends(get_database_from_request),
 ):
     """
@@ -421,7 +439,7 @@ async def get_request_details(
 @router.get("/stats/summary")
 async def get_request_summary(
     request: Request,
-    current_user: dict = Depends(get_current_user_public),
+    current_user: dict = Depends(get_active_public_user),
     db=Depends(get_database_from_request),
 ):
     """

@@ -4,14 +4,16 @@ Endpoints for managing case-specific collaboration teams
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from ..auth.roles import STAFF_ROLES
 from ..core.database import get_database_from_request
 from ..database import db
 from ..dependencies import check_role, get_current_user
+from ..users.serializers import SAFE_USER_PROJECTION
 from .permissions import (
     can_manage_team,
     get_permissions_for_role,
@@ -64,8 +66,20 @@ class UpdateTeamMemberRequest(BaseModel):
     role: str | None = None
     department: str | None = None
     notes: str | None = None
-    review_status: str | None = None
-    approval_status: str | None = None
+    review_status: (
+        Literal["pending", "in_progress", "reviewed", "approved", "rejected", "changes_requested"]
+        | None
+    ) = None
+    approval_status: Literal["pending", "approved", "rejected"] | None = None
+
+
+# Case roles that confer team management; only owners/admins or an existing
+# case manager may hand them out (AUTH-10).
+_MANAGER_CASE_ROLES = {"manager"}
+
+
+def _allowed_case_roles_for(user: dict | None) -> list[str]:
+    return ALLOWED_CASE_ROLES.get((user or {}).get("role", "user"), [])
 
 
 @router.get("/{case_id}/team")
@@ -95,14 +109,14 @@ async def get_case_team(
         if member.get("status") == "removed":
             continue
         # Try to find user by id field first, then by _id (for backwards compatibility)
-        user = await users.find_one({"id": member["user_id"]}, {"password_hash": 0})
+        user = await users.find_one({"id": member["user_id"]}, SAFE_USER_PROJECTION)
         if not user:
             # Try finding by MongoDB _id
             try:
                 from bson import ObjectId
 
                 user = await users.find_one(
-                    {"_id": ObjectId(member["user_id"])}, {"password_hash": 0}
+                    {"_id": ObjectId(member["user_id"])}, SAFE_USER_PROJECTION
                 )
             except:
                 pass
@@ -221,7 +235,7 @@ async def add_team_member(
     }
 
 
-@router.delete("/{case_id}/team/members/{user_id}")
+@router.delete("/{case_id}/team/members/{user_id}", dependencies=[Depends(check_role(STAFF_ROLES))])
 async def remove_team_member(
     request: Request,
     case_id: str,
@@ -258,9 +272,12 @@ async def remove_team_member(
     # Get user info for audit log
     user = await users.find_one({"id": user_id})
 
-    # Update member status to "removed" instead of deleting
-    await db.cases.update_one(
-        {"id": case_id, "case_team.user_id": user_id},
+    # Update member status to "removed" instead of deleting. $elemMatch binds
+    # the positional `$` to the ACTIVE entry; matching on user_id alone hit
+    # the first (possibly already removed) entry after a re-add, leaving the
+    # member with access while reporting success (AUTH-11).
+    result = await db.cases.update_one(
+        {"id": case_id, "case_team": {"$elemMatch": {"user_id": user_id, "status": "active"}}},
         {
             "$set": {"case_team.$.status": "removed"},
             "$push": {
@@ -278,13 +295,16 @@ async def remove_team_member(
         },
     )
 
+    if result.modified_count == 0:
+        raise HTTPException(status_code=409, detail="Team member could not be removed; retry")
+
     return {
         "success": True,
         "message": f"Removed {user.get('username') if user else 'user'} from case team",
     }
 
 
-@router.put("/{case_id}/team/members/{user_id}")
+@router.put("/{case_id}/team/members/{user_id}", dependencies=[Depends(check_role(STAFF_ROLES))])
 async def update_team_member(
     req: Request,
     case_id: str,
@@ -318,6 +338,34 @@ async def update_team_member(
 
     if member_index is None:
         raise HTTPException(status_code=404, detail="User not found on team")
+
+    # Role changes (AUTH-10): the new case role must suit the target's system
+    # role (the same allowlist add_team_member enforces, so a guest can never
+    # become manager/analyst); members cannot change their own role; and only
+    # owners/admins or a case manager may grant manager.
+    is_system_admin = current_user.get("role") in ["owner", "admin"]
+    if request.role and request.role != case_team[member_index].get("role"):
+        if user_id == current_user["id"] and not is_system_admin:
+            raise HTTPException(status_code=403, detail="You cannot change your own case role")
+        if (
+            request.role in _MANAGER_CASE_ROLES
+            and not is_system_admin
+            and user_role_on_case not in _MANAGER_CASE_ROLES
+        ):
+            raise HTTPException(
+                status_code=403, detail="Only a case manager or an admin can assign that role"
+            )
+        target_user = await users.find_one({"id": user_id}, {"_id": 0, "role": 1})
+        allowed_case_roles = _allowed_case_roles_for(target_user)
+        if request.role not in allowed_case_roles:
+            target_system_role = (target_user or {}).get("role", "user")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Users with system role '{target_system_role}' cannot be assigned case "
+                    f"team role '{request.role}'. Allowed roles: {', '.join(allowed_case_roles)}"
+                ),
+            )
 
     # Build update. Typed as dict[str, Any] because the assigned values
     # are heterogeneous (str, list, datetime) — narrowing to str only

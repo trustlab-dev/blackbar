@@ -15,7 +15,7 @@ from ..cases.permissions import (
     get_user_role_on_case,
     is_case_team_member,
 )
-from ..core.authz import check_document_access
+from ..core.authz import assert_document_access, check_document_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
 
@@ -24,6 +24,25 @@ from ..dependencies import check_role, get_current_user
 
 
 router = APIRouter()
+
+# Fields a client may set when adding a redaction (AUTH-07). Everything else
+# (id, status, approval/contest state, source, creator) is server-controlled.
+_CLIENT_REDACTION_FIELDS = frozenset(
+    {
+        "x",
+        "y",
+        "width",
+        "height",
+        "page",
+        "category",
+        "description",
+        "reason",
+        "notes",
+        "text",
+        "color",
+        "section",
+    }
+)
 
 
 async def get_db(request: Request):
@@ -272,20 +291,17 @@ async def add_redaction(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Check case access
-    from ..cases.permissions import is_case_team_member
+    # Object-level access (AUTH-07): fails closed when the document has no
+    # case or its case was deleted; previously that skipped the check.
+    case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
+    assert_document_access(doc, current_user, case)
 
-    case = await db.cases.find_one({"id": doc["case_id"]})
-    # Owner and admin have full access, others need to be case team members
-    if case and current_user.get("role") not in ["owner", "admin"]:
-        if not is_case_team_member(case.get("case_team", []), current_user["id"]):
-            raise HTTPException(status_code=403, detail="You don't have access to this document")
-
-    # Ensure redaction has an ID and add creator info
+    # Only client-editable fields survive; the id and every workflow/status
+    # field are set here (no mass assignment, no id collisions).
     from datetime import datetime
 
-    if "id" not in redaction:
-        redaction["id"] = str(uuid.uuid4())
+    redaction = {k: v for k, v in redaction.items() if k in _CLIENT_REDACTION_FIELDS}
+    redaction["id"] = str(uuid.uuid4())
 
     # Add creator information
     redaction["created_by"] = current_user["id"]
@@ -453,14 +469,9 @@ async def delete_redaction(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Check case access
-    from ..cases.permissions import is_case_team_member
-
-    case = await db.cases.find_one({"id": doc["case_id"]})
-    # Owner and admin have full access, others need to be case team members
-    if case and current_user.get("role") not in ["owner", "admin"]:
-        if not is_case_team_member(case.get("case_team", []), current_user["id"]):
-            raise HTTPException(status_code=403, detail="You don't have access to this document")
+    # Object-level access (AUTH-07): fails closed for case-less documents.
+    case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
+    assert_document_access(doc, current_user, case)
 
     # Filter out the redaction with matching id
     redactions = doc.get("redactions", [])

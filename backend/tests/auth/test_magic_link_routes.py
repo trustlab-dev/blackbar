@@ -457,3 +457,39 @@ class TestDemoLogin:
         created_arg = users_repo.create.await_args.args[0]
         assert created_arg.email == "jordan.park@example.org"
         assert created_arg.name == "Jordan Park"
+
+
+class TestMagicLinkPrivacy:
+    async def test_send_failure_log_does_not_contain_raw_email(
+        self, app, override_magic_link_service, monkeypatch, caplog
+    ) -> None:
+        """AUTH-28: the one log line that printed the raw address now hashes it."""
+        import logging
+
+        import src.auth.magic_link_routes as _mod
+
+        monkeypatch.setattr(_mod.email_service, "send_magic_link", MagicMock(return_value=False))
+        override_magic_link_service(_make_mock_service())
+        with caplog.at_level(logging.WARNING, logger="src.auth.magic_link_routes"):
+            async with _client(app) as c:
+                r = await c.post(
+                    "/api/v1/auth/public/magic-link/request",
+                    json={"email": "private.person@example.org"},
+                )
+        assert r.status_code == 200
+        assert "private.person@example.org" not in caplog.text
+
+    async def test_link_uses_configured_base_url_not_host_header(
+        self, app, override_magic_link_service, stub_email_send, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://foi.example.gov")
+        override_magic_link_service(_make_mock_service())
+        async with _client(app) as c:
+            r = await c.post(
+                "/api/v1/auth/public/magic-link/request",
+                json={"email": "a@example.org"},
+                headers={"Host": "evil.example.com"},
+            )
+        assert r.status_code == 200
+        url = stub_email_send.call_args.kwargs["magic_link_url"]
+        assert url.startswith("https://foi.example.gov/public/verify/")

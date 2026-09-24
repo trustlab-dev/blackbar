@@ -28,8 +28,8 @@ dependencies = [
   # openai/anthropic/cohere SDKs removed: never imported; LLM providers are
   # called over raw HTTP via httpx (src/llm/service.py).
   "httpx>=0.28.1,<1.0.0",
-  "passlib>=1.7.4,<2.0.0",
-  "bcrypt>=4.0.0,<5.0.0",
+  # bcrypt is used directly (src/auth/security.py); passlib was dropped.
+  "bcrypt>=4.3.0,<6.0.0",
   # Floor for CVE-2026-48526
   "PyJWT[crypto]>=2.13.0,<3.0.0",
   "pydantic[email]>=2.5.0,<3.0.0",
@@ -79,7 +79,6 @@ dev = [
   "ruff>=0.6",
   "black>=24.8",
   "mypy>=1.11",
-  "types-passlib",
 ]
 
 # ----------------------------------------------------------------------------
@@ -108,7 +107,6 @@ markers = [
 ]
 filterwarnings = [
   "error",
-  "ignore::DeprecationWarning:passlib.*",
   "ignore::DeprecationWarning:motor.*",
   "ignore::DeprecationWarning:testcontainers.*",
   # Pydantic v2 deprecation noise from existing class-based Config blocks;

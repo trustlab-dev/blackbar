@@ -3,6 +3,7 @@ Repository for public users and magic link tokens
 Handles all database operations for public user management
 """
 
+import time
 import uuid
 from datetime import datetime
 
@@ -125,6 +126,9 @@ class MagicLinkTokensRepository:
             "expires_at": expires_at,
             "used": False,
             "created_at": datetime.utcnow(),
+            # Tiebreaker: Mongo stores datetimes at millisecond precision, so
+            # rapid requests can tie on created_at.
+            "created_at_ns": time.time_ns(),
             "ip_address": ip_address,
             "user_agent": user_agent,
         }
@@ -145,7 +149,9 @@ class MagicLinkTokensRepository:
     async def get_by_email(self, email: str) -> MagicLinkToken | None:
         """Get most recent unused, unexpired token for email"""
         query = {"email": email.lower(), "used": False, "expires_at": {"$gt": datetime.utcnow()}}
-        token_dict = await self.collection.find_one(query, sort=[("created_at", -1)])
+        token_dict = await self.collection.find_one(
+            query, sort=[("created_at", -1), ("created_at_ns", -1)]
+        )
 
         if not token_dict:
             return None
@@ -160,6 +166,19 @@ class MagicLinkTokensRepository:
             ip_address=token_dict.get("ip_address"),
             user_agent=token_dict.get("user_agent"),
         )
+
+    async def consume(self, token_id: str) -> bool:
+        """Atomically mark an unused, unexpired token as used.
+
+        Returns False if another request consumed it first or it expired, so
+        a magic link yields at most one session (AUTH-28).
+        """
+        now = datetime.utcnow()
+        consumed = await self.collection.find_one_and_update(
+            {"_id": token_id, "used": False, "expires_at": {"$gt": now}},
+            {"$set": {"used": True, "used_at": now}},
+        )
+        return consumed is not None
 
     async def mark_as_used(self, token_id: str) -> bool:
         """Mark token as used"""

@@ -779,24 +779,86 @@ class TestAddRedaction:
         case = await db.cases.find_one({"id": case_id})
         assert any(e.get("action") == "redaction_created" for e in case["audit_log"])
 
-    async def test_add_redaction_preserves_provided_id(
+    async def test_add_redaction_ignores_client_supplied_id(
         self,
         db: AsyncIOMotorDatabase,
         authed_client_factory,
         patch_routes_db,
     ) -> None:
-        """If the body includes `id`, the endpoint keeps it (pin: no
-        UUID regeneration when present)."""
+        """AUTH-07: the id is always server-generated. A caller-chosen id
+        could collide with an existing redaction so a later delete would
+        remove both."""
         client = await authed_client_factory(role="admin")
         case_id = await _seed_case_with_team_member(db, "x", "analyst")
-        doc_id = await _seed_document(db, case_id)
-        my_id = "my-custom-id-123"
+        doc_id = await _seed_document(db, case_id, redactions=[{"id": "taken", "page": 1}])
         r = await client.post(
             f"/api/v1/documents/{doc_id}/redactions",
-            json={"id": my_id, "page": 1, "x": 1, "y": 1, "width": 1, "height": 1},
+            json={"id": "taken", "page": 1, "x": 1, "y": 1, "width": 1, "height": 1},
         )
         assert r.status_code == 200
-        assert r.json()["id"] == my_id
+        assert r.json()["id"] != "taken"
+        doc = await db.documents.find_one({"id": doc_id})
+        assert [red["id"] for red in doc["redactions"]].count("taken") == 1
+
+    async def test_add_redaction_drops_server_controlled_fields(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """AUTH-07: the body is no longer pushed verbatim (mass assignment)."""
+        client = await authed_client_factory(role="user", email="mass@example.com")
+        me = await db.users.find_one({"email": "mass@example.com"})
+        case_id = await _seed_case_with_team_member(db, me["id"], "analyst")
+        doc_id = await _seed_document(db, case_id)
+        r = await client.post(
+            f"/api/v1/documents/{doc_id}/redactions",
+            json={
+                "page": 1,
+                "x": 1,
+                "y": 1,
+                "width": 1,
+                "height": 1,
+                "category": "S22",
+                "description": "why",
+                "approval_status": "approved",
+                "is_contested": True,
+                "source": "ai",
+                "created_by": "someone-else",
+                "status": "accepted",
+            },
+        )
+        assert r.status_code == 200, r.text
+        red = (await db.documents.find_one({"id": doc_id}))["redactions"][0]
+        assert red["category"] == "S22"
+        assert red["description"] == "why"
+        assert red["created_by"] == me["id"]
+        assert red["status"] == "pending"
+        for field in ("approval_status", "is_contested", "source"):
+            assert field not in red
+
+    @pytest.mark.parametrize("case_id", [None, "ghost-case"])
+    async def test_add_redaction_user_on_caseless_document_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        case_id,
+    ) -> None:
+        """AUTH-07: a document with no (or a deleted) case used to skip the
+        access check entirely (fail open)."""
+        client = await authed_client_factory(role="user")
+        doc = make_document()
+        doc["case_id"] = case_id
+        await db.documents.insert_one(doc)
+        r = await client.post(
+            f"/api/v1/documents/{doc['id']}/redactions",
+            json={"page": 1, "x": 1, "y": 1, "width": 1, "height": 1},
+        )
+        assert r.status_code == 403
+        assert "redactions" not in (await db.documents.find_one({"id": doc["id"]})) or not (
+            await db.documents.find_one({"id": doc["id"]})
+        ).get("redactions")
 
     async def test_add_redaction_user_on_team_can_add(
         self,
@@ -1395,6 +1457,24 @@ class TestDeleteRedaction:
         r = await client.delete(f"/api/v1/documents/{doc_id}/redactions/ghost")
         assert r.status_code == 404
         assert "Redaction not found" in r.text
+
+    @pytest.mark.parametrize("case_id", [None, "ghost-case"])
+    async def test_delete_user_on_caseless_document_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        case_id,
+    ) -> None:
+        """AUTH-07: deleting redactions on a case-less document must not fail
+        open (it leads to unredacted output via /export)."""
+        client = await authed_client_factory(role="user")
+        doc = make_document(redactions=[{"id": "r1", "page": 1}])
+        doc["case_id"] = case_id
+        await db.documents.insert_one(doc)
+        r = await client.delete(f"/api/v1/documents/{doc['id']}/redactions/r1")
+        assert r.status_code == 403
+        assert len((await db.documents.find_one({"id": doc["id"]}))["redactions"]) == 1
 
     async def test_delete_no_case_skips_audit(
         self,

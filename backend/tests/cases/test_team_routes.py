@@ -411,3 +411,163 @@ class TestUpdateTeamMember:
             json={"role": "analyst"},
         )
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Security review 2026-09: AUTH-10 (role escalation) and AUTH-11 (removal)
+# ---------------------------------------------------------------------------
+
+
+async def _client_for(db: AsyncIOMotorDatabase, app, user_id: str) -> AsyncClient:
+    from httpx import ASGITransport
+
+    from src.auth.auth_service import AuthService
+    from src.users.repository import UsersRepository
+
+    repo = UsersRepository(db)
+    user = await repo.get_by_id(user_id)
+    assert user is not None
+    token = await AuthService(repo).issue_token(user)
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+class TestCaseTeamRoleEscalation:
+    async def test_guest_cannot_be_promoted_to_manager_even_by_admin(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        guest_uid = await _seed_user(db, role="guest")
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": guest_uid, "role": "third_party", "status": "active"}]
+        )
+        client = await authed_client_factory(role="admin")
+        r = await client.put(
+            f"/api/v1/cases/{case_id}/team/members/{guest_uid}", json={"role": "manager"}
+        )
+        assert r.status_code == 400, r.text
+        case = await db.cases.find_one({"id": case_id})
+        assert case["case_team"][0]["role"] == "third_party"
+
+    async def test_case_manager_cannot_promote_guest(
+        self, app, db: AsyncIOMotorDatabase, patch_routes_db
+    ) -> None:
+        manager_uid = await _seed_user(db, role="user")
+        guest_uid = await _seed_user(db, role="guest")
+        case_id = await _seed_case(
+            db,
+            case_team=[
+                {"user_id": manager_uid, "role": "manager", "status": "active"},
+                {"user_id": guest_uid, "role": "third_party", "status": "active"},
+            ],
+        )
+        async with await _client_for(db, app, manager_uid) as c:
+            r = await c.put(
+                f"/api/v1/cases/{case_id}/team/members/{guest_uid}", json={"role": "analyst"}
+            )
+        assert r.status_code == 400, r.text
+
+    async def test_case_analyst_cannot_grant_manager(
+        self, app, db: AsyncIOMotorDatabase, patch_routes_db
+    ) -> None:
+        """Only owners/admins or a case manager may hand out `manager`."""
+        caller_uid = await _seed_user(db, role="analyst")
+        target_uid = await _seed_user(db, role="analyst")
+        case_id = await _seed_case(
+            db,
+            case_team=[
+                {"user_id": caller_uid, "role": "analyst", "status": "active"},
+                {"user_id": target_uid, "role": "analyst", "status": "active"},
+            ],
+        )
+        async with await _client_for(db, app, caller_uid) as c:
+            r = await c.put(
+                f"/api/v1/cases/{case_id}/team/members/{target_uid}", json={"role": "manager"}
+            )
+        assert r.status_code == 403, r.text
+
+    async def test_member_cannot_change_own_role(
+        self, app, db: AsyncIOMotorDatabase, patch_routes_db
+    ) -> None:
+        caller_uid = await _seed_user(db, role="analyst")
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": caller_uid, "role": "analyst", "status": "active"}]
+        )
+        async with await _client_for(db, app, caller_uid) as c:
+            r = await c.put(
+                f"/api/v1/cases/{case_id}/team/members/{caller_uid}", json={"role": "manager"}
+            )
+        assert r.status_code == 403, r.text
+
+    async def test_invalid_review_status_rejected(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        target_uid = await _seed_user(db, role="user")
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": target_uid, "role": "reviewer", "status": "active"}]
+        )
+        client = await authed_client_factory(role="admin")
+        r = await client.put(
+            f"/api/v1/cases/{case_id}/team/members/{target_uid}",
+            json={"review_status": "<script>"},
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_guest_with_manager_case_role_cannot_manage_team(
+        self, app, db: AsyncIOMotorDatabase, patch_routes_db
+    ) -> None:
+        """Legacy data: a guest already escalated to case manager is still
+        refused by the system-role gate on team writes."""
+        guest_uid = await _seed_user(db, role="guest")
+        other_uid = await _seed_user(db, role="user")
+        case_id = await _seed_case(
+            db,
+            case_team=[
+                {"user_id": guest_uid, "role": "manager", "status": "active"},
+                {"user_id": other_uid, "role": "reviewer", "status": "active"},
+            ],
+        )
+        async with await _client_for(db, app, guest_uid) as c:
+            r = await c.delete(f"/api/v1/cases/{case_id}/team/members/{other_uid}")
+        assert r.status_code == 403, r.text
+
+
+class TestRemovalAfterReAdd:
+    async def test_second_removal_revokes_the_active_entry(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        """AUTH-11: the positional `$` bound to the first (already removed)
+        entry, so the re-added member kept access while the API said OK."""
+        uid = await _seed_user(db, role="user")
+        case_id = await _seed_case(
+            db,
+            case_team=[
+                {"user_id": uid, "role": "reviewer", "status": "removed"},
+                {"user_id": uid, "role": "reviewer", "status": "active"},
+            ],
+        )
+        client = await authed_client_factory(role="admin")
+        r = await client.delete(f"/api/v1/cases/{case_id}/team/members/{uid}")
+        assert r.status_code == 200, r.text
+        case = await db.cases.find_one({"id": case_id})
+        assert [m["status"] for m in case["case_team"]] == ["removed", "removed"]
+
+    async def test_update_after_re_add_targets_the_active_entry(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        uid = await _seed_user(db, role="user")
+        case_id = await _seed_case(
+            db,
+            case_team=[
+                {"user_id": uid, "role": "reviewer", "status": "removed"},
+                {"user_id": uid, "role": "reviewer", "status": "active"},
+            ],
+        )
+        client = await authed_client_factory(role="admin")
+        r = await client.put(f"/api/v1/cases/{case_id}/team/members/{uid}", json={"role": "legal"})
+        assert r.status_code == 200, r.text
+        case = await db.cases.find_one({"id": case_id})
+        assert case["case_team"][1]["role"] == "legal"
+        assert case["case_team"][0]["role"] == "reviewer"
