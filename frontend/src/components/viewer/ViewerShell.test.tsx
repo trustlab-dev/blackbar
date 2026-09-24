@@ -867,6 +867,39 @@ describe('ViewerShell', () => {
     expect(screen.getByText('sample.pdf')).toBeInTheDocument();
   });
 
+  it('handleRejectSuggestion reports a refused (404) feedback call', async () => {
+    server.use(
+      http.post(FEEDBACK_URL, () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_404', message: 'Document not found' } },
+          { status: 404 },
+        ),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    mockPdfViewerProps.current.onSuggestionReject({
+      text: 'X', category: 'PII', section: 'A', reason: '', confidence: 'low', page: 1,
+    });
+    expect(await screen.findByText(/Rejection not recorded: Document not found/)).toBeInTheDocument();
+  });
+
+  it('loads cached AI suggestions on open without asking the backend to generate', async () => {
+    const queries: URLSearchParams[] = [];
+    server.use(
+      http.get(SUGG_URL, ({ request }) => {
+        queries.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ suggestions: [], status: 'not_generated', method: null });
+      }),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(queries.length).toBeGreaterThan(0));
+    for (const q of queries) {
+      expect(q.get('generate')).toBeNull();
+      expect(q.get('force_regenerate')).toBeNull();
+    }
+  });
+
   it('onTextSelected (select tool) triggers reason picker with multiple rects', async () => {
     renderWithProviders(<ViewerShell documentId="doc-1" />);
     await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());

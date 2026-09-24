@@ -2,17 +2,23 @@ import { describe, it, expect } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
 import {
   getApiErrorMessage,
+  getRetryAfterSeconds,
+  getRateLimitMessage,
   withParsedBlobErrorBody,
   DEFAULT_ERROR_MESSAGE,
   PUBLIC_TOKEN_FORBIDDEN_MESSAGE,
 } from './errors';
 
-function axiosError(status: number, data: unknown): AxiosError {
+function axiosError(
+  status: number,
+  data: unknown,
+  headers: Record<string, string> | AxiosHeaders = {},
+): AxiosError {
   const config = { headers: new AxiosHeaders() };
   return new AxiosError('Request failed', 'ERR_BAD_RESPONSE', config, null, {
     status,
     statusText: '',
-    headers: {},
+    headers,
     config,
     data,
   });
@@ -146,5 +152,75 @@ describe('withParsedBlobErrorBody', () => {
     const bad = axiosError(409, new Blob(['not json'], { type: 'application/json' }));
     expect(getApiErrorMessage(await withParsedBlobErrorBody(bad), 'fb')).toBe('fb');
     expect(await withParsedBlobErrorBody(undefined)).toBeUndefined();
+  });
+});
+
+describe('getApiErrorMessage — server errors with a user-facing message', () => {
+  const unusableKey = {
+    error: {
+      code: 'HTTP_503',
+      message: 'LLM API keys cannot be stored: LLM_API_KEY_ENCRYPTION_KEY is missing or invalid.',
+    },
+  };
+
+  it('keeps the fallback for 5xx by default', () => {
+    expect(getApiErrorMessage(axiosError(503, unusableKey), 'fb')).toBe('fb');
+  });
+
+  it('shows the backend message for statuses the caller opts in to', () => {
+    expect(
+      getApiErrorMessage(axiosError(503, unusableKey), 'fb', { serverMessageStatuses: [503] }),
+    ).toMatch(/LLM_API_KEY_ENCRYPTION_KEY is missing or invalid/);
+    // Other 5xx stay generic.
+    expect(
+      getApiErrorMessage(axiosError(500, unusableKey), 'fb', { serverMessageStatuses: [503] }),
+    ).toBe('fb');
+  });
+});
+
+describe('getRetryAfterSeconds / getRateLimitMessage', () => {
+  it('reads a numeric Retry-After header from a plain headers object', () => {
+    const err = axiosError(429, { error: { message: 'slow down' } }, { 'retry-after': '42' });
+    expect(getRetryAfterSeconds(err)).toBe(42);
+  });
+
+  it('reads Retry-After from AxiosHeaders regardless of case', () => {
+    const headers = new AxiosHeaders();
+    headers.set('Retry-After', '7');
+    expect(getRetryAfterSeconds(axiosError(429, {}, headers))).toBe(7);
+  });
+
+  it('converts an HTTP-date Retry-After into seconds from now', () => {
+    const inTwoMinutes = new Date(Date.now() + 120_000).toUTCString();
+    const seconds = getRetryAfterSeconds(axiosError(429, {}, { 'retry-after': inTwoMinutes }));
+    expect(seconds).toBeGreaterThanOrEqual(118);
+    expect(seconds).toBeLessThanOrEqual(120);
+  });
+
+  it('returns null when the header is missing or unparseable, or the error is not a 429', () => {
+    expect(getRetryAfterSeconds(axiosError(429, {}))).toBeNull();
+    expect(getRetryAfterSeconds(axiosError(429, {}, { 'retry-after': 'soon' }))).toBeNull();
+    expect(getRetryAfterSeconds(axiosError(400, {}, { 'retry-after': '5' }))).toBeNull();
+    expect(getRetryAfterSeconds(new Error('x'))).toBeNull();
+  });
+
+  it('builds "try again in N seconds" from the header', () => {
+    const err = axiosError(429, { error: { message: 'Too many' } }, { 'retry-after': '30' });
+    expect(getRateLimitMessage(err)).toBe('Too many requests. Try again in 30 seconds.');
+    expect(getRateLimitMessage(err, 'Too many AI analysis requests.')).toBe(
+      'Too many AI analysis requests. Try again in 30 seconds.',
+    );
+    const one = axiosError(429, {}, { 'retry-after': '1' });
+    expect(getRateLimitMessage(one)).toBe('Too many requests. Try again in 1 second.');
+  });
+
+  it('falls back to the backend message, then a generic one, without a header', () => {
+    const withMessage = axiosError(429, {
+      error: { code: 'HTTP_429', message: 'Please wait a minute and try again.' },
+    });
+    expect(getRateLimitMessage(withMessage)).toBe('Please wait a minute and try again.');
+    // slowapi's body is {error: "Rate limit exceeded: ..."} with no message.
+    const slowapi = axiosError(429, { error: 'Rate limit exceeded: 10 per 1 minute' });
+    expect(getRateLimitMessage(slowapi)).toBe('Too many requests. Please wait and try again.');
   });
 });

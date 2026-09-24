@@ -45,9 +45,19 @@ function firstValidationMessage(errors: unknown): string | null {
   return field ? `${field}: ${msg}` : msg;
 }
 
+export interface ApiErrorMessageOptions {
+  /**
+   * 5xx statuses whose backend message is meant for the user, e.g. the LLM
+   * admin routes' 503 "LLM_API_KEY_ENCRYPTION_KEY is missing or invalid"
+   * (backend/src/admin/llm_routes.py). Other 5xx keep the fallback.
+   */
+  serverMessageStatuses?: number[];
+}
+
 export function getApiErrorMessage(
   err: unknown,
   fallback: string = DEFAULT_ERROR_MESSAGE,
+  options: ApiErrorMessageOptions = {},
 ): string {
   if (!isObject(err)) return fallback;
   if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
@@ -58,7 +68,13 @@ export function getApiErrorMessage(
   if (!isObject(response)) return fallback;
   // Server faults: keep the caller's contextual message rather than
   // surfacing "Internal server error".
-  if (typeof response.status === 'number' && response.status >= 500) return fallback;
+  if (
+    typeof response.status === 'number' &&
+    response.status >= 500 &&
+    !options.serverMessageStatuses?.includes(response.status)
+  ) {
+    return fallback;
+  }
 
   const data = response.data;
   if (!isObject(data)) return fallback;
@@ -89,6 +105,55 @@ export function getApiErrorMessage(
   if (detail) return detail;
 
   return text(data.message) ?? fallback;
+}
+
+export const RATE_LIMIT_MESSAGE = 'Too many requests.';
+
+function headerValue(headers: unknown, name: string): string | null {
+  if (!isObject(headers)) return null;
+  const getter = (headers as { get?: unknown }).get;
+  if (typeof getter === 'function') {
+    const value: unknown = getter.call(headers, name);
+    if (typeof value === 'string' || typeof value === 'number') return String(value);
+  }
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+  const value = key ? headers[key] : undefined;
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : null;
+}
+
+/**
+ * Seconds to wait before retrying a 429, from its `Retry-After` header
+ * (delta-seconds or an HTTP date). Null when the error is not a 429 or the
+ * header is missing or unreadable. The LLM routes send it on per-user and
+ * per-document limits (backend/src/documents/redaction_suggestion_routes.py
+ * `_enforce_llm_limits`; error_handler.py keeps HTTPException headers).
+ */
+export function getRetryAfterSeconds(err: unknown): number | null {
+  if (!isObject(err) || !isObject(err.response) || err.response.status !== 429) return null;
+  const raw = headerValue(err.response.headers, 'retry-after')?.trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  const date = Date.parse(raw);
+  if (Number.isNaN(date)) return null;
+  return Math.max(0, Math.ceil((date - Date.now()) / 1000));
+}
+
+/**
+ * User-facing text for a 429: "<lead> Try again in N seconds." when the
+ * response carries Retry-After, else the backend's message, else a generic
+ * "please wait". Callers show it once; nothing retries automatically.
+ */
+export function getRateLimitMessage(err: unknown, lead: string = RATE_LIMIT_MESSAGE): string {
+  const seconds = getRetryAfterSeconds(err);
+  if (seconds !== null) {
+    const unit = seconds === 1 ? 'second' : 'seconds';
+    return `${lead} Try again in ${seconds} ${unit}.`;
+  }
+  return getApiErrorMessage(err, `${lead} Please wait and try again.`);
+}
+
+export function isRateLimited(err: unknown): boolean {
+  return isObject(err) && isObject(err.response) && err.response.status === 429;
 }
 
 /**

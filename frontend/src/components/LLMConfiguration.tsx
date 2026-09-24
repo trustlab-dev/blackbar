@@ -33,8 +33,15 @@ import TestIcon from '@mui/icons-material/PlayArrow';
 import SuccessIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
-import { getApiErrorMessage } from '../api/errors';
+import { getApiErrorMessage, getRateLimitMessage, isRateLimited } from '../api/errors';
 
+/**
+ * LLMConfigResponse (backend/src/llm/models.py). `api_key_set` is false when
+ * the stored key was cleared because the endpoint or provider changed
+ * without a new key (backend/src/llm/repository.py `update`). Header values
+ * always come back as MASKED_HEADER_VALUE; this form never edits or resends
+ * them, so the stored values are kept.
+ */
 interface LLMConfigData {
   id: string;
   name: string;
@@ -48,8 +55,30 @@ interface LLMConfigData {
     top_p: number;
   };
   notes?: string;
+  headers?: Record<string, string> | null;
+  api_key_set?: boolean;
   created_at: string;
 }
+
+interface TestResult {
+  success: boolean;
+  message: string;
+  errorCode?: string | null;
+  reference?: string | null;
+}
+
+// Current Anthropic model IDs; other providers retire IDs often enough that
+// the form points at their documentation instead of naming models.
+const MODEL_HINTS: Record<string, string> = {
+  anthropic:
+    'e.g. claude-sonnet-5 (suggested), claude-opus-5-5, claude-fable-5-1, claude-haiku-4-5-20251001',
+};
+const DEFAULT_MODEL_HINT = "Use a current model ID from the provider's documentation";
+
+// 503: LLM_API_KEY_ENCRYPTION_KEY missing or invalid (backend/src/admin/llm_routes.py).
+const LLM_ADMIN_ERROR_OPTIONS = { serverMessageStatuses: [503] };
+
+const hasStoredKey = (config: LLMConfigData | null) => Boolean(config && config.api_key_set !== false);
 
 const LLMConfiguration: React.FC = () => {
   const [configs, setConfigs] = useState<LLMConfigData[]>([]);
@@ -57,7 +86,8 @@ const LLMConfiguration: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [openDialog, setOpenDialog] = useState(false);
   const [editingConfig, setEditingConfig] = useState<LLMConfigData | null>(null);
-  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
+  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+  const [formError, setFormError] = useState('');
   const [testing, setTesting] = useState<Record<string, boolean>>({});
 
   const [formData, setFormData] = useState({
@@ -128,16 +158,51 @@ const LLMConfiguration: React.FC = () => {
         enabled: true
       });
     }
+    setFormError('');
     setOpenDialog(true);
   };
 
   const handleCloseDialog = () => {
     setOpenDialog(false);
     setEditingConfig(null);
+    setFormError('');
   };
 
+  // Changing the endpoint or provider without a new key makes the backend
+  // clear the stored key, so the key is re-entered before an enabled config
+  // is saved (LLM-05).
+  const destinationChanged =
+    !!editingConfig &&
+    (formData.api_endpoint !== editingConfig.api_endpoint ||
+      formData.request_format !== editingConfig.request_format);
+  const keyEntered = formData.api_key.trim() !== '';
+  const keyWillBeCleared = destinationChanged && !keyEntered;
+  const keyRequired =
+    !editingConfig || (formData.enabled && (!hasStoredKey(editingConfig) || destinationChanged));
+
+  const apiKeyHelperText = !editingConfig
+    ? 'Required'
+    : keyEntered
+      ? 'Replaces the stored key'
+      : destinationChanged
+        ? 'Needed for the new endpoint or provider'
+        : !hasStoredKey(editingConfig)
+          ? 'API key must be re-entered'
+          : 'Leave blank to keep the existing key';
+
   const handleSave = async () => {
+    if (keyRequired && !keyEntered) {
+      setFormError(
+        editingConfig
+          ? 'Enter the API key before saving this configuration as enabled.'
+          : 'Enter the API key.',
+      );
+      return;
+    }
+    setFormError('');
     try {
+      // Headers are deliberately left out: the backend returns them masked,
+      // and omitting them keeps the stored values.
       const payload = {
         name: formData.name,
         api_endpoint: formData.api_endpoint,
@@ -166,7 +231,10 @@ const LLMConfiguration: React.FC = () => {
       handleCloseDialog();
     } catch (error) {
       console.error('Error saving LLM config:', error);
-      alert('Failed to save configuration');
+      // 422: unsafe endpoint (http on a non-loopback host, private range).
+      setFormError(
+        getApiErrorMessage(error, 'Failed to save configuration', LLM_ADMIN_ERROR_OPTIONS),
+      );
     }
   };
 
@@ -192,6 +260,7 @@ const LLMConfiguration: React.FC = () => {
   };
 
   const handleTest = async (config: LLMConfigData) => {
+    if (!hasStoredKey(config)) return;
     setTesting(prev => ({ ...prev, [config.id]: true }));
     setTestResults(prev => ({ ...prev, [config.id]: undefined as any }));
     try {
@@ -206,14 +275,17 @@ const LLMConfiguration: React.FC = () => {
         ...prev,
         [config.id]: {
           success: data.success,
-          message: data.message + (data.response ? `\n\nLLM Response: "${data.response}"` : '')
+          message: data.message + (data.response ? `\n\nLLM Response: "${data.response}"` : ''),
+          errorCode: data.error_code,
+          reference: data.reference,
         }
       }));
     } catch (error: any) {
-      setTestResults(prev => ({
-        ...prev,
-        [config.id]: { success: false, message: getApiErrorMessage(error, 'Connection failed') }
-      }));
+      // No automatic retry on 429: the admin runs the test again.
+      const message = isRateLimited(error)
+        ? getRateLimitMessage(error, 'Too many connection tests.')
+        : getApiErrorMessage(error, 'Connection failed', LLM_ADMIN_ERROR_OPTIONS);
+      setTestResults(prev => ({ ...prev, [config.id]: { success: false, message } }));
     } finally {
       setTesting(prev => ({ ...prev, [config.id]: false }));
     }
@@ -278,6 +350,9 @@ const LLMConfiguration: React.FC = () => {
                   <TableCell>{config.model_name}</TableCell>
                   <TableCell>
                     <Chip label={config.enabled ? 'Enabled' : 'Disabled'} color={config.enabled ? 'success' : 'default'} size="small" />
+                    {!hasStoredKey(config) && (
+                      <Chip label="API key must be re-entered" color="warning" size="small" sx={{ ml: 0.5 }} />
+                    )}
                   </TableCell>
                   <TableCell>
                     {defaultLLM?.id === config.id ? (
@@ -287,7 +362,13 @@ const LLMConfiguration: React.FC = () => {
                     )}
                   </TableCell>
                   <TableCell>
-                    {testing[config.id] ? (
+                    {!hasStoredKey(config) ? (
+                      <Tooltip title="Enter the API key (Edit) before testing">
+                        <span>
+                          <IconButton size="small" disabled aria-label="Test connection"><TestIcon /></IconButton>
+                        </span>
+                      </Tooltip>
+                    ) : testing[config.id] ? (
                       <CircularProgress size={20} />
                     ) : testResults[config.id] ? (
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -321,7 +402,17 @@ const LLMConfiguration: React.FC = () => {
             return next;
           })}
         >
-          {result.message}
+          <span>{result.message}</span>
+          {(result.errorCode || result.reference) && (
+            <Typography variant="caption" component="div" sx={{ mt: 0.5 }}>
+              {[
+                result.errorCode && `Error code: ${result.errorCode}`,
+                result.reference && `Reference: ${result.reference}`,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </Typography>
+          )}
         </Alert>
       ))}
 
@@ -329,6 +420,7 @@ const LLMConfiguration: React.FC = () => {
         <DialogTitle>{editingConfig ? 'Edit LLM Configuration' : 'Add LLM Configuration'}</DialogTitle>
         <DialogContent>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
+            {formError && <Alert severity="error">{formError}</Alert>}
             <TextField label="Name" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} fullWidth required />
             <FormControl fullWidth required>
               <InputLabel>Request Format</InputLabel>
@@ -339,9 +431,21 @@ const LLMConfiguration: React.FC = () => {
                 <MenuItem value="cohere">Cohere</MenuItem>
               </Select>
             </FormControl>
-            <TextField label="API Endpoint" value={formData.api_endpoint} onChange={(e) => setFormData({ ...formData, api_endpoint: e.target.value })} fullWidth required helperText="Full URL (e.g., https://api.openai.com/v1/chat/completions)" />
-            <TextField label="API Key" type="password" value={formData.api_key} onChange={(e) => setFormData({ ...formData, api_key: e.target.value })} fullWidth required={!editingConfig} helperText={editingConfig ? "Leave blank to keep existing key" : "Required"} />
-            <TextField label="Model Name" value={formData.model_name} onChange={(e) => setFormData({ ...formData, model_name: e.target.value })} fullWidth required helperText="e.g., gpt-4o-mini, gpt-4o, claude-3-5-sonnet-latest" />
+            <TextField label="API Endpoint" value={formData.api_endpoint} onChange={(e) => setFormData({ ...formData, api_endpoint: e.target.value })} fullWidth required helperText="Full https URL (e.g., https://api.openai.com/v1/chat/completions). http is only accepted for localhost." />
+            {keyWillBeCleared && (
+              <Alert severity="warning">
+                Changing the endpoint or provider clears the stored API key. Enter the key again, or
+                AI calls using this configuration will fail.
+              </Alert>
+            )}
+            <TextField label="API Key" type="password" value={formData.api_key} onChange={(e) => setFormData({ ...formData, api_key: e.target.value })} fullWidth required={keyRequired} error={Boolean(formError) && keyRequired && !keyEntered} helperText={apiKeyHelperText} />
+            <TextField label="Model Name" value={formData.model_name} onChange={(e) => setFormData({ ...formData, model_name: e.target.value })} fullWidth required placeholder={formData.request_format === 'anthropic' ? 'claude-sonnet-5' : undefined} helperText={MODEL_HINTS[formData.request_format] ?? DEFAULT_MODEL_HINT} />
+            {editingConfig?.headers && Object.keys(editingConfig.headers).length > 0 && (
+              <Typography variant="caption" color="textSecondary">
+                Custom headers: {Object.keys(editingConfig.headers).join(', ')} (values hidden; kept
+                unchanged when you save)
+              </Typography>
+            )}
             <TextField label="Temperature" type="number" value={formData.temperature} onChange={(e) => setFormData({ ...formData, temperature: parseFloat(e.target.value) })} inputProps={{ min: 0, max: 2, step: 0.1 }} fullWidth />
             <TextField label="Max Tokens" type="number" value={formData.max_tokens} onChange={(e) => setFormData({ ...formData, max_tokens: parseInt(e.target.value) })} inputProps={{ min: 1 }} fullWidth />
             <TextField label="Notes" value={formData.notes} onChange={(e) => setFormData({ ...formData, notes: e.target.value })} fullWidth multiline rows={2} />

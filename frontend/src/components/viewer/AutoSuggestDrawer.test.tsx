@@ -25,6 +25,7 @@ const { __locStub } = vi.hoisted(() => {
 });
 void __locStub;
 
+import type { ComponentProps } from 'react';
 import { http, HttpResponse } from 'msw';
 import { waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -322,7 +323,10 @@ describe('AutoSuggestDrawer', () => {
     const aiTab = await screen.findByRole('tab', { name: /AI Recommended/i });
     await userEvent.click(aiTab);
     await waitFor(() => expect(screen.getByText('llm down')).toBeInTheDocument());
-    expect(screen.getByText(/Regenerate AI Suggestions/)).toBeInTheDocument();
+    // The load failed, so whether a result exists is unknown: offer Generate
+    // (generate=true reuses a cached result instead of forcing a new call).
+    expect(screen.getByRole('button', { name: /Generate AI Suggestions/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Regenerate AI Suggestions/)).toBeNull();
   });
 
   it('Accept button on AI suggestion applies it', async () => {
@@ -697,5 +701,258 @@ describe('AutoSuggestDrawer', () => {
     // …but the Regenerate controls are gone.
     expect(screen.queryByRole('button', { name: 'Regenerate' })).toBeNull();
     expect(screen.queryByText(/Regenerate AI Suggestions/)).toBeNull();
+  });
+
+  // ---- LLM contract (backend commit 885de89) ------------------------------
+
+  function renderDrawer(props: Partial<ComponentProps<typeof AutoSuggestDrawer>> = {}) {
+    return renderWithProviders(
+      <AutoSuggestDrawer
+        open={true}
+        onClose={() => {}}
+        documentId="doc-1"
+        onApplySuggestions={() => {}}
+        existingRedactions={[]}
+        {...props}
+      />,
+    );
+  }
+
+  async function openAiTab() {
+    await userEvent.click(await screen.findByRole('tab', { name: /AI Recommended/i }));
+  }
+
+  /** Records every AI (quick=false) request's query string. */
+  function aiHandler(respond: (url: URL) => Response | Promise<Response>) {
+    const aiRequests: URLSearchParams[] = [];
+    server.use(
+      http.get(SUGG_URL, ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get('quick') === 'false') {
+          aiRequests.push(url.searchParams);
+          return respond(url);
+        }
+        return HttpResponse.json({ suggestions: [] });
+      }),
+    );
+    return aiRequests;
+  }
+
+  it('opening the AI tab does not ask for generation; Generate sends generate=true', async () => {
+    const aiRequests = aiHandler((url) =>
+      url.searchParams.get('generate') === 'true'
+        ? HttpResponse.json({
+            suggestions: aiSuggs(),
+            status: 'ai_complete',
+            method: 'llm',
+            summary: 'AI identified 2 potential redactions',
+          })
+        : HttpResponse.json({
+            suggestions: [],
+            status: 'not_generated',
+            method: null,
+            summary: 'AI suggestions have not been generated for this document.',
+          }),
+    );
+    renderDrawer();
+    await openAiTab();
+    const generate = await screen.findByRole('button', { name: /^Generate AI Suggestions$/ });
+    expect(screen.getByText(/have not been generated for this document/i)).toBeInTheDocument();
+    expect(aiRequests).toHaveLength(1);
+    expect(aiRequests[0].get('generate')).toBeNull();
+    expect(aiRequests[0].get('force_regenerate')).toBeNull();
+
+    await userEvent.click(generate);
+    await waitFor(() => expect(screen.getByText('Confidential')).toBeInTheDocument());
+    expect(aiRequests).toHaveLength(2);
+    expect(aiRequests[1].get('generate')).toBe('true');
+    expect(aiRequests[1].get('force_regenerate')).toBeNull();
+  });
+
+  it('Regenerate sends generate=true and force_regenerate=true', async () => {
+    const aiRequests = aiHandler(() =>
+      HttpResponse.json({ suggestions: aiSuggs(), status: 'cached', method: 'llm' }),
+    );
+    renderDrawer();
+    await openAiTab();
+    await waitFor(() => expect(screen.getByText('Confidential')).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: 'Regenerate' }));
+    await waitFor(() => expect(aiRequests).toHaveLength(2));
+    expect(aiRequests[1].get('generate')).toBe('true');
+    expect(aiRequests[1].get('force_regenerate')).toBe('true');
+  });
+
+  it('renders the ai_unavailable notice without a Generate call to action', async () => {
+    aiHandler(() =>
+      HttpResponse.json({
+        suggestions: [],
+        status: 'ai_unavailable',
+        method: null,
+        error: 'ai_disabled',
+        error_code: 'ai_disabled',
+        summary: 'AI features are disabled for this configuration.',
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    expect(await screen.findByText(/AI suggestions are unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/AI features are disabled for this configuration/)).toBeInTheDocument();
+    expect(screen.getByText(/LLM Configuration/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Generate AI Suggestions/ })).toBeNull();
+  });
+
+  it('renders ai_error with the error code and reference', async () => {
+    aiHandler(() =>
+      HttpResponse.json({
+        suggestions: [],
+        status: 'ai_error',
+        method: 'llm',
+        error: 'provider_error',
+        error_code: 'provider_error',
+        reference: 'ref-1234abcd',
+        summary: 'AI analysis failed (reference ref-1234abcd).',
+        provider: 'anthropic',
+        model: 'claude-sonnet-5',
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    expect(await screen.findByText(/AI analysis failed \(reference ref-1234abcd\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Error code: provider_error/)).toBeInTheDocument();
+    expect(screen.getByText(/Reference: ref-1234abcd/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Regenerate AI Suggestions/ })).toBeInTheDocument();
+  });
+
+  it('treats a cached result that carries an error_code as an error', async () => {
+    aiHandler(() =>
+      HttpResponse.json({
+        suggestions: [],
+        status: 'cached',
+        method: 'llm',
+        error_code: 'unparseable_output',
+        reference: 'ref-9',
+        summary: 'The AI response could not be read; no suggestions were produced.',
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    expect(await screen.findByText(/Error code: unparseable_output/)).toBeInTheDocument();
+    expect(screen.getByText(/Reference: ref-9/)).toBeInTheDocument();
+  });
+
+  it('warns about partial analysis and shows provider/model provenance', async () => {
+    aiHandler(() =>
+      HttpResponse.json({
+        suggestions: aiSuggs(),
+        status: 'ai_complete',
+        method: 'llm',
+        analysis_truncated: true,
+        analysed_chars: 200000,
+        total_chars: 350000,
+        chunks: 12,
+        output_truncated: false,
+        invalid_suggestions: 0,
+        provider: 'anthropic',
+        model: 'claude-sonnet-5',
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    await waitFor(() => expect(screen.getByText('Confidential')).toBeInTheDocument());
+    expect(screen.getByText(/Partial analysis/i)).toBeInTheDocument();
+    expect(screen.getByText(/200,000 of 350,000 characters/)).toBeInTheDocument();
+    expect(screen.getByText(/anthropic · claude-sonnet-5/)).toBeInTheDocument();
+  });
+
+  it('warns when the model output was cut off', async () => {
+    aiHandler(() =>
+      HttpResponse.json({
+        suggestions: aiSuggs(),
+        status: 'ai_complete',
+        method: 'llm',
+        analysis_truncated: false,
+        analysed_chars: 1000,
+        total_chars: 1000,
+        output_truncated: true,
+        invalid_suggestions: 2,
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    await waitFor(() => expect(screen.getByText('Confidential')).toBeInTheDocument());
+    expect(screen.getByText(/Partial analysis/i)).toBeInTheDocument();
+    expect(screen.getByText(/response was cut off/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 malformed suggestions were discarded/i)).toBeInTheDocument();
+    expect(screen.queryByText(/characters were analysed/)).toBeNull();
+  });
+
+  it('shows "try again in N seconds" on a 429 and does not retry by itself', async () => {
+    const aiRequests = aiHandler((url) =>
+      url.searchParams.get('generate') === 'true'
+        ? HttpResponse.json(
+            { error: { code: 'HTTP_429', message: 'Too many AI analysis requests.' } },
+            { status: 429, headers: { 'Retry-After': '30' } },
+          )
+        : HttpResponse.json({ suggestions: [], status: 'not_generated', method: null }),
+    );
+    renderDrawer();
+    await openAiTab();
+    await userEvent.click(await screen.findByRole('button', { name: /^Generate AI Suggestions$/ }));
+    expect(await screen.findByText(/Try again in 30 seconds/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(aiRequests).toHaveLength(2);
+    // Still offered as a manual action.
+    expect(screen.getByRole('button', { name: /^Generate AI Suggestions$/ })).toBeInTheDocument();
+  });
+
+  it('shows the backend message when rejection feedback is refused (403)', async () => {
+    let body: any = null;
+    aiHandler(() => HttpResponse.json({ suggestions: aiSuggs(), status: 'cached', method: 'llm' }));
+    server.use(
+      http.post(FEEDBACK_URL, async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json(
+          { error: { code: 'HTTP_403', message: 'You do not have access to this document' } },
+          { status: 403 },
+        );
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    await waitFor(() => expect(screen.getByText('Confidential')).toBeInTheDocument());
+    await userEvent.click(screen.getAllByRole('button', { name: 'Reject' })[0]);
+    expect(
+      await screen.findByText(/You do not have access to this document/),
+    ).toBeInTheDocument();
+    expect(body).toMatchObject({
+      suggestion_text: 'Confidential',
+      suggestion_category: 'CONF',
+      suggestion_reason: 'classified',
+      feedback: 'rejected',
+    });
+  });
+
+  it('sends empty strings rather than omitting category/reason in feedback', async () => {
+    let body: any = null;
+    aiHandler(() =>
+      HttpResponse.json({
+        suggestions: [{ text: 'Bare', confidence: 'low', page: 1 }],
+        status: 'cached',
+        method: 'llm',
+      }),
+    );
+    server.use(
+      http.post(FEEDBACK_URL, async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json({ success: true });
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    await waitFor(() => expect(screen.getByText('Bare')).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => expect(body).not.toBeNull());
+    expect(body.suggestion_category).toBe('');
+    expect(body.suggestion_reason).toBe('');
   });
 });

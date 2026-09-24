@@ -11,6 +11,7 @@ import Checkbox from '@mui/material/Checkbox';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import CircularProgress from '@mui/material/CircularProgress';
 import Alert from '@mui/material/Alert';
+import AlertTitle from '@mui/material/AlertTitle';
 import Chip from '@mui/material/Chip';
 import FormControl from '@mui/material/FormControl';
 import InputLabel from '@mui/material/InputLabel';
@@ -22,7 +23,8 @@ import Collapse from '@mui/material/Collapse';
 import ExpandMore from '@mui/icons-material/ExpandMore';
 import ExpandLess from '@mui/icons-material/ExpandLess';
 import api, { TRANSFER_TIMEOUT_MS } from '../../api/client';
-import { getApiErrorMessage } from '../../api/errors';
+import { getApiErrorMessage, getRateLimitMessage, isRateLimited } from '../../api/errors';
+import { postAiFeedback } from '../../api/aiFeedback';
 
 interface Suggestion {
   text: string;
@@ -45,6 +47,45 @@ interface Suggestion {
   requires_human_review?: boolean;
   harm_identified?: string;
 }
+
+/**
+ * Everything but `suggestions` from GET /documents/{id}/redaction-suggestions
+ * (backend/src/documents/redaction_suggestion_routes.py). Opening the drawer
+ * never triggers generation: without a cached result the backend answers
+ * `not_generated` unless `generate=true` is sent. `ai_unavailable` means AI
+ * is disabled or not configured (nothing was sent); `ai_error` (or a cached
+ * result carrying `error_code`) means the provider call failed.
+ */
+interface AiAnalysis {
+  status?: string;
+  summary?: string;
+  method?: string | null;
+  generated_at?: string | null;
+  analysis_truncated?: boolean;
+  analysed_chars?: number;
+  total_chars?: number;
+  chunks?: number;
+  output_truncated?: boolean;
+  invalid_suggestions?: number;
+  provider?: string | null;
+  model?: string | null;
+  error?: string | null;
+  error_code?: string | null;
+  reference?: string | null;
+}
+
+type AiFetchMode = 'load' | 'generate' | 'regenerate';
+
+const AI_FETCH_QUERY: Record<AiFetchMode, string> = {
+  load: '?quick=false',
+  generate: '?quick=false&generate=true',
+  regenerate: '?quick=false&generate=true&force_regenerate=true',
+};
+
+// Statuses after which there is no stored result to regenerate.
+const NO_RESULT_STATUSES = new Set(['not_generated', 'ai_unavailable', 'no_text']);
+
+const formatCount = (n: number | undefined) => (n ?? 0).toLocaleString('en-CA');
 
 interface Redaction {
   x: number;
@@ -74,6 +115,7 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
   const [loadingAi, setLoadingAi] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [aiSuggestionsFetched, setAiSuggestionsFetched] = useState(false);
+  const [aiAnalysis, setAiAnalysis] = useState<AiAnalysis | null>(null);
   const [pageFilter, setPageFilter] = useState<number | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   // Track which AI-suggestion rows have their "Why" reasoning expanded.
@@ -157,35 +199,51 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
     }
   };
 
-  // forceRegenerate=true bypasses the backend cache and re-calls the LLM.
-  // The drawer's "Generate" button does a normal fetch (uses cache if
-  // present); the "Regenerate" button passes true so it actually re-runs
-  // and picks up any prompt changes since the last cached result.
-  const fetchAiSuggestions = async (forceRegenerate: boolean = false) => {
+  // 'load' reads the cached result (or `not_generated`) and never asks the
+  // backend to call the LLM. 'generate' (the Generate button) sends
+  // generate=true, which reuses a cached result if one exists; 'regenerate'
+  // also sends force_regenerate=true to make a fresh LLM call. A 429 is shown
+  // once with its Retry-After; nothing retries automatically.
+  const fetchAiSuggestions = async (mode: AiFetchMode = 'load') => {
     setLoadingAi(true);
     setErrorMessage('');
     try {
-      const qs = forceRegenerate ? '?quick=false&force_regenerate=true' : '?quick=false';
       // LLM-backed; can run well past the default request timeout.
-      const response = await api.get(`/documents/${documentId}/redaction-suggestions${qs}`, {
-        timeout: TRANSFER_TIMEOUT_MS,
-      });
-      const allSuggestions = response.data.suggestions || [];
-      
+      const response = await api.get(
+        `/documents/${documentId}/redaction-suggestions${AI_FETCH_QUERY[mode]}`,
+        { timeout: TRANSFER_TIMEOUT_MS },
+      );
+      const { suggestions: allSuggestions = [], ...analysis } = response.data || {};
+
       // Filter out already applied suggestions
-      const suggestions = allSuggestions.filter((s: Suggestion) => !isAlreadyRedacted(s));
-      
+      const suggestions = (allSuggestions as Suggestion[]).filter((s) => !isAlreadyRedacted(s));
+
       setAiSuggestions(suggestions);
+      setAiAnalysis(analysis as AiAnalysis);
       setAiSuggestionsFetched(true);
       // Don't auto-select AI suggestions - user must explicitly choose
       setSelectedAi(new Set());
     } catch (error: any) {
       console.error('Error fetching AI suggestions:', error);
-      setErrorMessage(getApiErrorMessage(error, 'Failed to load AI suggestions'));
+      setErrorMessage(
+        isRateLimited(error)
+          ? getRateLimitMessage(error, 'Too many AI analysis requests.')
+          : // The route's 500 carries a support reference worth showing.
+            getApiErrorMessage(error, 'Failed to load AI suggestions', {
+              serverMessageStatuses: [500],
+            }),
+      );
       setAiSuggestionsFetched(true);
     } finally {
       setLoadingAi(false);
     }
+  };
+
+  const feedbackFailureMessage = (error: unknown, failed = 1) => {
+    const reason = getApiErrorMessage(error, 'the server could not save it.');
+    return failed > 1
+      ? `${failed} rejections not recorded: ${reason}`
+      : `Rejection not recorded: ${reason}`;
   };
 
   const handleTabChange = (_event: React.SyntheticEvent, newValue: number) => {
@@ -236,14 +294,8 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
     const suggestion = aiSuggestions[index];
     
     try {
-      // Send rejection feedback to backend for fine-tuning
-      await api.post(`/documents/${documentId}/ai-feedback`, {
-        suggestion_text: suggestion.text,
-        suggestion_category: suggestion.category,
-        suggestion_reason: suggestion.reason,
-        feedback: 'rejected',
-        context: 'user_rejected_suggestion'
-      });
+      // Record the rejection so the suggestion is marked rejected next time.
+      await postAiFeedback(documentId, suggestion, 'rejected', 'user_rejected_suggestion');
       
       // Remove from list
       const remainingSuggestions = aiSuggestions.filter((_, i) => i !== index);
@@ -255,6 +307,7 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
       setSelectedAi(newSelected);
     } catch (error) {
       console.error('Failed to record rejection:', error);
+      setErrorMessage(feedbackFailureMessage(error));
       // Still remove from list even if API call fails
       const remainingSuggestions = aiSuggestions.filter((_, i) => i !== index);
       setAiSuggestions(remainingSuggestions);
@@ -265,19 +318,18 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
     const selectedSuggestions = aiSuggestions.filter((_, i) => selectedAi.has(i));
     
     // Send all rejections to backend
+    let failed = 0;
+    let lastError: unknown = null;
     for (const suggestion of selectedSuggestions) {
       try {
-        await api.post(`/documents/${documentId}/ai-feedback`, {
-          suggestion_text: suggestion.text,
-          suggestion_category: suggestion.category,
-          suggestion_reason: suggestion.reason,
-          feedback: 'rejected',
-          context: 'user_rejected_bulk'
-        });
+        await postAiFeedback(documentId, suggestion, 'rejected', 'user_rejected_bulk');
       } catch (error) {
         console.error('Failed to record rejection:', error);
+        failed += 1;
+        lastError = error;
       }
     }
+    if (failed) setErrorMessage(feedbackFailureMessage(lastError, failed));
     
     // Remove rejected suggestions from list
     const remainingSuggestions = aiSuggestions.filter((_, i) => !selectedAi.has(i));
@@ -309,19 +361,18 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
     if (suggestionsToReject.length === 0) return;
     
     // Send all rejections to backend
+    let failed = 0;
+    let lastError: unknown = null;
     for (const suggestion of suggestionsToReject) {
       try {
-        await api.post(`/documents/${documentId}/ai-feedback`, {
-          suggestion_text: suggestion.text,
-          suggestion_category: suggestion.category,
-          suggestion_reason: suggestion.reason,
-          feedback: 'rejected',
-          context: 'user_rejected_bulk_filtered'
-        });
+        await postAiFeedback(documentId, suggestion, 'rejected', 'user_rejected_bulk_filtered');
       } catch (error) {
         console.error('Failed to record rejection:', error);
+        failed += 1;
+        lastError = error;
       }
     }
+    if (failed) setErrorMessage(feedbackFailureMessage(lastError, failed));
     
     // Remove rejected suggestions from list
     const rejectedIndices = new Set(
@@ -379,6 +430,89 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
     if (categoryFilter && s.category !== categoryFilter) return false;
     return true;
   });
+
+  const aiStatus = aiAnalysis?.status;
+  const aiNotGenerated = aiStatus === 'not_generated';
+  const aiUnavailable = aiStatus === 'ai_unavailable';
+  const aiFailed = !aiUnavailable && (aiStatus === 'ai_error' || Boolean(aiAnalysis?.error_code));
+  const hasAiResult = Boolean(aiStatus) && !NO_RESULT_STATUSES.has(aiStatus as string);
+  const aiPartial = Boolean(aiAnalysis?.analysis_truncated || aiAnalysis?.output_truncated);
+  const invalidCount = aiAnalysis?.invalid_suggestions ?? 0;
+
+  const generateButton = !demoMode && (
+    <Button
+      variant="contained"
+      fullWidth
+      onClick={() => fetchAiSuggestions(hasAiResult ? 'regenerate' : 'generate')}
+    >
+      {hasAiResult ? 'Regenerate AI Suggestions' : 'Generate AI Suggestions'}
+    </Button>
+  );
+
+  const aiNotices = aiAnalysis && (
+    <Box sx={{ mb: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
+      {aiNotGenerated && (
+        <Alert severity="info">
+          {aiAnalysis.summary || 'AI suggestions have not been generated for this document.'}
+          {!demoMode && (
+            <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
+              Generating sends the document text to the configured AI provider.
+            </Typography>
+          )}
+        </Alert>
+      )}
+      {aiUnavailable && (
+        <Alert severity="warning">
+          <AlertTitle>AI suggestions are unavailable</AlertTitle>
+          {aiAnalysis.summary}
+          <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
+            AI is disabled or not configured. An administrator can set it up under Admin →
+            LLM Configuration.
+            {aiAnalysis.reference ? ` Reference: ${aiAnalysis.reference}` : ''}
+          </Typography>
+        </Alert>
+      )}
+      {aiFailed && (
+        <Alert severity="error">
+          {aiAnalysis.summary || 'AI analysis failed.'}
+          <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
+            {[
+              aiAnalysis.error_code && `Error code: ${aiAnalysis.error_code}`,
+              aiAnalysis.reference && `Reference: ${aiAnalysis.reference}`,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </Typography>
+        </Alert>
+      )}
+      {aiPartial && (
+        <Alert severity="warning">
+          <AlertTitle>Partial analysis</AlertTitle>
+          {aiAnalysis.analysis_truncated && (
+            <Typography variant="body2">
+              Only {formatCount(aiAnalysis.analysed_chars)} of {formatCount(aiAnalysis.total_chars)}{' '}
+              characters were analysed. Review the rest of the document manually.
+            </Typography>
+          )}
+          {aiAnalysis.output_truncated && (
+            <Typography variant="body2">
+              The AI response was cut off, so some suggestions may be missing.
+            </Typography>
+          )}
+        </Alert>
+      )}
+      {(aiAnalysis.provider || aiAnalysis.model || invalidCount > 0) && (
+        <Typography variant="caption" color="text.secondary" data-testid="ai-provenance">
+          {(aiAnalysis.provider || aiAnalysis.model) &&
+            `Generated by ${[aiAnalysis.provider, aiAnalysis.model].filter(Boolean).join(' · ')}`}
+          {invalidCount > 0 &&
+            `${aiAnalysis.provider || aiAnalysis.model ? '. ' : ''}${invalidCount} malformed ${
+              invalidCount === 1 ? 'suggestion was' : 'suggestions were'
+            } discarded.`}
+        </Typography>
+      )}
+    </Box>
+  );
 
   return (
     <Drawer
@@ -558,21 +692,26 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
                     Typically ~10–25s depending on provider, document length, and current load.
                   </Typography>
                 </Box>
-              ) : filteredAiSuggestions.length === 0 && !loadingAi ? (
+              ) : aiNotGenerated || aiUnavailable ? (
                 <Box>
-                  <Alert severity={aiSuggestionsFetched ? "success" : "info"} sx={{ mb: 2 }}>
-                    {aiSuggestionsFetched 
-                      ? 'All AI suggestions have been applied or filtered out'
-                      : 'AI suggestions not loaded yet'}
-                  </Alert>
-                  {!demoMode && (
-                    <Button variant="contained" fullWidth onClick={() => fetchAiSuggestions(aiSuggestionsFetched)}>
-                      {aiSuggestionsFetched ? 'Regenerate AI Suggestions' : 'Generate AI Suggestions'}
-                    </Button>
-                  )}
+                  {aiNotices}
+                  {aiNotGenerated && generateButton}
+                </Box>
+              ) : filteredAiSuggestions.length === 0 ? (
+                <Box>
+                  {aiNotices}
+                  {!aiSuggestionsFetched ? (
+                    <Alert severity="info" sx={{ mb: 2 }}>AI suggestions not loaded yet</Alert>
+                  ) : hasAiResult && !aiFailed ? (
+                    <Alert severity="success" sx={{ mb: 2 }}>
+                      All AI suggestions have been applied or filtered out
+                    </Alert>
+                  ) : null}
+                  {generateButton}
                 </Box>
               ) : (
                 <>
+                  {aiNotices}
                   {/* Bulk Action Buttons */}
                   {filteredAiSuggestions.length > 0 && (
                     <Box sx={{ mb: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
@@ -602,7 +741,7 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
                       {selectedAi.size === aiSuggestions.length ? 'Deselect All' : 'Select All'}
                     </Button>
                     {!demoMode && (
-                      <Button size="small" startIcon={<Refresh />} onClick={() => fetchAiSuggestions(true)}>
+                      <Button size="small" startIcon={<Refresh />} onClick={() => fetchAiSuggestions('regenerate')}>
                         Regenerate
                       </Button>
                     )}

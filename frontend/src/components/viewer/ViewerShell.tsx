@@ -71,6 +71,7 @@ import ReasonPickerModal, { RedactionReason } from './ReasonPickerModal';
 import SuggestedRedactionOverlay from './SuggestedRedactionOverlay';
 import './ViewerShell.css';
 import { getApiErrorMessage } from '../../api/errors';
+import { postAiFeedback } from '../../api/aiFeedback';
 
 interface Props {
   documentId: string;
@@ -254,6 +255,10 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
     }
   };
 
+  // Reads cached AI suggestions for the page overlay. It never sends
+  // generate=true: opening a document must not send it to the LLM (the
+  // backend answers `not_generated`); generation is an explicit action in
+  // the Auto Suggest drawer.
   const fetchSuggestions = async () => {
     setLoadingSuggestions(true);
     try {
@@ -608,17 +613,12 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
 
   const handleRejectSuggestion = async (suggestion: Suggestion) => {
     try {
-      await api.post(`/documents/${documentId}/ai-feedback`, {
-        suggestion_text: suggestion.text,
-        suggestion_category: suggestion.category,
-        suggestion_reason: suggestion.reason,
-        feedback: 'rejected',
-        context: 'user_rejected_overlay'
-      });
+      await postAiFeedback(documentId, suggestion, 'rejected', 'user_rejected_overlay');
 
       setSuggestions(prev => prev.filter(s => s !== suggestion));
     } catch (error) {
       console.error('Error rejecting suggestion:', error);
+      notify(`Rejection not recorded: ${getApiErrorMessage(error, 'the server could not save it.')}`);
     }
   };
 
