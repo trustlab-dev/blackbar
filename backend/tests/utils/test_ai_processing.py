@@ -398,3 +398,45 @@ def test_importing_ai_modules_does_not_configure_root_logger() -> None:
     with _patch.object(logging, "basicConfig") as basic_config:
         importlib.reload(mod)
     basic_config.assert_not_called()
+
+
+class TestSummaryTextReuse:
+    """I3: the summary does not OCR again when text is supplied, and runs
+    extraction off the event loop when it must."""
+
+    async def test_supplied_text_skips_extraction(self, monkeypatch) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.utils import ai_processing
+
+        client = MagicMock()
+        client.chat_completion = AsyncMock(return_value="A summary.")
+        monkeypatch.setattr(ai_processing, "get_llm_client", AsyncMock(return_value=client))
+        extract = MagicMock(side_effect=AssertionError("must not extract"))
+        monkeypatch.setattr(ai_processing, "extract_text_from_pdf", extract)
+
+        out = await ai_processing.generate_document_summary(
+            b"%PDF-1.4", "f.pdf", "application/pdf", text="Plenty of already extracted text."
+        )
+        assert out == "A summary."
+        prompt = client.chat_completion.call_args.args[0][1]["content"]
+        assert "already extracted text" in prompt
+
+    async def test_extraction_runs_in_worker_thread(self, monkeypatch) -> None:
+        import threading
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.utils import ai_processing
+
+        client = MagicMock()
+        client.chat_completion = AsyncMock(return_value="A summary.")
+        monkeypatch.setattr(ai_processing, "get_llm_client", AsyncMock(return_value=client))
+        seen = []
+
+        def extract(content):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return "Extracted text long enough to summarise."
+
+        monkeypatch.setattr(ai_processing, "extract_text_from_pdf", extract)
+        await ai_processing.generate_document_summary(b"%PDF-1.4", "f.eml", "message/rfc822")
+        assert seen == [False]

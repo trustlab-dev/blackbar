@@ -983,7 +983,7 @@ class TestConsolidateEmailThread:
 
     async def test_no_thread_identifiers_returns_none(self, service) -> None:
         with patch(
-            "src.documents.routes.extract_thread_identifiers",
+            "src.documents.routes.thread_identifiers_from_headers",
             return_value=None,
         ):
             result = await service._consolidate_email_thread(
@@ -991,11 +991,18 @@ class TestConsolidateEmailThread:
             )
         assert result is None
 
+    async def test_text_is_never_scraped_for_threading(self, service) -> None:
+        """I7: headers in the rendered text are ignored; without structured
+        thread metadata or a Message-ID there is nothing to thread on."""
+        text = "From: a@x\nSubject: Budget\nIn-Reply-To: <a@x>\n\nbody"
+        result = await service._consolidate_email_thread({"id": "d1", "extracted_text": text}, "c1")
+        assert result is None
+
     async def test_no_thread_emails_marks_active(self, service, db) -> None:
         await db.documents.insert_one({"id": "d1", "extracted_text": "x", "message_id": "<m@x>"})
         with (
             patch(
-                "src.documents.routes.extract_thread_identifiers",
+                "src.documents.routes.thread_identifiers_from_headers",
                 return_value={"subject": "S"},
             ),
             patch(
@@ -1014,7 +1021,7 @@ class TestConsolidateEmailThread:
         await db.documents.insert_one({"id": "d1", "extracted_text": "x", "message_id": "<m@x>"})
         with (
             patch(
-                "src.documents.routes.extract_thread_identifiers",
+                "src.documents.routes.thread_identifiers_from_headers",
                 return_value={"subject": "S"},
             ),
             patch(
@@ -1033,7 +1040,7 @@ class TestConsolidateEmailThread:
 
     async def test_exception_returns_none(self, service) -> None:
         with patch(
-            "src.documents.routes.extract_thread_identifiers",
+            "src.documents.routes.thread_identifiers_from_headers",
             side_effect=RuntimeError("boom"),
         ):
             result = await service._consolidate_email_thread(
@@ -1518,8 +1525,8 @@ class TestProcessUploadOrchestration:
             return {"thread_id": "t-1"}
 
         monkeypatch.setattr(
-            "src.documents.routes.extract_thread_identifiers",
-            lambda txt, mid: {"subject": "S"},
+            "src.documents.routes.thread_identifiers_from_headers",
+            lambda headers, mid: {"subject": "S"},
         )
         monkeypatch.setattr(
             "src.documents.routes.find_thread_emails",
@@ -2028,7 +2035,11 @@ class TestThreadConsolidationWiring:
         document = {
             "id": "d1",
             "message_id": "<m@x>",
-            "extracted_text": "From: a@x\nDate: Wed, 1 Jan 2020 00:00:00 +0000\nSubject: S\n",
+            "thread_metadata": {
+                "from": "a@x",
+                "date": "Wed, 1 Jan 2020 00:00:00 +0000",
+                "subject": "S",
+            },
         }
         with (
             patch("src.documents.routes.find_thread_emails", fake_find),
@@ -2044,7 +2055,7 @@ class TestThreadConsolidationWiring:
         warnings: list[str] = []
         with (
             patch(
-                "src.documents.routes.extract_thread_identifiers",
+                "src.documents.routes.thread_identifiers_from_headers",
                 side_effect=TypeError("can't compare offset-naive and offset-aware datetimes"),
             ),
             caplog.at_level(logging.ERROR, logger="src.documents.processing_service"),
@@ -2093,3 +2104,275 @@ class TestThreadConsolidationWiring:
         assert older_doc["thread_status"] == "superseded"
         assert older_doc["superseded_by"] == first.document_id
         assert newer_doc.get("thread_status") == "active"
+
+
+# ===========================================================================
+# I3: conversion and first-pass OCR stay off the event loop and in budget
+# ===========================================================================
+
+
+class TestConversionOffEventLoop:
+    @staticmethod
+    def _recording_convert(tmp_path, seen: list):
+        import threading
+
+        def _convert(input_file, output_dir):
+            seen.append(threading.current_thread() is threading.main_thread())
+            pdf = tmp_path / f"out-{len(seen)}.pdf"
+            pdf.write_bytes(_make_text_pdf_bytes())
+            return {"success": True, "pdf_path": str(pdf), "attachments": []}
+
+        return _convert
+
+    async def test_top_level_conversion_runs_in_worker_thread(self, service, tmp_path) -> None:
+        seen: list[bool] = []
+        with patch(
+            "src.documents.processing_service.convert_to_pdf",
+            self._recording_convert(tmp_path, seen),
+        ):
+            result = await service._convert_to_pdf(b"docx", "a.docx", ".docx")
+        assert result["success"] is True
+        assert seen == [False]
+
+    async def test_attachment_conversion_runs_in_worker_thread(self, service, tmp_path) -> None:
+        from src.documents.processing_service import UploadContext
+
+        att = tmp_path / "a.docx"
+        att.write_bytes(b"docx")
+        seen: list[bool] = []
+        with (
+            patch(
+                "src.documents.processing_service.convert_to_pdf",
+                self._recording_convert(tmp_path, seen),
+            ),
+            patch.object(service, "_store_in_gridfs", AsyncMock(return_value={})),
+            patch.object(service, "_generate_summary", AsyncMock(return_value=None)),
+        ):
+            docs = await service._process_attachments(
+                [{"filename": "a.docx", "path": str(att), "mime_type": "x"}],
+                "parent",
+                UploadContext(),
+            )
+        assert len(docs) == 1
+        assert seen == [False]
+
+    async def test_conversion_over_page_limit_is_413_not_a_stored_record(
+        self, service, db, patch_gridfs_stack
+    ) -> None:
+        """A converted document over BLACKBAR_MAX_PDF_PAGES is rejected like
+        a PDF upload, not stored as a conversion failure. Collection-link
+        and contributor uploads use the same service."""
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+        from src.utils.pdf_limits import PdfLimitExceeded
+
+        with patch(
+            "src.documents.processing_service.convert_to_pdf",
+            MagicMock(side_effect=PdfLimitExceeded("Document has 9 pages; the limit is 2")),
+        ):
+            result = await service.process_upload(
+                file_content=b"PK\x03\x04docx",
+                filename="big.docx",
+                content_type=None,
+                context=UploadContext(),
+            )
+        assert result.status == ProcessingStatus.VALIDATION_FAILED
+        assert result.http_status == 413
+        assert await db.documents.count_documents({}) == 0
+
+    async def test_summary_reuses_extracted_text(self, service) -> None:
+        """The upload summary gets the text already extracted, and is told
+        the content is a PDF even for emails (no raw PDF bytes to the LLM)."""
+        captured = {}
+
+        async def _summary(content, filename, mime_type, text=None):
+            captured.update(mime_type=mime_type, text=text)
+            return "s"
+
+        with (
+            patch(
+                "src.admin.config_routes.get_system_config",
+                AsyncMock(return_value={"auto_generate_ai_suggestions": True}),
+            ),
+            patch("src.documents.routes.generate_document_summary", _summary),
+        ):
+            await service._generate_summary(b"%PDF", "m.eml.pdf", "application/pdf", "body")
+        assert captured == {"mime_type": "application/pdf", "text": "body"}
+
+
+def _make_text_pdf_bytes() -> bytes:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=200).insert_text((10, 50), "hello", fontsize=8)
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
+# ===========================================================================
+# I7: threading uses headers parsed from the message, not the rendered text
+# ===========================================================================
+
+
+def _folded_to(count: int) -> bytes:
+    recipients = ",\r\n ".join(f"Person {n} <p{n}@example.org>" for n in range(count))
+    return f"To: {recipients}\r\n".encode()
+
+
+class TestStructuredThreadHeaders:
+    async def test_folded_to_list_keeps_date_subject_and_in_reply_to(
+        self, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import DocumentProcessingService, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        eml = (
+            b"From: Alice <alice@example.org>\r\n"
+            + _folded_to(25)
+            + b"Subject: Re: Budget 2026\r\n"
+            b"Date: Sun, 1 Jun 2025 09:00:00 +0000\r\n"
+            b"Message-ID: <b@example.org>\r\n"
+            b"In-Reply-To: <a@example.org>\r\n"
+            b"References: <root@example.org>\r\n <a@example.org>\r\n"
+            b"\r\nlatest\r\n"
+        )
+        result = await DocumentProcessingService(db).process_upload(
+            file_content=eml,
+            filename="wide.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        doc = await db.documents.find_one({"id": result.document_id})
+        meta = doc["thread_metadata"]
+        assert meta["date"] == "Sun, 1 Jun 2025 09:00:00 +0000"
+        assert meta["subject"] == "Re: Budget 2026"
+        assert meta["normalized_subject"] == "budget 2026"
+        assert meta["in_reply_to"] == "<a@example.org>"
+        assert meta["references"] == ["<root@example.org>", "<a@example.org>"]
+        assert "p24@example.org" in meta["to"] and "\n" not in meta["to"]
+
+    async def test_quoted_original_message_does_not_overwrite_headers(
+        self, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import DocumentProcessingService, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        eml = (
+            b"From: Alice <alice@example.org>\r\n"
+            b"To: Bob <bob@example.org>\r\n"
+            b"Subject: Re: Budget\r\n"
+            b"Date: Sun, 1 Jun 2025 09:00:00 +0000\r\n"
+            b"Message-ID: <b@example.org>\r\n"
+            b"\r\n"
+            b"Agreed.\r\n"
+            b"-----Original Message-----\r\n"
+            b"From: Mallory <mallory@example.net>\r\n"
+            b"Subject: Something else entirely\r\n"
+            b"Date: Wed, 1 Jan 2020 09:00:00 +0000\r\n"
+            b"\r\nold text\r\n"
+        )
+        result = await DocumentProcessingService(db).process_upload(
+            file_content=eml,
+            filename="reply.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        meta = (await db.documents.find_one({"id": result.document_id}))["thread_metadata"]
+        assert meta["subject"] == "Re: Budget"
+        assert meta["from"] == "Alice <alice@example.org>"
+        assert meta["date"] == "Sun, 1 Jun 2025 09:00:00 +0000"
+        assert meta["message_id"] == "<b@example.org>"
+
+
+# ===========================================================================
+# I8: attachments of forwarded/embedded messages become records
+# ===========================================================================
+
+
+def _pdf_bytes(text: str) -> bytes:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page(width=200, height=200).insert_text((10, 50), text, fontsize=8)
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
+def _email_with(subject: str, attachments: list) -> object:
+    from email.mime.application import MIMEApplication
+    from email.mime.message import MIMEMessage
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    msg = MIMEMultipart()
+    msg["From"] = "a@example.org"
+    msg["To"] = "b@example.org"
+    msg["Subject"] = subject
+    msg.attach(MIMEText(f"body of {subject}"))
+    for item in attachments:
+        if isinstance(item, tuple):
+            name, data = item
+            part = MIMEApplication(data, _subtype="pdf")
+            part.add_header("Content-Disposition", "attachment", filename=name)
+            msg.attach(part)
+        else:
+            msg.attach(MIMEMessage(item))
+    return msg
+
+
+class TestNestedAttachments:
+    async def test_forwarded_message_attachments_become_records(
+        self, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import DocumentProcessingService, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        inner = _email_with("Inner", [("inner-report.pdf", _pdf_bytes("inner"))])
+        outer = _email_with("Outer", [("outer.pdf", _pdf_bytes("outer")), inner])
+
+        result = await DocumentProcessingService(db).process_upload(
+            file_content=outer.as_bytes(),
+            filename="outer.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        assert not result.warnings, result.warnings
+        top = await db.documents.find_one({"id": result.document_id})
+        children = await db.documents.find({"parent_document_id": top["id"]}).to_list(None)
+        names = sorted(c["original_filename"] for c in children)
+        assert names == ["Inner.eml", "outer.pdf"]
+        assert sorted(top["attachment_ids"]) == sorted(c["id"] for c in children)
+
+        forwarded = next(c for c in children if c["original_filename"] == "Inner.eml")
+        (grandchild,) = await db.documents.find({"parent_document_id": forwarded["id"]}).to_list(
+            None
+        )
+        assert grandchild["original_filename"] == "inner-report.pdf"
+        assert grandchild["case_id"] == "c1" and grandchild["is_attachment"] is True
+        assert forwarded["attachment_ids"] == [grandchild["id"]]
+        assert result.attachment_count == 3
+
+    async def test_nesting_beyond_the_cap_is_reported_not_dropped(
+        self, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents import processing_service
+        from src.documents.processing_service import DocumentProcessingService, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        monkeypatch.setattr(processing_service, "MAX_ATTACHMENT_DEPTH", 1)
+        inner = _email_with("Inner", [("deep.pdf", _pdf_bytes("deep"))])
+        outer = _email_with("Outer", [inner])
+
+        result = await DocumentProcessingService(db).process_upload(
+            file_content=outer.as_bytes(),
+            filename="outer.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        top = await db.documents.find_one({"id": result.document_id})
+        (error,) = top["attachment_errors"]
+        assert error["filename"] == "Inner.eml / deep.pdf"
+        assert "nested" in error["error"]
+        assert any("deep.pdf" in w for w in result.warnings)
+        assert await db.documents.count_documents({"original_filename": "deep.pdf"}) == 0

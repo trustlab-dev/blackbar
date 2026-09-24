@@ -13,7 +13,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from tests.factories import make_case, make_document
 
-LETTER = [[612.0, 792.0]]
+LETTER = [[612.0, 792.0, 0]]
 BOX = {"page": 1, "x": 72.0, "y": 90.0, "width": 120.0, "height": 16.0}
 
 
@@ -125,7 +125,7 @@ class TestWriteValidation:
         assert r.status_code == 422, r.text
         r = await client.post(f"/api/v1/documents/{doc_id}/redactions", json=BOX)
         assert r.status_code == 200, r.text
-        assert (await db.documents.find_one({"id": doc_id}))["page_dims"] == [[300.0, 300.0]]
+        assert (await db.documents.find_one({"id": doc_id}))["page_dims"] == [[300.0, 300.0, 0]]
 
     async def test_add_on_document_without_content_is_409(
         self, db, authed_client_factory, patch_db

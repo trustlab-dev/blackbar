@@ -30,6 +30,7 @@ from src.utils.bulk_redaction import (
 from src.utils.pdf_limits import PdfLimitExceeded
 from src.utils.redaction_records import (
     APPROVED,
+    DISPLAYED_SPACE,
     RedactionValidationError,
     new_redaction_record,
     validate_redaction,
@@ -199,15 +200,31 @@ async def get_document_redaction_suggestions(
             # marked as located (including legacy entries carrying
             # model-supplied coordinates) is re-located (LLM-06).
             text_data = doc.get("text_data")
-            needs_enrichment = any(not s.get("has_coordinates") for s in cached_suggestions)
+            # Entries cached before the coordinate-space marker (C1) hold
+            # unrotated boxes, so they are re-located too.
+            needs_enrichment = any(
+                not s.get("has_coordinates") or s.get("coord_space") != DISPLAYED_SPACE
+                for s in cached_suggestions
+            )
             pdf_content = await load_document_pdf(doc, db) if needs_enrichment else None
             if pdf_content:
+                # Enrichment expands a suggestion into one entry per
+                # occurrence, so re-locate each distinct suggestion once.
+                distinct: dict[tuple, dict] = {}
+                for s in cached_suggestions:
+                    key = (s.get("text"), s.get("category"), s.get("section"), s.get("reason"))
+                    distinct.setdefault(key, s)
                 cached_suggestions = await asyncio.to_thread(
                     enrich_suggestions_with_coordinates,
-                    cached_suggestions,
+                    list(distinct.values()),
                     pdf_content,
                     text_data,
                 )
+                if not demo_mode:
+                    await db.documents.update_one(
+                        {"id": document_id},
+                        {"$set": {"ai_suggestions.suggestions": cached_suggestions}},
+                    )
 
             rejected_texts = {r.get("text") for r in doc.get("rejected_ai_suggestions", [])}
             for suggestion in cached_suggestions:
@@ -426,7 +443,7 @@ async def apply_bulk_redaction_endpoint(
                 _unresolved("document content is not available")
             continue
         try:
-            hits, page_sizes, _ = await asyncio.to_thread(
+            hits, page_sizes, rotations = await asyncio.to_thread(
                 locate_text_in_pdf, pdf_content, search_text
             )
         except PdfLimitExceeded as exc:
@@ -459,6 +476,7 @@ async def apply_bulk_redaction_endpoint(
                     created_by=current_user.get("id"),
                     created_by_role=current_user.get("role"),
                     source="bulk_text",
+                    page_rotation=rotations[geometry.page - 1],
                     created_by_name=current_user.get("username", "unknown"),
                     text=search_text,
                     category=category,
@@ -734,10 +752,13 @@ async def apply_ai_suggestions_bulk_endpoint(
             candidates = [
                 {"page": page, **{k: coords.get(k) for k in ("x", "y", "width", "height")}}
             ]
-            # Text-search coordinates are in unrotated page space; on a
-            # rotated page re-locate the text in displayed space (DOC-04).
+            # Suggestions located by this build are in displayed space
+            # (coord_space marker). Older cached suggestions carry unrotated
+            # text-search coordinates; on a rotated page re-locate the text
+            # in displayed space (DOC-04, C1).
             if (
-                isinstance(page, int)
+                suggestion.get("coord_space") != DISPLAYED_SPACE
+                and isinstance(page, int)
                 and 1 <= page <= len(rotations)
                 and rotations[page - 1]
                 and text.strip()
@@ -763,6 +784,7 @@ async def apply_ai_suggestions_bulk_endpoint(
                         created_by=current_user.get("id"),
                         created_by_role=current_user.get("role"),
                         source="ai_bulk_apply",
+                        page_rotation=rotations[geometry.page - 1],
                         created_by_name=current_user.get("username", "unknown"),
                         text=text,
                         category=suggestion.get("section", suggestion.get("category", "S22")),

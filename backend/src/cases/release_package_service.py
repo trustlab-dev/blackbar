@@ -22,10 +22,16 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import MongoClient
 
 from src.config import MONGODB_URI
+from src.documents.redaction_store import page_sizes_from_pdf
 from src.utils.filenames import safe_basename
 from src.utils.pdf_limits import PdfLimitExceeded
 from src.utils.pdf_redaction import RedactionError, apply_redactions_to_pdf
-from src.utils.redaction_records import RedactionValidationError, partition_redactions
+from src.utils.redaction_records import (
+    RedactionValidationError,
+    partition_redactions,
+    unresolved_message,
+    unresolved_summary,
+)
 from src.utils.release_package import generate_cover_letter, generate_release_summary
 
 from .release_package_models import (
@@ -162,32 +168,39 @@ def _redact_for_release(content: bytes, redactions: list[dict]) -> bytes:
 
 async def _prepare_release_document(
     doc: dict, db: AsyncIOMotorDatabase
-) -> tuple[bytes | None, list[dict], str | None]:
-    """Return (redacted_pdf, applied_redactions, error) for one document.
+) -> tuple[bytes | None, list[dict], str | None, list[dict]]:
+    """Return (redacted_pdf, applied_redactions, error, unresolved) for one
+    document. ``unresolved`` lists every redaction that blocks release, with
+    its reason (see ``unresolved_summary``).
 
     Never returns the original bytes: every released PDF goes through the
     redaction/sanitisation pipeline, even with zero redactions (DOC-05).
     """
-    to_apply, unresolved = partition_redactions(doc.get("redactions", []))
-    if unresolved:
-        return (
-            None,
-            to_apply,
-            f"{len(unresolved)} redaction(s) awaiting review (proposed, contested or "
-            "pending); approve or reject them before release",
-        )
-
     content = await get_document_content(doc, db)
     if not content:
-        return None, to_apply, "document content is missing"
+        return None, [], "document content is missing", []
+
+    try:
+        # Page rotations let the rule hold back legacy boxes on rotated
+        # pages, whose coordinate space is unknown (C1).
+        rotations = [int(s[2]) for s in await asyncio.to_thread(page_sizes_from_pdf, content)]
+    except PdfLimitExceeded as exc:
+        return None, [], str(exc), []
+    except Exception:
+        return None, [], "document content is not a readable PDF", []
+
+    to_apply, unresolved = partition_redactions(doc.get("redactions", []), rotations)
+    if unresolved:
+        details = unresolved_summary(unresolved, rotations)
+        return None, to_apply, unresolved_message(details, "release"), details
 
     try:
         redacted = await asyncio.to_thread(_redact_for_release, content, to_apply)
     except (RedactionError, RedactionValidationError, PdfLimitExceeded) as exc:
-        return None, to_apply, str(exc)
+        return None, to_apply, str(exc), []
     except Exception as exc:  # anything else is still a failed document
-        return None, to_apply, f"Failed to apply redactions: {exc}"
-    return redacted, to_apply, None
+        return None, to_apply, f"Failed to apply redactions: {exc}", []
+    return redacted, to_apply, None, []
 
 
 async def process_package_generation(
@@ -286,12 +299,15 @@ async def process_package_generation(
                 },
             )
 
-            redacted_content, applied, error = await _prepare_release_document(doc, db)
+            redacted_content, applied, error, unresolved = await _prepare_release_document(doc, db)
             if error:
                 logger.error(f"Release: document {doc.get('id')} failed: {error}")
                 failed_documents.append(
                     PackageDocumentIssue(
-                        document_id=doc.get("id"), filename=doc.get("filename"), reason=error
+                        document_id=doc.get("id"),
+                        filename=doc.get("filename"),
+                        reason=error,
+                        unresolved_redactions=unresolved or None,
                     )
                 )
                 continue

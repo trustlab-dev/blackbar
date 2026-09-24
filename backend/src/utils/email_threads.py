@@ -67,16 +67,56 @@ def normalize_subject(subject: str) -> str:
     return normalized.lower()
 
 
+def thread_identifiers_from_headers(
+    headers: dict | None, message_id: str | None = None
+) -> dict[str, any] | None:
+    """Thread identifiers from structured headers parsed off the message
+    object at conversion time (I7; see ``conversion.read_thread_headers``).
+
+    ``message_id`` (the document's own Message-ID) wins over the header
+    copy so the identifiers match the stored document. Returns None when
+    there is nothing to thread on.
+    """
+    headers = headers or {}
+
+    def _text(name: str) -> str | None:
+        value = headers.get(name)
+        if not isinstance(value, str):
+            return None
+        value = " ".join(value.split())
+        return value or None
+
+    references = headers.get("references") or []
+    if isinstance(references, str):
+        references = references.split()
+    subject = _text("subject")
+    identifiers = {
+        "subject": subject,
+        "normalized_subject": normalize_subject(subject) if subject else None,
+        "from": _text("from"),
+        "to": _text("to"),
+        "date": _text("date"),
+        "message_id": message_id or _text("message_id"),
+        "in_reply_to": _text("in_reply_to"),
+        "references": [r for r in references if isinstance(r, str) and r.strip()],
+    }
+    if not any(
+        identifiers[k] for k in ("message_id", "in_reply_to", "references", "normalized_subject")
+    ):
+        return None
+    return identifiers
+
+
 def extract_thread_identifiers(extracted_text: str, message_id: str | None) -> dict[str, any]:
     """
-    Extract email thread identifiers from the extracted text.
+    Legacy: parse thread identifiers from the header block at the top of an
+    email's extracted text. New uploads use ``thread_identifiers_from_headers``
+    with headers read from the message itself; this remains for records
+    that only have text.
 
-    Args:
-        extracted_text: Full text extracted from email
-        message_id: Message-ID header value
-
-    Returns:
-        Dictionary with thread identifiers
+    Only the header block is read: it ends at the first blank or non-header
+    line, folded continuation lines are joined to their header, and the
+    first occurrence of a header wins, so a quoted reply cannot overwrite it.
     """
     identifiers = {
         "subject": None,
@@ -89,23 +129,35 @@ def extract_thread_identifiers(extracted_text: str, message_id: str | None) -> d
         "references": [],
     }
 
-    # Parse headers from extracted text
-    for line in extracted_text.split("\n")[:20]:  # Check first 20 lines for headers
-        if line.startswith("Subject:"):
-            subject = line.replace("Subject:", "").strip()
-            identifiers["subject"] = subject
-            identifiers["normalized_subject"] = normalize_subject(subject)
-        elif line.startswith("From:"):
-            identifiers["from"] = line.replace("From:", "").strip()
-        elif line.startswith("To:"):
-            identifiers["to"] = line.replace("To:", "").strip()
-        elif line.startswith("Date:"):
-            identifiers["date"] = line.replace("Date:", "").strip()
-        elif line.startswith("In-Reply-To:"):
-            identifiers["in_reply_to"] = line.replace("In-Reply-To:", "").strip()
-        elif line.startswith("References:"):
-            refs = line.replace("References:", "").strip()
-            identifiers["references"] = [r.strip() for r in refs.split() if r.strip()]
+    headers: dict[str, str] = {}
+    current: str | None = None
+    for line in extracted_text.split("\n"):
+        if not line.strip():
+            break
+        if line[:1] in (" ", "\t") and current:
+            headers[current] += " " + line.strip()
+            continue
+        name, sep, value = line.partition(":")
+        name = name.strip().lower()
+        if not sep or not name or " " in name:
+            break  # not a header line: the header block is over
+        current = name
+        if current not in headers:
+            headers[current] = value.strip()
+        else:
+            current = None  # repeated header: keep the first
+
+    subject = headers.get("subject")
+    if subject:
+        identifiers["subject"] = subject
+        identifiers["normalized_subject"] = normalize_subject(subject)
+    identifiers["from"] = headers.get("from") or None
+    identifiers["to"] = headers.get("to") or None
+    identifiers["date"] = headers.get("date") or None
+    identifiers["in_reply_to"] = headers.get("in-reply-to") or None
+    refs = headers.get("references")
+    if refs:
+        identifiers["references"] = [r.strip() for r in refs.split() if r.strip()]
 
     return identifiers
 
@@ -240,7 +292,7 @@ async def find_thread_emails(
 
     Args:
         db: Database connection
-        thread_identifiers: Thread identifiers from extract_thread_identifiers
+        thread_identifiers: Thread identifiers from thread_identifiers_from_headers
         case_id: Case ID to search within (required)
         exclude_id: Document ID to leave out (the new email's own record)
 

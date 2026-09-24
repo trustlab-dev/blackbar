@@ -673,6 +673,8 @@ class TestGetRedactionSuggestions:
                         "category": "x",
                         "coordinates": {"x": 1, "y": 2},
                         "has_coordinates": True,
+                        "coord_space": "displayed",
+                        "page_rotation": 0,
                     }
                 ],
                 "summary": "cached",
@@ -695,6 +697,58 @@ class TestGetRedactionSuggestions:
         r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
         assert r.status_code == 200
         assert not called  # Enrichment was skipped because coords present
+
+    async def test_cached_legacy_coordinates_are_relocated(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """C1: a cached suggestion located by an older build (no
+        coordinate-space marker) holds unrotated boxes. It is re-located in
+        displayed space, the fresh cache is saved, and duplicates of the
+        same suggestion are located only once."""
+        import fitz
+
+        pdf = fitz.open()
+        page = pdf.new_page(width=612, height=792)
+        page.insert_text((72, 100), "Jane Doe SIN 123456789", fontsize=12)
+        unrotated = page.search_for("Jane Doe")[0]
+        page.set_rotation(90)
+        displayed = unrotated * page.rotation_matrix
+        content = pdf.tobytes()
+        pdf.close()
+
+        legacy = {
+            "text": "Jane Doe",
+            "category": "S22",
+            "reason": "name",
+            "page": 1,
+            "has_coordinates": True,
+            "coordinates": {
+                "x": unrotated.x0,
+                "y": unrotated.y0,
+                "width": unrotated.width,
+                "height": unrotated.height,
+            },
+        }
+        client = await authed_client_factory(role="admin")
+        doc_id = await _seed_document(
+            db,
+            extracted_text="Jane Doe SIN 123456789",
+            content=content,
+            ai_suggestions={"suggestions": [legacy, dict(legacy)], "summary": "cached"},
+        )
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        assert r.status_code == 200, r.text
+        (suggestion,) = r.json()["suggestions"]
+        assert suggestion["coord_space"] == "displayed"
+        assert suggestion["page_rotation"] == 90
+        box = suggestion["coordinates"]
+        assert box["x"] == pytest.approx(displayed.x0, abs=0.5)
+        assert box["y"] == pytest.approx(displayed.y0, abs=0.5)
+        stored = (await db.documents.find_one({"id": doc_id}))["ai_suggestions"]["suggestions"]
+        assert [s["coord_space"] for s in stored] == ["displayed"]
 
     async def test_cached_enrichment_when_pdf_content_present(
         self,

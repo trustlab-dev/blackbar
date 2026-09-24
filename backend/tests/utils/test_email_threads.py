@@ -749,3 +749,50 @@ class TestConsolidateEmailThread:
         result = await consolidate_email_thread(db, new_doc, [existing])
         # new (Jun) > existing (Jan) -> mark older
         assert result["action"] == "mark_older_as_superseded"
+
+
+class TestThreadIdentifiersFromHeaders:
+    """I7: identifiers come from structured headers."""
+
+    def test_builds_identifiers_and_normalises(self) -> None:
+        from src.utils.email_threads import thread_identifiers_from_headers
+
+        ids = thread_identifiers_from_headers(
+            {
+                "subject": "RE: Fwd:  Budget\r\n 2026",
+                "from": "a@x",
+                "to": "b@x",
+                "date": "Sun, 1 Jun 2025 09:00:00 +0000",
+                "message_id": "<header@x>",
+                "in_reply_to": "<a@x>",
+                "references": ["<r@x>", "<a@x>"],
+            },
+            "<doc@x>",
+        )
+        assert ids["normalized_subject"] == "budget 2026"
+        assert ids["subject"] == "RE: Fwd: Budget 2026"
+        assert ids["message_id"] == "<doc@x>"
+        assert ids["references"] == ["<r@x>", "<a@x>"]
+
+    def test_nothing_to_thread_on_is_none(self) -> None:
+        from src.utils.email_threads import thread_identifiers_from_headers
+
+        assert thread_identifiers_from_headers({}, None) is None
+        assert thread_identifiers_from_headers({"from": "a@x"}, None) is None
+        assert thread_identifiers_from_headers(None, "<m@x>")["message_id"] == "<m@x>"
+
+
+class TestLegacyTextParserStopsAtHeaderBlock:
+    def test_folded_and_quoted_headers(self) -> None:
+        to = ",\n ".join(f"p{n}@x" for n in range(30))
+        text = (
+            f"From: a@x\nTo: {to}\nDate: Sun, 1 Jun 2025 09:00:00 +0000\n"
+            "Subject: Re: Budget\nIn-Reply-To: <a@x>\n\n"
+            "-----Original Message-----\nFrom: m@y\nSubject: Other\n"
+        )
+        ids = extract_thread_identifiers(text, None)
+        assert ids["subject"] == "Re: Budget"
+        assert ids["from"] == "a@x"
+        assert ids["date"] == "Sun, 1 Jun 2025 09:00:00 +0000"
+        assert ids["in_reply_to"] == "<a@x>"
+        assert "p29@x" in ids["to"]

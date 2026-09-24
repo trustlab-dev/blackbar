@@ -434,3 +434,47 @@ class TestThreadHeadersExtracted:
         _, _, text, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         assert "In-Reply-To:" not in text
         assert "References:" not in text
+
+
+class TestReadThreadHeaders:
+    """I7: conversion returns threading headers parsed from the message."""
+
+    def test_eml_headers_are_structured_and_decoded(self, tmp_path) -> None:
+        from src.utils.conversion import read_thread_headers
+
+        path = tmp_path / "m.eml"
+        path.write_bytes(
+            b"From: =?utf-8?q?Ren=C3=A9e?= <renee@example.org>\r\n"
+            b"To: a@example.org,\r\n b@example.org\r\n"
+            b"Subject: =?utf-8?q?Caf=C3=A9_budget?=\r\n"
+            b"Date: Sun, 1 Jun 2025 09:00:00 +0000\r\n"
+            b"Message-ID: <m@example.org>\r\n"
+            b"In-Reply-To: <p@example.org>\r\n"
+            b"References: <r@example.org> <p@example.org>\r\n"
+            b"\r\nbody\r\n"
+        )
+        headers = read_thread_headers(str(path))
+        assert headers == {
+            "message_id": "<m@example.org>",
+            "in_reply_to": "<p@example.org>",
+            "references": ["<r@example.org>", "<p@example.org>"],
+            "date": "Sun, 1 Jun 2025 09:00:00 +0000",
+            "subject": "Café budget",
+            "from": "Renée <renee@example.org>",
+            "to": "a@example.org, b@example.org",
+        }
+
+    def test_convert_to_pdf_returns_thread_headers(self, tmp_path) -> None:
+        from src.utils.conversion import convert_to_pdf
+
+        path = tmp_path / "m.eml"
+        path.write_bytes(b"From: a@x\nSubject: S\nMessage-ID: <m@x>\n\nbody\n")
+        result = convert_to_pdf(str(path), str(tmp_path))
+        assert result["success"]
+        assert result["thread_headers"]["subject"] == "S"
+        assert result["thread_headers"]["message_id"] == "<m@x>"
+
+    def test_unreadable_file_gives_empty_headers(self, tmp_path) -> None:
+        from src.utils.conversion import read_thread_headers
+
+        assert read_thread_headers(str(tmp_path / "missing.eml")) == {}

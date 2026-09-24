@@ -54,6 +54,64 @@ class TestClientIp:
         assert client_ip(_req("172.18.0.5")) == "172.18.0.5"
 
 
+class TestUntrustedProxyWarning:
+    def test_warns_once_when_proxy_headers_arrive_untrusted(
+        self, trusted, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        import logging
+
+        from src.core import rate_limit
+
+        monkeypatch.setattr(rate_limit, "_warned_untrusted_proxy", False)
+        trusted([])
+        with caplog.at_level(logging.WARNING, logger="src.core.rate_limit"):
+            client_ip(_req("172.30.87.4", "1.2.3.4"))
+            client_ip(_req("172.30.87.4", "5.6.7.8"))
+        warnings = [r for r in caplog.records if "TRUSTED_PROXIES is empty" in r.message]
+        assert len(warnings) == 1
+
+    def test_no_warning_for_direct_public_clients(
+        self, trusted, monkeypatch: pytest.MonkeyPatch, caplog
+    ) -> None:
+        import logging
+
+        from src.core import rate_limit
+
+        monkeypatch.setattr(rate_limit, "_warned_untrusted_proxy", False)
+        trusted([])
+        with caplog.at_level(logging.WARNING, logger="src.core.rate_limit"):
+            client_ip(_req("8.8.8.8", "1.2.3.4"))
+            client_ip(_req("172.30.87.4"))
+        assert not [r for r in caplog.records if "TRUSTED_PROXIES" in r.message]
+
+
+class TestShippedComposeTrustsTheProxyNetwork:
+    """I4: behind the shipped nginx/Vite container, X-Forwarded-For must be
+    honoured, so every compose file sets TRUSTED_PROXIES to the network."""
+
+    @pytest.mark.parametrize(
+        "name", ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.demo.yml"]
+    )
+    def test_compose_sets_trusted_proxies(self, name: str) -> None:
+        import ipaddress
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[3]
+        text = (root / name).read_text()
+        match = re.search(
+            r"TRUSTED_PROXIES=\$\{TRUSTED_PROXIES:-\$\{BLACKBAR_NETWORK_SUBNET:-([^}]+)\}\}",
+            text,
+        )
+        assert match, f"{name} does not set TRUSTED_PROXIES"
+        default = ipaddress.ip_network(match.group(1))
+        base = (root / "docker-compose.yml").read_text()
+        subnet = re.search(r"subnet: \$\{BLACKBAR_NETWORK_SUBNET:-([^}]+)\}", base)
+        assert subnet and ipaddress.ip_network(subnet.group(1)) == default
+        # The default must itself be a valid TRUSTED_PROXIES value in code.
+        assert default.is_private
+
+
 def _client(app) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
 

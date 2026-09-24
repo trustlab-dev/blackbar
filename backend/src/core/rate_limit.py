@@ -13,6 +13,7 @@ dodge or poison rate limits.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 from functools import lru_cache
 
@@ -20,6 +21,8 @@ from slowapi import Limiter
 from starlette.requests import Request
 
 from src.config import config
+
+logger = logging.getLogger(__name__)
 
 _Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -37,11 +40,37 @@ def _is_trusted(address: str, networks: tuple[_Network, ...]) -> bool:
     return any(ip in net for net in networks)
 
 
+_warned_untrusted_proxy = False
+
+
+def _warn_if_behind_untrusted_proxy(peer: str, request: Request) -> None:
+    """Log once when requests carry X-Forwarded-For from a private peer but
+    no proxy is trusted: every client then shares the proxy's bucket (I4)."""
+    global _warned_untrusted_proxy
+    if _warned_untrusted_proxy or "x-forwarded-for" not in request.headers:
+        return
+    try:
+        private = ipaddress.ip_address(peer).is_private
+    except ValueError:
+        return
+    if private:
+        _warned_untrusted_proxy = True
+        logger.warning(
+            "Requests arrive through a proxy at %s but TRUSTED_PROXIES is empty: "
+            "X-Forwarded-For is ignored and all clients share one rate-limit "
+            "bucket. Set TRUSTED_PROXIES to the proxy's address or network.",
+            peer,
+        )
+
+
 def client_ip(request: Request) -> str:
     """Best-effort client IP for rate limiting and audit records."""
     peer = request.client.host if request.client else "unknown"
     networks = _networks(tuple(config.TRUSTED_PROXIES))
-    if not networks or not _is_trusted(peer, networks):
+    if not networks:
+        _warn_if_behind_untrusted_proxy(peer, request)
+        return peer
+    if not _is_trusted(peer, networks):
         return peer
 
     forwarded = request.headers.get("x-forwarded-for", "")

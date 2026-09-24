@@ -12,9 +12,15 @@ from pydantic import BaseModel
 from src.utils.redaction_records import (
     APPROVED,
     GEOMETRY_FIELDS,
+    REJECTED,
+    UNRESOLVED_REASONS,
+    coordinate_space_fields,
     effective_status,
     find_redaction,
+    has_legacy_coordinates,
     new_redaction_record,
+    page_rotation_of,
+    review_state,
 )
 
 from ..cases.permissions import (
@@ -27,7 +33,7 @@ from ..cases.permissions import (
 from ..core.authz import assert_document_access, check_document_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
-from .redaction_store import get_page_sizes, validate_or_422
+from .redaction_store import get_page_sizes, page_rotations, validate_or_422
 
 # check_document_access / assert_document_access are imported from
 # ..core.authz (single canonical implementation).
@@ -159,6 +165,7 @@ async def propose_redaction(
         created_by=current_user["id"],
         created_by_role=user_role,
         source="proposal",
+        page_rotation=page_rotation_of(page_sizes, geometry.page),
         category=data.category,
         type="proposed",
         proposed_by=current_user["id"],
@@ -242,14 +249,42 @@ async def approve_or_reject_proposed_redaction(
         raise HTTPException(status_code=404, detail="Case not found")
 
     user_role = get_user_role_on_case(case.get("case_team", []), current_user["id"])
-    if not user_role or not can_approve_proposed_redactions(user_role):
+    system_manager = current_user.get("role") in _REDACTION_MANAGER_ROLES
+    if not system_manager and (not user_role or not can_approve_proposed_redactions(user_role)):
         raise HTTPException(status_code=403, detail="Only analysts and managers can approve/reject")
+    assert_document_access(doc, current_user, case)
+
+    if data.action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
 
     redaction_id, redaction = await _redaction_id_for_ref(
         db, document_id, doc.get("redactions", []), redaction_ref
     )
-    if redaction.get("type") != "proposed":
-        raise HTTPException(status_code=400, detail="This is not a proposed redaction")
+
+    # Which records can be decided here (I1): proposals, and legacy records
+    # that block release (pending, role-less, legacy boxes on rotated
+    # pages, unknown status). Records without usable geometry cannot be
+    # approved; they must be deleted and re-added.
+    state, reason = review_state(redaction)
+    page_sizes: list[list[float]] = []
+    if (state == APPROVED and has_legacy_coordinates(redaction)) or (
+        data.action == "approve" and reason != "no_geometry"
+    ):
+        page_sizes = await get_page_sizes(doc, db)
+        state, reason = review_state(redaction, page_rotations(page_sizes))
+    if state == REJECTED:
+        raise HTTPException(status_code=409, detail="This redaction has already been rejected")
+    if state == APPROVED:
+        raise HTTPException(
+            status_code=400, detail="This is not a proposed redaction; it is already approved"
+        )
+    if reason == "contested":
+        raise HTTPException(
+            status_code=409,
+            detail="This redaction has an open contest; resolve the contest instead",
+        )
+    if reason == "no_geometry" and data.action == "approve":
+        raise HTTPException(status_code=422, detail=UNRESOLVED_REASONS["no_geometry"][0])
 
     now = datetime.utcnow()
     if data.action == "approve":
@@ -258,15 +293,19 @@ async def approve_or_reject_proposed_redaction(
             "redactions.$.status": "approved",
             "redactions.$.approval_status": "approved",
         }
+        # Approval confirms the position the reviewer saw in the viewer,
+        # which is displayed space (C1).
+        for field, value in coordinate_space_fields(
+            page_rotation_of(page_sizes, int(redaction["page"]))
+        ).items():
+            update_fields[f"redactions.$.{field}"] = value
         message = "Proposed redaction approved"
-    elif data.action == "reject":
+    else:
         update_fields = {
             "redactions.$.status": "rejected",
             "redactions.$.approval_status": "rejected",
         }
         message = "Proposed redaction rejected"
-    else:
-        raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
     update_fields.update(
         {
             "redactions.$.reviewed_by": current_user["id"],
@@ -274,13 +313,15 @@ async def approve_or_reject_proposed_redaction(
             "redactions.$.review_notes": data.notes,
         }
     )
+    if reason and reason != "proposed":
+        update_fields["redactions.$.legacy_resolved"] = reason
 
-    # The filter pins the redaction by id AND its current state, so a stale
-    # or concurrent request cannot write onto a different redaction.
+    # The filter pins the redaction by id AND the status it was decided
+    # on, so a stale or concurrent request cannot overwrite a newer state.
     result = await db.documents.update_one(
         {
             "id": document_id,
-            "redactions": {"$elemMatch": {"id": redaction_id, "type": "proposed"}},
+            "redactions": {"$elemMatch": {"id": redaction_id, "status": redaction.get("status")}},
         },
         {"$set": update_fields},
     )
@@ -411,6 +452,7 @@ async def add_redaction(
         created_by=current_user["id"],
         created_by_role=current_user.get("role", "user"),
         source="manual",
+        page_rotation=page_rotation_of(page_sizes, geometry.page),
         created_by_name=current_user.get("username", "Unknown"),
         **extra,
     )
@@ -523,6 +565,11 @@ async def update_redaction(
         geometry = validate_or_422({**updated_redaction, **moved}, page_sizes)
         for field in ("x", "y", "width", "height"):
             set_fields[f"redactions.$.{field}"] = getattr(geometry, field)
+        # The box was moved in the viewer, so it is now in displayed space.
+        for field, value in coordinate_space_fields(
+            page_rotation_of(page_sizes, geometry.page)
+        ).items():
+            set_fields[f"redactions.$.{field}"] = value
     if set_fields:
         await db.documents.update_one(
             {"id": document_id, "redactions.id": redaction_id}, {"$set": set_fields}

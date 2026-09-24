@@ -22,6 +22,12 @@ services:
       # and the public login page renders a one-click demo-persona button.
       # Default false; set to "true" in .env for local dev or demos.
       - BLACKBAR_DEMO_MODE=${BLACKBAR_DEMO_MODE:-false}
+      # The backend is only reached through the frontend container (nginx in
+      # production, the Vite proxy in dev), so every request's peer is a
+      # compose-network address. Trust X-Forwarded-For from that network, or
+      # every client shares one rate-limit bucket (AUTH-16). Override with
+      # TRUSTED_PROXIES in .env if you change the subnet or add a proxy.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-${BLACKBAR_NETWORK_SUBNET:-172.30.87.0/24}}
     networks:
       - blackbar-network
     restart: unless-stopped
@@ -63,6 +69,11 @@ services:
 networks:
   blackbar-network:
     driver: bridge
+    # Fixed subnet so TRUSTED_PROXIES can name it. Change
+    # BLACKBAR_NETWORK_SUBNET in .env if it overlaps a network on your host.
+    ipam:
+      config:
+        - subnet: ${BLACKBAR_NETWORK_SUBNET:-172.30.87.0/24}
 
 volumes:
   mongodb_data:

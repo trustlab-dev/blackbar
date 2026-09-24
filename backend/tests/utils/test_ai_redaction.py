@@ -852,3 +852,32 @@ class TestUnicodeSearch:
         )
         assert enriched[0]["has_coordinates"] is False
         assert "coordinates" not in enriched[0]
+
+
+class TestRotatedPageCoordinates:
+    """C1: suggestion coordinates are in displayed (viewer) space."""
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_hits_are_rotated_and_marked(self, rotation: int) -> None:
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), "Jane Doe SIN 123456789", fontsize=12)
+        unrotated = page.search_for("Jane Doe")[0]
+        page.set_rotation(rotation)
+        expected = fitz.Rect(unrotated * page.rotation_matrix)
+        pdf = doc.tobytes()
+        doc.close()
+
+        (hit,) = find_text_coordinates_in_pdf(pdf, "Jane Doe")
+        assert hit["page_rotation"] == rotation
+        assert (hit["x"], hit["y"]) == pytest.approx((expected.x0, expected.y0), abs=0.01)
+        assert (hit["width"], hit["height"]) == pytest.approx(
+            (expected.width, expected.height), abs=0.01
+        )
+
+        (suggestion,) = enrich_suggestions_with_coordinates(
+            [{"text": "Jane Doe", "category": "S22", "coord_space": "forged"}], pdf
+        )
+        assert suggestion["coord_space"] == "displayed"
+        assert suggestion["page_rotation"] == rotation
+        assert suggestion["coordinates"]["x"] == pytest.approx(expected.x0, abs=0.01)

@@ -138,12 +138,26 @@ class LLMEndpointError(ValueError):
 
 _BLOCKED_HOSTNAMES = {"metadata.google.internal", "metadata", "instance-data"}
 _LOOPBACK_HOSTNAMES = {"localhost", "localhost.localdomain", "ip6-localhost"}
+# Docker Desktop names for the host and gateway (host.docker.internal etc.).
+_DOCKER_HOST_SUFFIX = ".docker.internal"
+# Cloud metadata services outside the link-local range, always refused:
+# AWS IMDS over IPv6 (inside the ULA range) and Alibaba Cloud.
+_METADATA_IPS = frozenset(
+    {ipaddress.ip_address("fd00:ec2::254"), ipaddress.ip_address("100.100.100.200")}
+)
+
+_HTTP_HINT = (
+    "Endpoint must use https. Plain http is allowed only for loopback, private-network "
+    "(RFC 1918, ULA) and Docker-internal hosts, with LLM_ALLOW_PRIVATE_ENDPOINTS=true."
+)
 
 
 def _classify_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
     """Return why ``ip`` is not a public address, or None."""
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
+    if ip in _METADATA_IPS:
+        return "metadata"
     if ip.is_link_local:
         return "link-local"
     if ip.is_loopback:
@@ -161,8 +175,9 @@ _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 def _check_address(host: str, reason: str | None, allow_private: bool) -> None:
     if reason is None:
         return
-    # Link-local (cloud metadata, 169.254.0.0/16) is never a model server.
-    if reason == "link-local" or reason == "reserved" or not allow_private:
+    # Link-local (cloud metadata, 169.254.0.0/16) and other metadata
+    # addresses are never a model server, whatever the opt-in says.
+    if reason in ("link-local", "reserved", "metadata") or not allow_private:
         raise LLMEndpointError(
             f"Endpoint host {host!r} resolves to a {reason} address. "
             + (
@@ -173,8 +188,27 @@ def _check_address(host: str, reason: str | None, allow_private: bool) -> None:
         )
 
 
+def _is_local_name(host: str) -> str | None:
+    """Classify a host *name* that can only mean a local or private-network
+    server: "loopback" (localhost), "private" (Docker-internal names and
+    single-label names such as a compose service ``ollama``), or None."""
+    if host in _LOOPBACK_HOSTNAMES or host.endswith(".localhost"):
+        return "loopback"
+    if host.endswith(_DOCKER_HOST_SUFFIX) or "." not in host:
+        return "private"
+    return None
+
+
 def validate_llm_endpoint_static(url: str) -> str:
-    """Scheme/host checks that need no DNS. Returns the lower-cased host."""
+    """Scheme/host checks that need no DNS. Returns the lower-cased host.
+
+    - https is required for public hosts.
+    - With LLM_ALLOW_PRIVATE_ENDPOINTS=true, loopback, private-range (RFC
+      1918, ULA, CGNAT) literals, Docker-internal names
+      (``host.docker.internal``) and single-label names (``ollama``) are
+      allowed, over http or https. Without it they are refused.
+    - Link-local and cloud metadata addresses and names are always refused.
+    """
     allow_private = llm_settings.allow_private_endpoints
     try:
         parts = urlsplit((url or "").strip())
@@ -187,22 +221,27 @@ def validate_llm_endpoint_static(url: str) -> str:
         raise LLMEndpointError("Endpoint must not embed credentials")
     if parts.query and re.search(r"(?i)(^|&)(key|api[_-]?key)=", parts.query):
         raise LLMEndpointError("Put the API key in the key field, not in the endpoint URL")
-    if host in _BLOCKED_HOSTNAMES or host.endswith(".internal"):
+    if host in _BLOCKED_HOSTNAMES or (
+        host.endswith(".internal") and not host.endswith(_DOCKER_HOST_SUFFIX)
+    ):
         raise LLMEndpointError(f"Endpoint host {host!r} is not allowed")
 
-    is_loopback_name = host in _LOOPBACK_HOSTNAMES or host.endswith(".localhost")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         ip = None
-    is_loopback = is_loopback_name or bool(ip and _classify_ip(ip) == "loopback")
-
-    if parts.scheme != "https" and not is_loopback:
-        raise LLMEndpointError("Endpoint must use https (plain http is allowed only for localhost)")
-    if is_loopback_name:
-        _check_address(host, "loopback", allow_private)
     if ip is not None:
-        _check_address(host, _classify_ip(ip), allow_private)
+        reason = _classify_ip(ip)
+    else:
+        reason = _is_local_name(host)
+        if reason == "private" and "." not in host and parts.scheme == "https":
+            # A single-label name over https is checked by DNS resolution
+            # (validate_llm_endpoint); only plain http needs the opt-in here.
+            reason = None
+    _check_address(host, reason, allow_private)
+
+    if parts.scheme != "https" and reason not in ("loopback", "private"):
+        raise LLMEndpointError(_HTTP_HINT)
     return host
 
 
@@ -216,9 +255,10 @@ async def _resolve(host: str) -> list[str]:
 
 async def validate_llm_endpoint(url: str) -> None:
     """Full validation for admin writes and connection tests: static checks
-    plus DNS resolution, rejecting hosts that resolve to private or
-    link-local ranges. An unresolvable host is accepted (it cannot be
-    reached either); DNS rebinding is out of scope."""
+    plus DNS resolution, rejecting hosts that resolve to link-local or
+    metadata ranges, to private ranges without the opt-in, and plain http to
+    a name that resolves to a public address. An unresolvable host is
+    accepted (it cannot be reached either); DNS rebinding is out of scope."""
     host = validate_llm_endpoint_static(url)
     try:
         ipaddress.ip_address(host)
@@ -230,12 +270,16 @@ async def validate_llm_endpoint(url: str) -> None:
     except (OSError, TimeoutError, UnicodeError):
         return
     allow_private = llm_settings.allow_private_endpoints
+    plain_http = urlsplit(url.strip()).scheme == "http"
     for addr in addresses:
         try:
             ip = ipaddress.ip_address(addr.split("%", 1)[0])
         except ValueError:
             continue
-        _check_address(host, _classify_ip(ip), allow_private)
+        reason = _classify_ip(ip)
+        _check_address(host, reason, allow_private)
+        if plain_http and reason not in ("loopback", "private"):
+            raise LLMEndpointError(f"Endpoint host {host!r} is public. {_HTTP_HINT}")
 
 
 # ---------------------------------------------------------------------------

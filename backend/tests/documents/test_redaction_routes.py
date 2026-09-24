@@ -125,7 +125,7 @@ async def _seed_document(db: AsyncIOMotorDatabase, case_id: str, **doc_overrides
     # documents carry cached page geometry (100 pages of 1200x2100 pt) so
     # the coordinate tests below fit; the geometry rules themselves are
     # covered in test_redaction_workflow_safety.py.
-    doc_overrides.setdefault("page_dims", [[1200.0, 2100.0]] * 100)
+    doc_overrides.setdefault("page_dims", [[1200.0, 2100.0, 0]] * 100)
     doc = make_document(case_id=case_id, **doc_overrides)
     await db.documents.insert_one(doc)
     return doc["id"]
@@ -560,7 +560,18 @@ class TestApproveOrRejectProposed:
         doc_id = await _seed_document(
             db,
             case_id,
-            redactions=[{"type": "professional", "page": 1, "id": "x", "status": "approved"}],
+            redactions=[
+                {
+                    "type": "professional",
+                    "page": 1,
+                    "x": 1,
+                    "y": 2,
+                    "width": 10,
+                    "height": 5,
+                    "id": "x",
+                    "status": "approved",
+                }
+            ],
         )
         r = await client.put(
             f"/api/v1/documents/{doc_id}/redactions/x/approve",

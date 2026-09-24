@@ -846,7 +846,17 @@ def get_quick_pii_suggestions(document_text: str) -> list[dict]:
 
 
 _APOSTROPHES = ("\u2019", "'")
-_MODEL_GEOMETRY_KEYS = ("coordinates", "bbox", "x", "y", "width", "height", "rect")
+_MODEL_GEOMETRY_KEYS = (
+    "coordinates",
+    "bbox",
+    "x",
+    "y",
+    "width",
+    "height",
+    "rect",
+    "coord_space",
+    "page_rotation",
+)
 
 
 def _search_variants(search_text: str) -> list[str]:
@@ -867,18 +877,30 @@ def _search_variants(search_text: str) -> list[str]:
     return variants
 
 
-def _rect_dict(page_num: int, rect) -> dict:
+def _rect_dict(page, rect) -> dict:
+    """A search hit in displayed (viewer) space (C1).
+
+    ``page.search_for`` returns unrotated page coordinates; the viewer, the
+    stored redactions and the burn step all use displayed space, so the box
+    is rotated with ``page.rotation_matrix`` here, at the source.
+    """
+    displayed = fitz.Rect(fitz.Rect(rect) * page.rotation_matrix)
+    displayed.normalize()
     return {
-        "page": page_num + 1,
-        "x": float(rect.x0),
-        "y": float(rect.y0),
-        "width": float(rect.x1 - rect.x0),
-        "height": float(rect.y1 - rect.y0),
+        "page": page.number + 1,
+        "x": float(displayed.x0),
+        "y": float(displayed.y0),
+        "width": float(displayed.width),
+        "height": float(displayed.height),
+        "page_rotation": int(page.rotation) % 360,
     }
 
 
 def _find_in_document(doc, search_text: str) -> list[dict]:
-    """Locate ``search_text`` on every page of an open PyMuPDF document."""
+    """Locate ``search_text`` on every page of an open PyMuPDF document.
+
+    Every hit is in displayed space and carries its ``page_rotation``.
+    """
     results: list[dict] = []
     variants = _search_variants(search_text)
     if not variants:
@@ -894,7 +916,7 @@ def _find_in_document(doc, search_text: str) -> list[dict]:
             if hits:
                 break
         if hits:
-            results.extend(_rect_dict(page_num, inst) for inst in hits)
+            results.extend(_rect_dict(page, inst) for inst in hits)
             continue
 
         # Strategy 2: normalised whitespace
@@ -903,7 +925,7 @@ def _find_in_document(doc, search_text: str) -> list[dict]:
             if hits:
                 break
         if hits:
-            results.extend(_rect_dict(page_num, inst) for inst in hits)
+            results.extend(_rect_dict(page, inst) for inst in hits)
             continue
 
         # Strategy 3: multi-line text — box from first to last line
@@ -916,17 +938,13 @@ def _find_in_document(doc, search_text: str) -> list[dict]:
                 if first_line_rects and last_line_rects:
                     first_rect = first_line_rects[0]
                     last_rect = last_line_rects[-1]
-                    results.append(
-                        {
-                            "page": page_num + 1,
-                            "x": float(min(first_rect.x0, last_rect.x0)),
-                            "y": float(first_rect.y0),
-                            "width": float(
-                                max(first_rect.x1, last_rect.x1) - min(first_rect.x0, last_rect.x0)
-                            ),
-                            "height": float(last_rect.y1 - first_rect.y0),
-                        }
+                    union = fitz.Rect(
+                        min(first_rect.x0, last_rect.x0),
+                        first_rect.y0,
+                        max(first_rect.x1, last_rect.x1),
+                        last_rect.y1,
                     )
+                    results.append(_rect_dict(page, union))
     return results
 
 
@@ -997,6 +1015,9 @@ def enrich_suggestions_with_coordinates(
             if coords:
                 for coord in coords:
                     enriched_suggestion = dict(base)
+                    rotation = coord.get("page_rotation")
+                    if rotation is None and doc is not None and 1 <= coord["page"] <= len(doc):
+                        rotation = int(doc[coord["page"] - 1].rotation) % 360
                     enriched_suggestion.update(
                         {
                             "page": coord["page"],
@@ -1007,6 +1028,9 @@ def enrich_suggestions_with_coordinates(
                                 "height": coord["height"],
                             },
                             "has_coordinates": True,
+                            # All coordinates are in displayed space (C1).
+                            "coord_space": "displayed",
+                            "page_rotation": rotation or 0,
                         }
                     )
                     enriched.append(enriched_suggestion)

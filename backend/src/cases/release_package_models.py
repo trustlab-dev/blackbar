@@ -42,6 +42,9 @@ class PackageDocumentIssue(BaseModel):
     document_id: str | None = None
     filename: str | None = None
     reason: str
+    # Redactions that blocked this document, each with id, page, status,
+    # reason code, message and whether the approve route can resolve it.
+    unresolved_redactions: list[dict] | None = None
 
 
 class DownloadRecord(BaseModel):

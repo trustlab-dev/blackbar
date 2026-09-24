@@ -54,8 +54,117 @@ def _extract_text_with_coordinates_sync(pdf_content: bytes) -> dict:
         pdf_document.close()
 
 
+def _displayed_bbox(page: fitz.Page, bbox) -> list[float]:
+    """Unrotated PyMuPDF box -> displayed (viewer) space (C1)."""
+    rect = fitz.Rect(bbox) * page.rotation_matrix
+    rect.normalize()
+    return [float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)]
+
+
+def _add_native_text(page: fitz.Page, text_dict: dict, page_data: dict) -> None:
+    """Fill ``page_data`` blocks/words/lines from a page's native text.
+
+    PyMuPDF reports native text boxes in unrotated page space. Words are
+    split and lines merged in that space, then every box is converted to
+    displayed space, the space of ``page_data["width"/"height"]``, of OCR
+    boxes (the OCR raster is rendered rotated) and of stored redactions.
+    """
+    line_num = 0
+    word_num = 0
+
+    for block in text_dict["blocks"]:
+        if "lines" not in block:
+            continue
+        for line in block["lines"]:
+            line_num += 1
+            line_text = ""
+            line_bbox = None
+            line_words = []
+
+            for span in line["spans"]:
+                span_text = span["text"]
+                span_bbox = span["bbox"]
+
+                # Add to blocks (legacy format)
+                page_data["blocks"].append(
+                    {
+                        "text": span_text,
+                        "bbox": _displayed_bbox(page, span_bbox),
+                        "font": span.get("font", ""),
+                        "size": span.get("size", 0),
+                        "confidence": 1.0,
+                    }
+                )
+
+                # Approximate word boxes by splitting the span evenly
+                words_in_span = span_text.split()
+                span_width = span_bbox[2] - span_bbox[0]
+                avg_word_width = span_width / len(words_in_span) if words_in_span else span_width
+
+                for i, word in enumerate(words_in_span):
+                    word_num += 1
+                    word_x0 = span_bbox[0] + (i * avg_word_width)
+                    word_x1 = word_x0 + avg_word_width
+                    word_data = {
+                        "text": word,
+                        "bbox": _displayed_bbox(
+                            page, [word_x0, span_bbox[1], word_x1, span_bbox[3]]
+                        ),
+                        "confidence": 1.0,
+                        "line_num": line_num,
+                        "word_num": word_num,
+                    }
+                    page_data["words"].append(word_data)
+                    line_words.append(word_data)
+
+                line_text += span_text + " "
+
+                # Expand line bbox (unrotated space)
+                if line_bbox is None:
+                    line_bbox = list(span_bbox)
+                else:
+                    line_bbox[0] = min(line_bbox[0], span_bbox[0])
+                    line_bbox[1] = min(line_bbox[1], span_bbox[1])
+                    line_bbox[2] = max(line_bbox[2], span_bbox[2])
+                    line_bbox[3] = max(line_bbox[3], span_bbox[3])
+
+            if line_bbox:
+                page_data["lines"].append(
+                    {
+                        "text": line_text.strip(),
+                        "bbox": _displayed_bbox(page, line_bbox),
+                        "line_num": line_num,
+                        "words": line_words,
+                    }
+                )
+
+            page_data["text"] += line_text
+
+
+def native_page_data(page: fitz.Page) -> dict | None:
+    """``text_data`` entry for one page built from its native text, or None
+    when the page has no native text (it was OCRed). Used by the C1
+    migration to rebuild boxes stored in unrotated space."""
+    text_dict = page.get_text("dict")
+    if not any(block.get("lines") for block in text_dict.get("blocks", [])):
+        return None
+    page_data = {
+        "page_num": page.number + 1,
+        "text": "",
+        "width": float(page.rect.width),
+        "height": float(page.rect.height),
+        "rotation": int(page.rotation) % 360,
+        "blocks": [],
+        "words": [],
+        "lines": [],
+    }
+    _add_native_text(page, text_dict, page_data)
+    return page_data
+
+
 def _extract_pages(pdf_document: fitz.Document) -> dict:
-    result = {"pages": [], "full_text": ""}
+    # Every box in the result is in displayed (viewer) space (C1).
+    result = {"pages": [], "full_text": "", "coord_space": "displayed"}
 
     for page_num, page in enumerate(pdf_document, 1):
         # Get page dimensions
@@ -66,6 +175,7 @@ def _extract_pages(pdf_document: fitz.Document) -> dict:
             "text": "",
             "width": float(page_rect.width),
             "height": float(page_rect.height),
+            "rotation": int(page.rotation) % 360,
             "blocks": [],
             "words": [],  # NEW: Word-level data
             "lines": [],  # NEW: Line-level data
@@ -83,85 +193,14 @@ def _extract_pages(pdf_document: fitz.Document) -> dict:
                     break
 
         if has_native_text:
-            # Has native text - extract with coordinates at word and line level
-            line_num = 0
-            word_num = 0
-
-            for block in text_dict["blocks"]:
-                if "lines" in block:
-                    for line in block["lines"]:
-                        line_num += 1
-                        line_text = ""
-                        line_bbox = None
-                        line_words = []
-
-                        for span in line["spans"]:
-                            span_text = span["text"]
-                            span_bbox = span["bbox"]
-
-                            # Add to blocks (legacy format)
-                            page_data["blocks"].append(
-                                {
-                                    "text": span_text,
-                                    "bbox": list(span_bbox),
-                                    "font": span.get("font", ""),
-                                    "size": span.get("size", 0),
-                                    "confidence": 1.0,
-                                }
-                            )
-
-                            # NEW: Split span into words for word-level data
-                            words_in_span = span_text.split()
-                            span_width = span_bbox[2] - span_bbox[0]
-                            avg_word_width = (
-                                span_width / len(words_in_span) if words_in_span else span_width
-                            )
-
-                            for i, word in enumerate(words_in_span):
-                                word_num += 1
-                                # Approximate word bbox (PDF.js doesn't give us word-level natively)
-                                word_x0 = span_bbox[0] + (i * avg_word_width)
-                                word_x1 = word_x0 + avg_word_width
-                                word_bbox = [word_x0, span_bbox[1], word_x1, span_bbox[3]]
-
-                                word_data = {
-                                    "text": word,
-                                    "bbox": word_bbox,
-                                    "confidence": 1.0,
-                                    "line_num": line_num,
-                                    "word_num": word_num,
-                                }
-                                page_data["words"].append(word_data)
-                                line_words.append(word_data)
-
-                            line_text += span_text + " "
-
-                            # Expand line bbox
-                            if line_bbox is None:
-                                line_bbox = list(span_bbox)
-                            else:
-                                line_bbox[0] = min(line_bbox[0], span_bbox[0])
-                                line_bbox[1] = min(line_bbox[1], span_bbox[1])
-                                line_bbox[2] = max(line_bbox[2], span_bbox[2])
-                                line_bbox[3] = max(line_bbox[3], span_bbox[3])
-
-                        # NEW: Add line-level data
-                        if line_bbox:
-                            page_data["lines"].append(
-                                {
-                                    "text": line_text.strip(),
-                                    "bbox": line_bbox,
-                                    "line_num": line_num,
-                                    "words": line_words,
-                                }
-                            )
-
-                        page_data["text"] += line_text
+            _add_native_text(page, text_dict, page_data)
         else:
             # No native text - use OCR
             logger.info(f"No native text on page {page_num}, using OCR")
 
-            # Get page dimensions in PDF points
+            # Page dimensions in displayed-space PDF points; the raster
+            # below is rendered with /Rotate applied, so OCR boxes scale
+            # straight into displayed space.
             page_rect = page.rect
             pdf_width = page_rect.width
             pdf_height = page_rect.height

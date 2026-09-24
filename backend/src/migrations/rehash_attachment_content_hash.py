@@ -57,7 +57,9 @@ async def main() -> None:
     client: AsyncIOMotorClient = AsyncIOMotorClient(MONGODB_URI)
     try:
         print("Re-hashing attachment documents on original bytes...")
-        stats = await rehash_attachment_content_hashes(client["blackbar"])
+        stats = await rehash_attachment_content_hashes(
+            client.get_default_database(default="blackbar")
+        )
         print(f"   Attachments checked: {stats['checked']}")
         print(f"   Hashes updated: {stats['updated']}")
         print(f"   Missing GridFS original: {stats['missing_original']}")

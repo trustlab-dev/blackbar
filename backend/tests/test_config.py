@@ -329,3 +329,14 @@ class TestPublicBaseUrl:
         monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
         monkeypatch.delenv("FRONTEND_URL", raising=False)
         assert public_base_url() == "http://localhost:3000"
+
+
+def test_env_example_ships_secrets_empty() -> None:
+    """I9: `.env.example` must not ship placeholders the backend refuses;
+    setup.sh fills the empty values."""
+    from pathlib import Path
+
+    lines = (Path(__file__).resolve().parents[2] / ".env.example").read_text().splitlines()
+    values = dict(line.split("=", 1) for line in lines if "=" in line and not line.startswith("#"))
+    assert values["JWT_SECRET"] == ""
+    assert values["LLM_API_KEY_ENCRYPTION_KEY"] == ""

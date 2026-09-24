@@ -8,7 +8,12 @@ Pipeline (``apply_redactions_to_pdf``):
    page that exists, a finite positive-area box inside the page. Any bad
    record raises; nothing is skipped.
 2. Convert each box from displayed (viewer) space to PyMuPDF's unrotated
-   page space with ``page.derotation_matrix`` (DOC-04).
+   page space with ``page.derotation_matrix`` (DOC-04). Only records marked
+   ``coord_space: "displayed"`` are converted, and only when their stored
+   ``page_rotation`` still matches the page. Legacy records without the
+   marker are used as they are on unrotated pages and refused on rotated
+   pages, where their space is unknown (C1; see
+   ``src.utils.redaction_records``).
 3. Burn the boxes with ``page.apply_redactions`` removing text and blanking
    image pixels under each box.
 4. Sanitise the whole document (DOC-05): metadata, XMP, embedded files,
@@ -16,7 +21,8 @@ Pipeline (``apply_redactions_to_pdf``):
    This also runs when there are no redactions.
 5. Save with garbage collection so replaced objects are not carried over.
 6. Re-open the output and verify it (DOC-07): no characters left under any
-   box, text-based redaction strings gone, and the sanitised parts empty.
+   box, the string of every text-based redaction gone from the whole page
+   (not only from inside its box), and the sanitised parts empty.
    A failed check raises RedactionVerificationError.
 """
 
@@ -33,14 +39,17 @@ import fitz  # PyMuPDF
 
 from src.utils.pdf_limits import PdfLimitExceeded, check_page_count
 from src.utils.redaction_records import (
+    DISPLAYED_SPACE,
     RedactionValidationError,
+    normalise_rotation,
     validate_redaction,
 )
 
 logger = logging.getLogger(__name__)
 
 # Redactions created from a text search mark every occurrence on the page,
-# so after burning the string must not appear anywhere on that page.
+# so the string must not survive even as part of a longer word. Other
+# text-based redactions are checked for the string as a whole word.
 PAGE_SCOPE_SOURCES = frozenset({"bulk_text", "ai_bulk_apply"})
 
 # Image handling for apply_redactions: blank the pixels under the box.
@@ -94,8 +103,7 @@ def _prepare_boxes(doc: fitz.Document, redactions: list[dict[str, Any]]) -> list
         ) & fitz.Rect(page.rect)
         if displayed.is_empty:
             raise RedactionValidationError(f"redaction {label}: box has no area on the page")
-        unrotated = fitz.Rect(displayed * page.derotation_matrix)
-        unrotated.normalize()
+        unrotated = _to_unrotated(page, displayed, redaction, label)
 
         text = redaction.get("text")
         text = text if isinstance(text, str) and text.strip() else None
@@ -109,6 +117,44 @@ def _prepare_boxes(doc: fitz.Document, redactions: list[dict[str, Any]]) -> list
             )
         )
     return boxes
+
+
+def _to_unrotated(
+    page: fitz.Page, box: fitz.Rect, redaction: dict[str, Any], label: str
+) -> fitz.Rect:
+    """Convert ``box`` to unrotated page space according to the record's
+    coordinate-space marker (C1)."""
+    rotation = normalise_rotation(page.rotation)
+    space = redaction.get("coord_space")
+    if not space:
+        if rotation:
+            raise RedactionValidationError(
+                f"redaction {label}: created by an older version on a page rotated "
+                f"{rotation} degrees, so its position is ambiguous; review it in the "
+                "viewer and approve it again, or delete and re-add it"
+            )
+        return fitz.Rect(box)
+    if space != DISPLAYED_SPACE:
+        raise RedactionValidationError(f"redaction {label}: unknown coordinate space {space!r}")
+    stored = redaction.get("page_rotation")
+    if stored is not None and normalise_rotation(stored) != rotation:
+        raise RedactionValidationError(
+            f"redaction {label}: placed on a page rotated {normalise_rotation(stored)} "
+            f"degrees but the page is now rotated {rotation} degrees"
+        )
+    unrotated = fitz.Rect(box * page.derotation_matrix)
+    unrotated.normalize()
+    return unrotated
+
+
+def _text_survives(needle: str, haystack: str, *, whole_word: bool) -> bool:
+    if not needle:
+        return False
+    if not whole_word:
+        return needle in haystack
+    prefix = r"(?<!\w)" if re.match(r"\w", needle[0]) else ""
+    suffix = r"(?!\w)" if re.match(r"\w", needle[-1]) else ""
+    return re.search(prefix + re.escape(needle) + suffix, haystack) is not None
 
 
 def sanitize_pdf_document(doc: fitz.Document) -> None:
@@ -222,18 +268,19 @@ def verify_redacted_pdf(pdf_content: bytes, boxes: list[_Box]) -> None:
                     f"page {page_index + 1}: {count} characters remain under redaction {label}"
                 )
 
+            # A box in the wrong place burns the wrong text and leaves the
+            # real one in place, so the character check above cannot see it.
+            # Text-based redactions are therefore checked on the whole page.
             page_text = _normalise_text(page.get_text())
             for box in page_boxes:
                 if not box.text:
                     continue
                 needle = _normalise_text(box.text)
-                if box.page_scope:
-                    haystack = page_text
-                else:
-                    haystack = _normalise_text(page.get_text(clip=box.rect))
-                if needle and needle in haystack:
+                if _text_survives(needle, page_text, whole_word=not box.page_scope):
                     problems.append(
-                        f"page {page_index + 1}: redacted text of {box.label} is still extractable"
+                        f"page {page_index + 1}: redacted text of {box.label} is still "
+                        "extractable on the page (the box may be misplaced, or the text "
+                        "occurs again outside it)"
                     )
     finally:
         doc.close()

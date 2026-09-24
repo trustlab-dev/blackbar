@@ -88,10 +88,99 @@ class TestEndpointValidation:
         monkeypatch.setenv("LLM_ALLOW_PRIVATE_ENDPOINTS", "true")
         validate_llm_endpoint_static("http://localhost:11434/v1/chat/completions")
         validate_llm_endpoint_static("https://10.1.2.3/v1")
+        validate_llm_endpoint_static("http://10.1.2.3/v1")
         with pytest.raises(LLMEndpointError):
             validate_llm_endpoint_static("https://169.254.169.254/x")
+        # https stays mandatory for public hosts.
         with pytest.raises(LLMEndpointError, match="https"):
-            validate_llm_endpoint_static("http://10.1.2.3/v1")
+            validate_llm_endpoint_static("http://api.openai.com/v1/chat/completions")
+
+    LOCAL_HTTP = [
+        "http://ollama:11434/v1/chat/completions",
+        "http://10.0.0.5:8000/v1/chat/completions",
+        "http://host.docker.internal:11434/v1/chat/completions",
+        "http://172.17.0.1:11434/api/chat",
+        "http://192.168.1.20:8080/v1",
+        "http://[fd12:3456::5]:8000/v1",
+    ]
+
+    @pytest.mark.parametrize("url", LOCAL_HTTP)
+    def test_local_http_model_servers_need_the_opt_in(
+        self, url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """I5: a model server on the compose network, the Docker host or a
+        private range works over http once LLM_ALLOW_PRIVATE_ENDPOINTS=true."""
+        monkeypatch.delenv("LLM_ALLOW_PRIVATE_ENDPOINTS", raising=False)
+        with pytest.raises(LLMEndpointError):
+            validate_llm_endpoint_static(url)
+        monkeypatch.setenv("LLM_ALLOW_PRIVATE_ENDPOINTS", "true")
+        validate_llm_endpoint_static(url)
+
+    @pytest.mark.parametrize("url", LOCAL_HTTP[:3])
+    async def test_local_http_passes_full_validation_with_opt_in(
+        self, url: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import src.llm.safety as safety
+
+        async def _resolve(host: str) -> list[str]:
+            return ["172.18.0.4"]
+
+        monkeypatch.setattr(safety, "_resolve", _resolve)
+        monkeypatch.setenv("LLM_ALLOW_PRIVATE_ENDPOINTS", "true")
+        await validate_llm_endpoint(url)
+        monkeypatch.delenv("LLM_ALLOW_PRIVATE_ENDPOINTS")
+        with pytest.raises(LLMEndpointError):
+            await validate_llm_endpoint(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data",
+            "https://169.254.169.254/latest/meta-data",
+            "http://[fd00:ec2::254]/latest",
+            "http://100.100.100.200/latest",
+            "http://[fe80::1]/x",
+            "http://metadata.google.internal/x",
+            "http://metadata/x",
+            "http://[::ffff:169.254.169.254]/x",
+        ],
+    )
+    @pytest.mark.parametrize("opt_in", [False, True])
+    def test_metadata_and_link_local_always_refused(
+        self, url: str, opt_in: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if opt_in:
+            monkeypatch.setenv("LLM_ALLOW_PRIVATE_ENDPOINTS", "true")
+        else:
+            monkeypatch.delenv("LLM_ALLOW_PRIVATE_ENDPOINTS", raising=False)
+        with pytest.raises(LLMEndpointError):
+            validate_llm_endpoint_static(url)
+
+    async def test_http_name_resolving_to_public_address_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import src.llm.safety as safety
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr(safety, "_resolve", _resolve)
+        monkeypatch.setenv("LLM_ALLOW_PRIVATE_ENDPOINTS", "true")
+        with pytest.raises(LLMEndpointError, match="public"):
+            await validate_llm_endpoint("http://ollama:11434/v1")
+
+    async def test_name_resolving_to_link_local_is_refused_with_opt_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import src.llm.safety as safety
+
+        async def _resolve(host: str) -> list[str]:
+            return ["169.254.169.254"]
+
+        monkeypatch.setattr(safety, "_resolve", _resolve)
+        monkeypatch.setenv("LLM_ALLOW_PRIVATE_ENDPOINTS", "true")
+        with pytest.raises(LLMEndpointError, match="link-local"):
+            await validate_llm_endpoint("http://ollama:11434/v1")
 
     async def test_dns_to_private_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import src.llm.safety as safety

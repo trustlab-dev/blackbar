@@ -26,6 +26,7 @@ Usage:
     )
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -312,6 +313,11 @@ class UploadContext:
 # =============================================================================
 
 
+# Forwarded messages inside forwarded messages are processed this many
+# levels deep; deeper attachments are listed in attachment_errors (I8).
+MAX_ATTACHMENT_DEPTH = 5
+
+
 class DocumentProcessingService:
     """
     Centralized document processing service.
@@ -408,7 +414,10 @@ class DocumentProcessingService:
 
             # Step 4: Convert to PDF
             ext = Path(filename).suffix.lower()
-            conversion_result = await self._convert_to_pdf(file_content, filename, ext)
+            try:
+                conversion_result = await self._convert_to_pdf(file_content, filename, ext)
+            except PdfLimitExceeded as exc:
+                return self._limit_exceeded(result, filename, exc)
 
             original_mime = EXTENSION_MIME_TYPES.get(ext, "application/octet-stream")
 
@@ -466,15 +475,7 @@ class DocumentProcessingService:
                 try:
                     text_data, text_summary = await self._extract_text(pdf_content, filename)
                 except PdfLimitExceeded as exc:
-                    # Reject rather than store a document no later step
-                    # (redaction, release) can process (DOC-09).
-                    message = f"{filename} exceeds a processing limit: {exc}"
-                    logger.warning(message)
-                    result.status = ProcessingStatus.VALIDATION_FAILED
-                    result.error = message
-                    result.message = message
-                    result.http_status = 413
-                    return result
+                    return self._limit_exceeded(result, filename, exc)
                 result.has_ocr = text_data is not None
             # Bulk search reads extracted_text; direct PDF uploads only have
             # the OCR/native text layer (DOC-12).
@@ -484,7 +485,11 @@ class DocumentProcessingService:
             # Step 7: AI summary generation (respects org settings)
             summary = None
             if pdf_content:
-                summary = await self._generate_summary(pdf_content, final_filename, mime_type)
+                # pdf_content is always a PDF (emails are rendered to one);
+                # the summary reuses the text extracted above (DOC-09).
+                summary = await self._generate_summary(
+                    pdf_content, final_filename, "application/pdf", extracted_text
+                )
                 result.has_ai_summary = summary is not None
 
             # Step 8: Store files in GridFS
@@ -517,12 +522,18 @@ class DocumentProcessingService:
             # Step 10: Process attachments
             attachment_docs = []
             if attachments and context.process_attachments:
+                # Includes attachments of forwarded/embedded messages (I8);
+                # the email lists its direct children.
                 attachment_docs = await self._process_attachments(attachments, document_id, context)
-                document["attachment_ids"] = [a["id"] for a in attachment_docs]
-                document["has_attachments"] = len(attachment_docs) > 0
-                document["total_attachments"] = len(attachment_docs)
+                document["attachment_ids"] = [
+                    a["id"]
+                    for a in attachment_docs
+                    if a.get("parent_document_id", document_id) == document_id
+                ]
+                document["has_attachments"] = len(document["attachment_ids"]) > 0
+                document["total_attachments"] = len(document["attachment_ids"])
                 result.attachment_count = len(attachment_docs)
-                result.attachment_ids = document["attachment_ids"]
+                result.attachment_ids = [a["id"] for a in attachment_docs]
             if self.attachment_errors:
                 document["attachment_errors"] = list(self.attachment_errors)
                 result.warnings.extend(
@@ -569,6 +580,20 @@ class DocumentProcessingService:
             result.error = str(e)
             result.message = f"Error processing document: {str(e)}"
             return result
+
+    @staticmethod
+    def _limit_exceeded(
+        result: ProcessingResult, filename: str, exc: PdfLimitExceeded
+    ) -> ProcessingResult:
+        """Reject rather than store a document no later step (redaction,
+        release) can process (DOC-09)."""
+        message = f"{filename} exceeds a processing limit: {exc}"
+        logger.warning(message)
+        result.status = ProcessingStatus.VALIDATION_FAILED
+        result.error = message
+        result.message = message
+        result.http_status = 413
+        return result
 
     # =========================================================================
     # Validation
@@ -639,7 +664,9 @@ class DocumentProcessingService:
                 f.write(content)
 
             try:
-                conversion = convert_to_pdf(temp_input, self.temp_dir)
+                # LibreOffice and OCR block for seconds to minutes: keep them
+                # off the event loop (DOC-09).
+                conversion = await asyncio.to_thread(convert_to_pdf, temp_input, self.temp_dir)
 
                 if conversion["success"]:
                     with open(conversion["pdf_path"], "rb") as f:
@@ -650,6 +677,7 @@ class DocumentProcessingService:
                     result["final_filename"] = f"{original_name}{ext}.pdf"
                     result["success"] = True
                     result["message_id"] = conversion.get("message_id")
+                    result["thread_headers"] = conversion.get("thread_headers")
                     result["extracted_text"] = conversion.get("extracted_text")
                     result["attachments"] = conversion.get("attachments", [])
 
@@ -668,6 +696,8 @@ class DocumentProcessingService:
 
             return result
 
+        except PdfLimitExceeded:
+            raise
         except Exception as e:
             logger.error(f"Conversion error for {filename}: {str(e)}")
             result["error"] = str(e)
@@ -716,7 +746,7 @@ class DocumentProcessingService:
     # =========================================================================
 
     async def _generate_summary(
-        self, pdf_content: bytes, filename: str, mime_type: str
+        self, pdf_content: bytes, filename: str, mime_type: str, text: str | None = None
     ) -> str | None:
         """Generate AI summary if enabled in org settings."""
         try:
@@ -729,7 +759,7 @@ class DocumentProcessingService:
                 logger.info(f"AI summary disabled, skipping for {filename}")
                 return None
 
-            summary = await generate_document_summary(pdf_content, filename, mime_type)
+            summary = await generate_document_summary(pdf_content, filename, mime_type, text)
             return summary
 
         except Exception as e:
@@ -873,6 +903,15 @@ class DocumentProcessingService:
         # Add email-specific fields
         if ext in [".eml", ".msg"]:
             document["message_id"] = message_id
+            # Threading fields parsed from the message itself (I7), never
+            # scraped from the rendered text.
+            from src.utils.email_threads import thread_identifiers_from_headers
+
+            thread_metadata = thread_identifiers_from_headers(
+                conversion_result.get("thread_headers"), message_id
+            )
+            if thread_metadata:
+                document["thread_metadata"] = thread_metadata
             if ext == ".eml":
                 document["original_mime_type"] = "message/rfc822"
             elif (
@@ -889,12 +928,25 @@ class DocumentProcessingService:
     # =========================================================================
 
     async def _process_attachments(
-        self, attachments: list[dict], parent_document_id: str, context: UploadContext
+        self,
+        attachments: list[dict],
+        parent_document_id: str,
+        context: UploadContext,
+        depth: int = 1,
+        parent_path: str = "",
     ) -> list[dict]:
-        """Process email attachments as separate documents."""
+        """Process email attachments as separate documents.
+
+        Attachments of a forwarded or embedded message (.eml/.msg child)
+        are processed too, recursively, as children of that message's
+        record (I8, DOC-18). Beyond ``MAX_ATTACHMENT_DEPTH`` levels they are
+        recorded in ``attachment_errors`` instead. Nothing is dropped
+        silently. Returns every record created, nested ones included.
+        """
         attachment_docs = []
 
         for attachment in attachments:
+            display_name = parent_path + attachment.get("filename", "attachment")
             try:
                 att_filename = attachment.get("filename", "attachment")
                 att_path = attachment.get("path")
@@ -902,20 +954,20 @@ class DocumentProcessingService:
 
                 if not att_path or not os.path.exists(att_path):
                     logger.warning(f"Attachment file not found: {att_path}")
-                    self._record_attachment_error(att_filename, "attachment file not found")
+                    self._record_attachment_error(display_name, "attachment file not found")
                     continue
 
                 logger.info(f"Processing attachment: {att_filename}")
 
-                # Convert attachment to PDF
-                conversion = convert_to_pdf(att_path, self.temp_dir)
+                # Convert attachment to PDF, off the event loop (DOC-09)
+                conversion = await asyncio.to_thread(convert_to_pdf, att_path, self.temp_dir)
 
                 if not conversion["success"]:
                     logger.warning(
                         f"Could not convert attachment {att_filename}: {conversion.get('error')}"
                     )
                     self._record_attachment_error(
-                        att_filename, conversion.get("error") or "conversion failed"
+                        display_name, conversion.get("error") or "conversion failed"
                     )
                     continue
 
@@ -926,8 +978,13 @@ class DocumentProcessingService:
                 att_text_data, att_text_summary = await self._extract_text(
                     att_pdf_content, att_filename
                 )
+                att_extracted_text = (
+                    conversion.get("extracted_text")
+                    or (att_text_data or {}).get("full_text")
+                    or None
+                )
                 att_summary = await self._generate_summary(
-                    att_pdf_content, att_filename, "application/pdf"
+                    att_pdf_content, att_filename, "application/pdf", att_extracted_text
                 )
 
                 # Store in GridFS. Phase 4 Batch 4.4 (audit B25/B58):
@@ -967,9 +1024,7 @@ class DocumentProcessingService:
                     # Text (extracted_text feeds bulk search, DOC-12)
                     "text_data": att_text_data,
                     "text_summary": att_text_summary,
-                    "extracted_text": conversion.get("extracted_text")
-                    or (att_text_data or {}).get("full_text")
-                    or None,
+                    "extracted_text": att_extracted_text,
                     "summary": att_summary,
                     # Status
                     "status": "new",
@@ -987,9 +1042,30 @@ class DocumentProcessingService:
                 attachment_docs.append(att_doc)
                 logger.info(f"Processed attachment {att_filename} -> {att_id}")
 
+                # A forwarded/embedded message has attachments of its own.
+                nested = conversion.get("attachments") or []
+                if nested:
+                    nested_path = f"{display_name} / "
+                    if depth >= MAX_ATTACHMENT_DEPTH:
+                        for inner in nested:
+                            self._record_attachment_error(
+                                nested_path + inner.get("filename", "attachment"),
+                                f"nested more than {MAX_ATTACHMENT_DEPTH} messages deep; "
+                                "not extracted",
+                            )
+                    else:
+                        children = await self._process_attachments(
+                            nested, att_id, context, depth + 1, nested_path
+                        )
+                        direct = [c["id"] for c in children if c["parent_document_id"] == att_id]
+                        att_doc["attachment_ids"] = direct
+                        att_doc["has_attachments"] = bool(direct)
+                        att_doc["total_attachments"] = len(direct)
+                        attachment_docs.extend(children)
+
             except Exception as e:
                 logger.error(f"Failed to process attachment {attachment.get('filename')}: {str(e)}")
-                self._record_attachment_error(attachment.get("filename", "attachment"), str(e))
+                self._record_attachment_error(display_name, str(e))
 
         return attachment_docs
 
@@ -1037,7 +1113,11 @@ class DocumentProcessingService:
 
                 if att_docs:
                     await self.db.documents.insert_many(att_docs)
-                    new_ids = [a["id"] for a in att_docs]
+                    new_ids = [
+                        a["id"]
+                        for a in att_docs
+                        if a.get("parent_document_id", existing_email["id"]) == existing_email["id"]
+                    ]
 
                     await self.db.documents.update_one(
                         {"id": existing_email["id"]},
@@ -1068,17 +1148,15 @@ class DocumentProcessingService:
         try:
             from src.documents.routes import (
                 consolidate_email_thread,
-                extract_thread_identifiers,
                 find_thread_emails,
+                thread_identifiers_from_headers,
             )
 
-            extracted_text = document.get("extracted_text", "")
-            message_id = document.get("message_id")
-
-            if not extracted_text:
-                return None
-
-            thread_identifiers = extract_thread_identifiers(extracted_text, message_id)
+            # Identifiers come from the headers parsed off the message at
+            # conversion time (I7); the rendered text is never scraped.
+            thread_identifiers = thread_identifiers_from_headers(
+                document.get("thread_metadata"), document.get("message_id")
+            )
             if not thread_identifiers:
                 return None
 

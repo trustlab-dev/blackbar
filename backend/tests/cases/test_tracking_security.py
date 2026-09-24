@@ -79,6 +79,23 @@ class TestTrackLookup:
             r = await c.get("/api/v1/cases/public/track/FOI-2026-001-PORTAL01")
         assert r.status_code == 200, r.text
 
+    async def test_legacy_three_letter_tracking_number_still_works(
+        self, app, db: AsyncIOMotorDatabase, patch_public_routes_db
+    ) -> None:
+        """Numbers issued before AUTH-05 have a 3-letter suffix and predate
+        the `source` marker; requesters can still look them up."""
+        await db.cases.insert_one(
+            make_case(
+                tracking_number="FOI-2025-014-QXZ",
+                created_by="system",
+                received_date=datetime.utcnow(),
+            )
+        )
+        async with _client(app) as c:
+            r = await c.get("/api/v1/cases/public/track/FOI-2025-014-QXZ")
+        assert r.status_code == 200, r.text
+        assert r.json()["tracking_number"] == "FOI-2025-014-QXZ"
+
     async def test_internal_case_is_indistinguishable_from_unknown(
         self, app, db: AsyncIOMotorDatabase, patch_public_routes_db
     ) -> None:

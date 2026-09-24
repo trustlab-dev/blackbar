@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import Any
@@ -35,7 +36,9 @@ def _failure_message(prefix: str, exc: Exception) -> str:
 MAX_CONTENT_LENGTH = 8000
 
 
-async def generate_document_summary(content: bytes, filename: str, mime_type: str) -> str:
+async def generate_document_summary(
+    content: bytes, filename: str, mime_type: str, text: str | None = None
+) -> str:
     """
     Generate a concise summary (at most two sentences) of the document content.
 
@@ -43,6 +46,8 @@ async def generate_document_summary(content: bytes, filename: str, mime_type: st
         content: The binary content of the document
         filename: The name of the file
         mime_type: The MIME type of the file
+        text: Text already extracted from the document. When given, the
+            document is not parsed or OCRed again (DOC-09).
 
     Returns:
         A brief summary of the content
@@ -60,9 +65,12 @@ async def generate_document_summary(content: bytes, filename: str, mime_type: st
 
         text_content = ""
 
-        if mime_type == "application/pdf":
-            # Use our OCR-enhanced PDF text extraction
-            text_content = extract_text_from_pdf(content)
+        if text and text.strip():
+            text_content = text
+        elif mime_type == "application/pdf" or content[:5] == b"%PDF-":
+            # OCR-enhanced PDF text extraction: parsing and OCR are
+            # CPU-bound, so they run off the event loop (DOC-09).
+            text_content = await asyncio.to_thread(extract_text_from_pdf, content)
             logger.debug(f"Extracted text from PDF for summary: {len(text_content)} characters")
         else:
             # For other formats, use simple text extraction

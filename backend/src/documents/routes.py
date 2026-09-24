@@ -41,6 +41,7 @@ from src.utils.email_threads import (  # noqa: F401 — re-exported for processi
     consolidate_email_thread,
     extract_thread_identifiers,
     find_thread_emails,
+    thread_identifiers_from_headers,
 )
 from src.utils.filenames import NO_STORE_HEADERS, content_disposition, safe_basename
 from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
@@ -53,12 +54,19 @@ from src.utils.redaction_records import (
     RedactionValidationError,
     ensure_redaction_ids,
     partition_redactions,
+    unresolved_message,
+    unresolved_summary,
 )
 
 from ..core.authz import assert_case_access, check_document_access, has_global_access
 from ..database import db
 from ..dependencies import check_role, get_current_user
-from .redaction_store import assert_not_conversion_failed, load_document_pdf
+from .redaction_store import (
+    assert_not_conversion_failed,
+    get_page_sizes,
+    load_document_pdf,
+    page_rotations,
+)
 
 # NOTE on re-exports above (extract_text_with_coordinates, get_text_summary,
 # generate_document_summary, consolidate_email_thread,
@@ -301,10 +309,24 @@ async def get_document_metadata(
 
     redactions = await _redactions_with_ids(db, doc)
 
+    # Tag every redaction that blocks export/release with its reason, so the
+    # viewer can list them and offer approve/reject or delete (I1, C1).
+    try:
+        rotations: list[int] | None = page_rotations(await get_page_sizes(doc, db))
+    except HTTPException:
+        rotations = None
+    unresolved = unresolved_summary(redactions, rotations)
+    blocking = {d["id"]: d for d in unresolved}
+    redactions = [
+        {**r, "review_required": blocking[r["id"]]} if r.get("id") in blocking else r
+        for r in redactions
+    ]
+
     return {
         "id": doc["id"],
         "filename": doc["filename"],
         "redactions": redactions,
+        "unresolved_redactions": unresolved,
         "text_data": text_data,
         "text_summary": doc.get("text_summary"),
         "mime_type": doc.get("mime_type"),
@@ -370,19 +392,23 @@ async def export_document_with_redactions(
         # redactions are burned in, rejected ones ignored, anything still
         # awaiting review blocks the export.
         assert_not_conversion_failed(doc)
-        to_apply, unresolved = partition_redactions(doc.get("redactions", []))
-        if unresolved:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"{len(unresolved)} redaction(s) are awaiting review (proposed, "
-                    "contested or pending). Approve or reject them before exporting."
-                ),
-            )
-
         pdf_content = await load_document_pdf(doc, db)
         if not pdf_content:
             raise HTTPException(status_code=404, detail="Document content not found")
+
+        # Page rotations let the rule hold back legacy boxes on rotated
+        # pages, whose coordinate space is unknown (C1).
+        rotations = page_rotations(await get_page_sizes(doc, db, pdf_content))
+        to_apply, unresolved = partition_redactions(doc.get("redactions", []), rotations)
+        if unresolved:
+            details = unresolved_summary(unresolved, rotations)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": unresolved_message(details, "exporting"),
+                    "unresolved_redactions": details,
+                },
+            )
 
         # Same pipeline as the release package: validate, burn, sanitise,
         # verify. CPU-bound, so off the event loop (DOC-09).

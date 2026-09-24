@@ -10,11 +10,15 @@ from src.utils.redaction_records import (
     REJECTED,
     UNRESOLVED,
     RedactionValidationError,
+    describe_unresolved,
     effective_status,
     ensure_redaction_ids,
     find_redaction,
     new_redaction_record,
     partition_redactions,
+    review_state,
+    unresolved_message,
+    unresolved_summary,
     validate_redaction,
 )
 
@@ -51,45 +55,121 @@ class TestNewRedactionRecord:
     def test_record_has_stable_id_and_flat_geometry(self) -> None:
         geom = validate_redaction({"page": 1, "x": 1, "y": 2, "width": 3, "height": 4}, LETTER)
         rec = new_redaction_record(
-            geom, status="approved", created_by="u1", source="manual", category="S22"
+            geom,
+            status="approved",
+            created_by="u1",
+            source="manual",
+            page_rotation=0,
+            category="S22",
         )
         assert rec["id"] and rec["status"] == "approved" and rec["source"] == "manual"
         assert (rec["page"], rec["x"], rec["width"]) == (1, 1.0, 3.0)
         assert rec["category"] == "S22"
-        other = new_redaction_record(geom, status="approved", created_by="u1", source="manual")
+        other = new_redaction_record(
+            geom, status="approved", created_by="u1", source="manual", page_rotation=0
+        )
         assert other["id"] != rec["id"]
+
+    @pytest.mark.parametrize("rotation, stored", [(0, 0), (90, 90), (-90, 270), (450, 90)])
+    def test_record_carries_coordinate_space(self, rotation: int, stored: int) -> None:
+        geom = validate_redaction({"page": 1, "x": 1, "y": 2, "width": 3, "height": 4}, LETTER)
+        rec = new_redaction_record(
+            geom, status="approved", created_by="u1", source="manual", page_rotation=rotation
+        )
+        assert rec["coord_space"] == "displayed"
+        assert rec["page_rotation"] == stored
+
+
+BOX = {"page": 1, "x": 10, "y": 10, "width": 20, "height": 10}
 
 
 class TestReleaseRule:
     @pytest.mark.parametrize(
-        "record, expected",
+        "record, expected, reason",
         [
-            ({"status": "approved"}, APPROVED),
-            ({"status": "accepted"}, APPROVED),
-            ({"status": "rejected"}, REJECTED),
-            ({"status": "proposed", "type": "proposed"}, UNRESOLVED),
-            ({"status": "contested"}, UNRESOLVED),
-            ({}, UNRESOLVED),
+            ({"status": "approved"}, APPROVED, None),
+            ({"status": "accepted"}, APPROVED, None),
+            ({"status": "rejected"}, REJECTED, None),
+            ({"status": "proposed", "type": "proposed"}, UNRESOLVED, "proposed"),
+            ({"status": "pending", "type": "proposed"}, UNRESOLVED, "proposed"),
+            ({"status": "contested"}, UNRESOLVED, "contested"),
+            ({}, UNRESOLVED, "unknown_status"),
             # legacy: staff-drawn "pending" boxes were always applied
-            ({"status": "pending", "created_by_role": "analyst"}, APPROVED),
-            ({"status": "pending", "created_by_role": "user"}, UNRESOLVED),
+            ({"status": "pending", "created_by_role": "analyst"}, APPROVED, None),
+            ({"status": "pending", "created_by_role": "user"}, UNRESOLVED, "legacy_pending"),
+            ({"status": "pending"}, UNRESOLVED, "legacy_no_role"),
             (
                 {"status": "pending", "created_by_role": "analyst", "needs_coordinates": True},
                 UNRESOLVED,
+                "legacy_pending",
             ),
-            ({"status": "pending", "bulk_operation": True}, UNRESOLVED),
+            (
+                {"status": "pending", "bulk_operation": True, "created_by_role": "admin"},
+                UNRESOLVED,
+                "legacy_pending",
+            ),
         ],
     )
-    def test_effective_status(self, record: dict, expected: str) -> None:
+    def test_review_state(self, record: dict, expected: str, reason: str | None) -> None:
+        record = {**BOX, **record}
         assert effective_status(record) == expected
+        assert review_state(record) == (expected, reason)
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {"status": "approved", "page": 1},
+            {"status": "pending", "bulk_operation": True, "needs_coordinates": True, "page": 1},
+            {"status": "approved", **BOX, "width": 0},
+        ],
+    )
+    def test_record_without_geometry_is_unresolved_whatever_its_status(self, record: dict) -> None:
+        assert review_state(record) == (UNRESOLVED, "no_geometry")
+        described = describe_unresolved(record)
+        assert described["reason"] == "no_geometry"
+        assert described["approvable"] is False
+        assert "delete" in described["message"].lower()
+
+    def test_rejected_record_without_geometry_is_just_dropped(self) -> None:
+        assert review_state({"status": "rejected"}) == (REJECTED, None)
 
     def test_partition_drops_rejected_and_splits_unresolved(self) -> None:
-        a = {"id": "a", "status": "approved"}
-        r = {"id": "r", "status": "rejected"}
-        p = {"id": "p", "status": "proposed"}
+        a = {"id": "a", "status": "approved", **BOX}
+        r = {"id": "r", "status": "rejected", **BOX}
+        p = {"id": "p", "status": "proposed", **BOX}
         to_apply, unresolved = partition_redactions([a, r, p])
         assert to_apply == [a]
         assert unresolved == [p]
+
+
+class TestLegacyCoordinateRule:
+    """C1: records without a coordinate-space marker are only trusted on
+    unrotated pages, where displayed and unrotated space coincide."""
+
+    legacy = {"id": "l", "status": "approved", **BOX}
+    marked = {"id": "m", "status": "approved", **BOX, "coord_space": "displayed"}
+
+    def test_legacy_record_on_unrotated_page_is_applied(self) -> None:
+        assert partition_redactions([self.legacy], [0]) == ([self.legacy], [])
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_legacy_record_on_rotated_page_is_held_back(self, rotation: int) -> None:
+        to_apply, unresolved = partition_redactions([self.legacy, self.marked], [rotation])
+        assert to_apply == [self.marked]
+        assert unresolved == [self.legacy]
+        (described,) = unresolved_summary(unresolved, [rotation])
+        assert described["reason"] == "legacy_rotated_coordinates"
+        assert described["approvable"] is True
+
+    def test_without_rotations_the_rule_cannot_tell(self) -> None:
+        assert partition_redactions([self.legacy]) == ([self.legacy], [])
+
+    def test_unresolved_message_lists_ids_and_reasons(self) -> None:
+        details = unresolved_summary([self.legacy, {"id": "p", "status": "proposed", **BOX}], [90])
+        message = unresolved_message(details, "release")
+        assert "2 redaction(s)" in message
+        assert "l (page 1): legacy_rotated_coordinates" in message
+        assert "p (page 1): proposed" in message
 
 
 class TestFindRedaction:

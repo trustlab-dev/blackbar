@@ -3,8 +3,10 @@ Document-side helpers for placing redactions: load a document's PDF and
 check redaction boxes against its real pages before they are stored
 (DOC-02, DOC-07).
 
-Page sizes are cached on the document as ``page_dims`` (``[[w, h], ...]`` in
-displayed-space points) the first time they are needed. The stored PDF does
+Page sizes are cached on the document as ``page_dims`` (``[[w, h, rotation],
+...]``, sizes in displayed-space points, rotation 0/90/180/270) the first
+time they are needed. Entries cached by older builds without the rotation
+are refreshed from the PDF. The stored PDF does
 not change after upload, and the release path re-validates against the PDF
 itself, so a stale cache can only cause a refusal, never a leak.
 """
@@ -24,6 +26,7 @@ from src.utils.pdf_limits import PdfLimitExceeded, check_page_count
 from src.utils.redaction_records import (
     RedactionGeometry,
     RedactionValidationError,
+    normalise_rotation,
     validate_redaction,
 )
 
@@ -51,11 +54,14 @@ async def load_document_pdf(doc: dict[str, Any], db: Any) -> bytes | None:
 
 
 def page_sizes_from_pdf(pdf_content: bytes) -> list[list[float]]:
-    """``[[width, height], ...]`` of every page in displayed space."""
+    """``[[width, height, rotation], ...]`` of every page, sizes in displayed
+    space."""
     doc = fitz.open(stream=pdf_content, filetype="pdf")
     try:
         check_page_count(doc.page_count)
-        return [[float(p.rect.width), float(p.rect.height)] for p in doc]
+        return [
+            [float(p.rect.width), float(p.rect.height), normalise_rotation(p.rotation)] for p in doc
+        ]
     finally:
         doc.close()
 
@@ -66,11 +72,18 @@ def _valid_cached_sizes(value: Any) -> bool:
         and len(value) > 0
         and all(
             isinstance(s, list | tuple)
-            and len(s) >= 2
+            and len(s) >= 3
             and all(isinstance(v, int | float) and v > 0 for v in s[:2])
+            and isinstance(s[2], int | float)
+            and int(s[2]) % 90 == 0
             for s in value
         )
     )
+
+
+def page_rotations(page_sizes: list[list[float]]) -> list[int]:
+    """The rotation of every page from ``get_page_sizes`` output."""
+    return [normalise_rotation(s[2]) if len(s) >= 3 else 0 for s in page_sizes]
 
 
 def assert_not_conversion_failed(doc: dict[str, Any]) -> None:
@@ -81,14 +94,17 @@ def assert_not_conversion_failed(doc: dict[str, Any]) -> None:
         )
 
 
-async def get_page_sizes(doc: dict[str, Any], db: Any) -> list[list[float]]:
-    """Page sizes for ``doc``; raises 409/413 when they cannot be known."""
+async def get_page_sizes(
+    doc: dict[str, Any], db: Any, pdf_content: bytes | None = None
+) -> list[list[float]]:
+    """``[[w, h, rotation], ...]`` for ``doc``; raises 409/413 when they
+    cannot be known. ``pdf_content`` saves a reload when the caller has it."""
     assert_not_conversion_failed(doc)
     cached = doc.get("page_dims")
     if cached is not None and _valid_cached_sizes(cached):
-        return [[float(s[0]), float(s[1])] for s in cached]
+        return [[float(s[0]), float(s[1]), normalise_rotation(s[2])] for s in cached]
 
-    pdf = await load_document_pdf(doc, db)
+    pdf = pdf_content or await load_document_pdf(doc, db)
     if not pdf:
         raise HTTPException(
             status_code=409,

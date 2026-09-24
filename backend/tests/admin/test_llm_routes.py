@@ -789,8 +789,11 @@ class TestKeyReentryAndMasking:
         assert r.json()["headers"] == {"api-key": "********"}
         r = await client.get("/api/v1/llm/configs")
         assert "azure-secret-value" not in r.text
+        # Stored encrypted at rest, never in plaintext (I6).
         stored = await db.llm_configs.find_one({"id": config_id})
-        assert stored["headers"] == {"api-key": "azure-secret-value"}
+        assert list(stored["headers"]) == ["api-key"]
+        assert stored["headers"]["api-key"].startswith("fernet:")
+        assert "azure-secret-value" not in str(stored)
 
 
 class TestAuditLog:

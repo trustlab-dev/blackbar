@@ -261,13 +261,61 @@ class TestRotatedPages:
     @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
     def test_displayed_space_box_removes_text(self, rotation: int) -> None:
         pdf, displayed = _secret_pdf(rotation)
-        out = apply_redactions_to_pdf(pdf, [_box(displayed)])
+        box = _box(displayed, coord_space="displayed", page_rotation=rotation)
+        out = apply_redactions_to_pdf(pdf, [box])
         text = _all_text(out)
         assert SECRET not in text
         assert "public text here" in text
         doc = fitz.open(stream=out, filetype="pdf")
         assert doc[0].rotation == rotation
         doc.close()
+
+    def test_legacy_record_on_unrotated_page_is_applied_as_is(self) -> None:
+        pdf, displayed = _secret_pdf(0)
+        assert SECRET not in _all_text(apply_redactions_to_pdf(pdf, [_box(displayed)]))
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_legacy_record_on_rotated_page_is_refused(self, rotation: int) -> None:
+        """No marker: the box may be in either space, so it is not burned."""
+        from src.utils.redaction_records import RedactionValidationError
+
+        pdf, displayed = _secret_pdf(rotation)
+        with pytest.raises(RedactionValidationError, match="older version"):
+            apply_redactions_to_pdf(pdf, [_box(displayed)])
+
+    def test_rotation_mismatch_is_refused(self) -> None:
+        from src.utils.redaction_records import RedactionValidationError
+
+        pdf, displayed = _secret_pdf(90)
+        box = _box(displayed, coord_space="displayed", page_rotation=0)
+        with pytest.raises(RedactionValidationError, match="now rotated 90"):
+            apply_redactions_to_pdf(pdf, [box])
+
+    def test_unknown_coordinate_space_is_refused(self) -> None:
+        from src.utils.redaction_records import RedactionValidationError
+
+        pdf, displayed = _secret_pdf(0)
+        with pytest.raises(RedactionValidationError, match="coordinate space"):
+            apply_redactions_to_pdf(pdf, [_box(displayed, coord_space="unrotated")])
+
+    @pytest.mark.parametrize("rotation", [90, 270])
+    def test_misplaced_text_box_fails_verification(self, rotation: int) -> None:
+        """C1 reproduction: an unrotated box treated as displayed space burns
+        the wrong area. The character check only looks inside that area, so
+        the whole-page text check must catch the surviving string."""
+        from src.utils.pdf_redaction import RedactionVerificationError
+
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), f"Name: {SECRET} end", fontsize=12)
+        unrotated = page.search_for(SECRET)[0]
+        page.set_rotation(rotation)
+        pdf = doc.tobytes()
+        doc.close()
+
+        wrong = _box(unrotated, text=SECRET, coord_space="displayed", page_rotation=rotation)
+        with pytest.raises(RedactionVerificationError, match="still extractable"):
+            apply_redactions_to_pdf(pdf, [wrong])
 
 
 class TestSanitisation:
@@ -380,9 +428,27 @@ class TestVerification:
         with pytest.raises(RedactionVerificationError, match="still extractable"):
             apply_redactions_to_pdf(pdf, [_box(first, text=SECRET, source="bulk_text")])
 
-        # The same box drawn by hand only covers that one occurrence.
-        out = apply_redactions_to_pdf(pdf, [_box(first, text=SECRET, source="manual")])
+        # Any text-based redaction is checked against the whole page (C1),
+        # so a manual box carrying the text fails the same way.
+        with pytest.raises(RedactionVerificationError, match="still extractable"):
+            apply_redactions_to_pdf(pdf, [_box(first, text=SECRET, source="manual")])
+
+        # A box without text is only checked inside the box.
+        out = apply_redactions_to_pdf(pdf, [_box(first, source="manual")])
         assert _all_text(out).count(SECRET) == 1
+
+    def test_manual_text_check_matches_whole_words(self) -> None:
+        """A manual redaction of "Ann" must not fail because "Annual" stays."""
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 100), "Ann", fontsize=12)
+        page.insert_text((72, 400), "Annual report", fontsize=12)
+        first = page.search_for("Ann")[0]
+        pdf = doc.tobytes()
+        doc.close()
+
+        out = apply_redactions_to_pdf(pdf, [_box(first, text="Ann", source="manual")])
+        assert "Annual report" in _all_text(out)
 
     def test_image_pixels_under_box_are_blanked(self) -> None:
         doc = fitz.open()

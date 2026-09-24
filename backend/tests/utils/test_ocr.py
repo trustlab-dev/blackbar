@@ -334,3 +334,33 @@ class TestOcrLimits:
         with patch("src.utils.ocr.pytesseract.image_to_data", side_effect=fake_ocr):
             await extract_text_with_coordinates(_blank_pdf())
         assert threads and threads[0] != threading.main_thread().name
+
+
+class TestRotatedNativeText:
+    """C1: native word, line and block boxes are in displayed space, the
+    space of the page width/height and of stored redactions."""
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    async def test_boxes_are_in_displayed_space(self, rotation: int) -> None:
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), "Zebediah", fontsize=12)
+        unrotated = page.search_for("Zebediah")[0]
+        page.set_rotation(rotation)
+        expected = fitz.Rect(unrotated * page.rotation_matrix)
+        pdf = doc.tobytes()
+        doc.close()
+
+        result = await extract_text_with_coordinates(pdf)
+        assert result["coord_space"] == "displayed"
+        (page_data,) = result["pages"]
+        assert page_data["rotation"] == rotation
+        (word,) = page_data["words"]
+        for box in (word["bbox"], page_data["lines"][0]["bbox"], page_data["blocks"][0]["bbox"]):
+            x0, y0, x1, y1 = box
+            assert 0 <= x0 < x1 <= page_data["width"] + 0.5
+            assert 0 <= y0 < y1 <= page_data["height"] + 0.5
+            # The glyphs sit inside the span box in displayed space.
+            assert fitz.Rect(box).intersects(expected)
+        centre = fitz.Point((expected.x0 + expected.x1) / 2, (expected.y0 + expected.y1) / 2)
+        assert centre in fitz.Rect(word["bbox"])

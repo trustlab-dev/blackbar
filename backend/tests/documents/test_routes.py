@@ -395,10 +395,19 @@ class TestGetDocumentMetadata:
             "size",
             "status",
             "conversion_failed",
+            "unresolved_redactions",
         }
         assert body["filename"] == "meta.pdf"
         assert len(body["redactions"]) == 1
-        assert {k: v for k, v in body["redactions"][0].items() if k != "id"} == {"x": 1, "y": 2}
+        red = body["redactions"][0]
+        assert {k: v for k, v in red.items() if k not in ("id", "review_required")} == {
+            "x": 1,
+            "y": 2,
+        }
+        # No page/width/height: tagged as blocking, and not approvable (I1).
+        assert red["review_required"]["reason"] == "no_geometry"
+        assert red["review_required"]["approvable"] is False
+        assert [u["id"] for u in body["unresolved_redactions"]] == [red["id"]]
         assert body["status"] == doc.get("status")
         assert body["conversion_failed"] is False
         assert body["text_data"] == {

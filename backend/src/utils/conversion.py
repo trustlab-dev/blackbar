@@ -10,8 +10,11 @@ import subprocess
 import tempfile
 import unicodedata
 import uuid
-from email.header import Header
+from datetime import datetime
+from email.header import Header, decode_header, make_header
 from email.message import Message
+from email.parser import BytesHeaderParser
+from email.utils import format_datetime
 from typing import Any
 
 import fitz  # PyMuPDF
@@ -19,7 +22,9 @@ import pytesseract
 from PIL import Image
 from reportlab.pdfgen import canvas
 
-logging.basicConfig(level=logging.INFO)
+from src.utils import pdf_limits
+
+# Library module: never configure the root logger here (LLM-10).
 logger = logging.getLogger(__name__)
 
 
@@ -133,6 +138,91 @@ def _header_value(value: object) -> str | None:
     return value or None
 
 
+def _decoded_header(value: object) -> str | None:
+    """A header as one line of text, RFC 2047 encoded words decoded."""
+    if value is None:
+        return None
+    try:
+        text = str(make_header(decode_header(str(value))))
+    except Exception:
+        text = str(value)
+    return _header_value(text)
+
+
+def _message_ids(value: object) -> list[str]:
+    """``<id>`` tokens of a Message-ID list header (References, In-Reply-To)."""
+    text = _header_value(value)
+    if not text:
+        return []
+    return re.findall(r"<[^<>\s]+>", text) or text.split()
+
+
+def _format_msg_date(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return format_datetime(value) if value.tzinfo else value.isoformat()
+    return _header_value(str(value)) if value else None
+
+
+def email_thread_headers(msg: Message) -> dict[str, Any]:
+    """Threading fields of a parsed RFC 822 message (I7).
+
+    Read from the message's own header block, so folded headers (a long To
+    list) and quoted replies in the body cannot shift or overwrite them.
+    """
+    in_reply_to = _message_ids(msg.get("In-Reply-To"))
+    return {
+        "message_id": _header_value(msg.get("Message-ID")),
+        "in_reply_to": in_reply_to[0] if in_reply_to else None,
+        "references": _message_ids(msg.get("References")),
+        "date": _header_value(msg.get("Date")),
+        "subject": _decoded_header(msg.get("Subject")),
+        "from": _decoded_header(msg.get("From")),
+        "to": _decoded_header(msg.get("To")),
+    }
+
+
+def outlook_thread_headers(msg: Any) -> dict[str, Any]:
+    """Threading fields of an ``extract_msg.Message`` (I7): its properties,
+    with the transport headers filling gaps."""
+    transport = getattr(msg, "header", None)
+    transport = transport if isinstance(transport, Message) else None
+
+    def _transport(name: str) -> object:
+        return transport.get(name) if transport is not None else None
+
+    in_reply_to = _message_ids(getattr(msg, "inReplyTo", None) or _transport("In-Reply-To"))
+    return {
+        "message_id": _header_value(getattr(msg, "messageId", None) or _transport("Message-ID")),
+        "in_reply_to": in_reply_to[0] if in_reply_to else None,
+        "references": _message_ids(_transport("References")),
+        "date": _format_msg_date(getattr(msg, "date", None)) or _header_value(_transport("Date")),
+        "subject": _decoded_header(getattr(msg, "subject", None) or _transport("Subject")),
+        "from": _decoded_header(getattr(msg, "sender", None) or _transport("From")),
+        "to": _decoded_header(getattr(msg, "to", None) or _transport("To")),
+    }
+
+
+def read_thread_headers(input_file: str) -> dict[str, Any]:
+    """Structured threading headers of an .eml or .msg file ({} if the file
+    cannot be parsed). Only the header block is read for .eml."""
+    ext = os.path.splitext(input_file)[1].lower()
+    try:
+        if ext == ".eml":
+            with open(input_file, "rb") as f:
+                return email_thread_headers(BytesHeaderParser().parse(f))
+        if ext == ".msg":
+            import extract_msg
+
+            msg = extract_msg.Message(input_file)
+            try:
+                return outlook_thread_headers(msg)
+            finally:
+                msg.close()
+    except Exception as exc:
+        logger.warning(f"Could not read threading headers: {type(exc).__name__}")
+    return {}
+
+
 def _email_text_header(
     from_address: str,
     to_address: str,
@@ -142,8 +232,8 @@ def _email_text_header(
     references: str | None = None,
 ) -> str:
     text = f"From: {from_address}\nTo: {to_address}\nDate: {date}\nSubject: {subject}\n"
-    # Threading headers go into the extracted text so
-    # `email_threads.extract_thread_identifiers` can populate them.
+    # Shown in the extracted text for readers and search. Threading does not
+    # parse this text; it uses read_thread_headers (I7).
     if in_reply_to:
         text += f"In-Reply-To: {in_reply_to}\n"
     if references:
@@ -671,18 +761,33 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     return (output_file, attachment_info, text, message_id)
 
 
+# First-pass OCR renders at 2x (144 dpi); ocr.py does the precise 300 dpi
+# pass with coordinates later.
+_TEXT_OCR_DPI = 144
+
+
 def extract_text_from_pdf(pdf_content: bytes) -> str:
     """Extract text from PDF using both native text extraction and OCR if needed.
 
-    Args:
-        pdf_content: Binary PDF content
+    The OCR fallback stays inside the pdf_limits budget (DOC-09): the page
+    count is checked first, each page is rendered at a DPI that fits the
+    pixel budget, and Tesseract gets the per-page timeout. A page that times
+    out or is too large to render is skipped.
+
+    Raises:
+        PdfLimitExceeded: the document has more pages than allowed.
 
     Returns:
         Extracted text from the PDF
     """
     try:
-        # Try native text extraction first
         doc = fitz.open(stream=pdf_content, filetype="pdf")
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF: {str(e)}")
+        return f"Error extracting text: {str(e)}"
+
+    try:
+        pdf_limits.check_page_count(doc.page_count)
         text = ""
         has_text = False
 
@@ -698,21 +803,30 @@ def extract_text_from_pdf(pdf_content: bytes) -> str:
             logger.info("No text found in PDF or very little text, attempting OCR...")
             text = ""
             for page_num, page in enumerate(doc):
-                # Render page to image at higher DPI for better OCR results
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                img = Image.open(io.BytesIO(pix.pil_tobytes(format="PNG")))
-
-                # Use pytesseract for OCR
-                page_text = pytesseract.image_to_string(img)
+                try:
+                    dpi = pdf_limits.render_dpi_for_page(
+                        page.rect.width, page.rect.height, target_dpi=_TEXT_OCR_DPI
+                    )
+                    pix = page.get_pixmap(dpi=dpi)
+                    img = Image.open(io.BytesIO(pix.pil_tobytes(format="PNG")))
+                    page_text = pytesseract.image_to_string(
+                        img, timeout=pdf_limits.OCR_PAGE_TIMEOUT_SECONDS
+                    )
+                except (pdf_limits.PdfLimitExceeded, RuntimeError) as exc:
+                    logger.warning(f"OCR skipped for page {page_num + 1}: {exc}")
+                    continue
                 if page_text.strip():
                     text += f"\n--- Page {page_num + 1} ---\n{page_text}"
 
-        doc.close()
         return text if text.strip() else "No text could be extracted from this document."
 
+    except pdf_limits.PdfLimitExceeded:
+        raise
     except Exception as e:
         logger.error(f"Error extracting text from PDF: {str(e)}")
         return f"Error extracting text: {str(e)}"
+    finally:
+        doc.close()
 
 
 def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
@@ -917,6 +1031,11 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
         input_file: Path to input file
         output_dir: Directory for output (optional, uses temp if not provided)
 
+    Blocking (LibreOffice, OCR): async callers run it in a worker thread.
+
+    Raises:
+        PdfLimitExceeded: the converted document is over a pdf_limits limit.
+
     Returns:
         dict with conversion results:
         {
@@ -941,6 +1060,7 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
         "attachments": [],
         "extracted_text": None,
         "message_id": None,
+        "thread_headers": None,
         "file_hash": None,
         "error": None,
     }
@@ -978,6 +1098,7 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
             result["attachments"] = attachments
             result["extracted_text"] = extracted_text
             result["message_id"] = message_id
+            result["thread_headers"] = read_thread_headers(input_file)
             return result
 
         if ext == ".msg":
@@ -990,6 +1111,7 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
             result["attachments"] = attachments
             result["extracted_text"] = extracted_text
             result["message_id"] = message_id
+            result["thread_headers"] = read_thread_headers(input_file)
             return result
 
         # Image formats - convert to PDF
@@ -1007,6 +1129,10 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
         result["error"] = f"Unsupported file format: {ext}"
         return result
 
+    except pdf_limits.PdfLimitExceeded:
+        # Too large to process at all: the caller rejects the upload (413)
+        # instead of storing a record nothing downstream can handle.
+        raise
     except Exception as e:
         logger.error(f"Conversion failed for {filename}: {str(e)}")
         result["error"] = str(e)
