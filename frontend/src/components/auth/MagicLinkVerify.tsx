@@ -16,9 +16,12 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import { publicApi } from '../../api/client';
 import { getApiErrorMessage } from '../../api/errors';
+import { useCapabilityFromUrl } from '../../utils/capabilityUrl';
 
 export const MagicLinkVerify: React.FC = () => {
-  const { token } = useParams();
+  // Single-use token: take it out of the address bar straight away and keep
+  // it only in memory. A refresh lands on /public/verify with no token.
+  const token = useCapabilityFromUrl(useParams().token, { cleanPath: '/public/verify' });
   const navigate = useNavigate();
   const [status, setStatus] = useState<'verifying' | 'success' | 'error'>('verifying');
   const [error, setError] = useState('');
@@ -27,7 +30,9 @@ export const MagicLinkVerify: React.FC = () => {
     const verifyToken = async () => {
       if (!token) {
         setStatus('error');
-        setError('Invalid magic link. Missing token.');
+        setError(
+          'This sign-in link has already been used or is incomplete. Sign-in links work once; request a new one to continue.',
+        );
         return;
       }
 

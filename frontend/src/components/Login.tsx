@@ -14,11 +14,11 @@ interface Props {
  * Messages for `/login?reason=...`, set by the api/client.ts 401 interceptor
  * when the backend ends a session (see SessionEndReason there).
  */
-export const SESSION_END_MESSAGES: Record<string, string> = {
-  revoked: 'Your session was signed out, for example after a logout elsewhere or a password or role change. Please sign in again.',
-  inactive: 'Your account is not active. Contact your administrator if you think this is a mistake.',
-  expired: 'Your session has expired. Please sign in again.',
-};
+export const SESSION_END_MESSAGES: ReadonlyMap<string, string> = new Map([
+  ['revoked', 'Your session was signed out, for example after a logout elsewhere or a password or role change. Please sign in again.'],
+  ['inactive', 'Your account is not active. Contact your administrator if you think this is a mistake.'],
+  ['expired', 'Your session has expired. Please sign in again.'],
+]);
 
 interface OrgConfig {
   org_name: string;
@@ -43,7 +43,9 @@ const Login: React.FC<Props> = ({ onLoginSuccess }) => {
   // Get redirect URL from query params — validate to prevent open redirect
   const searchParams = new URLSearchParams(location.search);
   const redirectUrl = getSafeRedirect(searchParams.get('redirect'), '/');
-  const sessionNotice = SESSION_END_MESSAGES[searchParams.get('reason') ?? ''] ?? null;
+  // A Map, not an object literal: `?reason=__proto__` must not resolve to a
+  // prototype member (rendering Object.prototype crashes the page).
+  const sessionNotice = SESSION_END_MESSAGES.get(searchParams.get('reason') ?? '') ?? null;
 
   // Fetch org branding on mount
   useEffect(() => {

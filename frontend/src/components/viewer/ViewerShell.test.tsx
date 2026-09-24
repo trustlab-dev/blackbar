@@ -184,6 +184,7 @@ import userEvent from '@testing-library/user-event';
 import { server } from '../../test-utils/msw-handlers';
 import { renderWithProviders, screen } from '../../test-utils/render';
 import ViewerShell from './ViewerShell';
+import { UserProvider } from '../../contexts/UserContext';
 
 const META_URL = 'https://localhost:3000/api/v1/documents/:id/metadata';
 const DOC_URL = 'https://localhost:3000/api/v1/documents/:id';
@@ -249,6 +250,16 @@ describe('ViewerShell — original PDF object URL lifecycle', () => {
 
     unmount();
     expect(revoke).toHaveBeenCalledWith('blob:doc-2');
+  });
+});
+
+describe('ViewerShell — original PDF download fails', () => {
+  it('hands the viewer an undefined URL so it retries and can show its error', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    server.use(http.get(DOC_URL, () => new HttpResponse(null, { status: 500 })));
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(mockPdfViewerProps.current).not.toBeNull());
+    await waitFor(() => expect(mockPdfViewerProps.current.pdfUrl).toBeUndefined());
   });
 });
 
@@ -937,6 +948,32 @@ describe('ViewerShell', () => {
 // add returns {id, status}; only approved redactions are exported and
 // anything unresolved blocks export (409). See
 // backend/src/documents/redaction_routes.py and routes.py export handler.
+describe('ViewerShell — export for guests', () => {
+  afterEach(() => localStorage.removeItem('userRole'));
+
+  it('hides Export from guests (the backend refuses them)', async () => {
+    localStorage.setItem('userRole', 'guest');
+    renderWithProviders(
+      <UserProvider>
+        <ViewerShell documentId="doc-1" />
+      </UserProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /export redacted pdf/i })).not.toBeInTheDocument();
+  });
+
+  it('shows Export to staff roles', async () => {
+    localStorage.setItem('userRole', 'analyst');
+    renderWithProviders(
+      <UserProvider>
+        <ViewerShell documentId="doc-1" />
+      </UserProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /export redacted pdf/i })).toBeInTheDocument();
+  });
+});
+
 describe('ViewerShell — redaction review and export', () => {
   const APPROVE_URL = 'https://localhost:3000/api/v1/documents/:id/redactions/:rid/approve';
   const EXPORT_URL = 'https://localhost:3000/api/v1/documents/:id/export';
@@ -968,10 +1005,12 @@ describe('ViewerShell — redaction review and export', () => {
     await userEvent.click(screen.getByText('save-reason'));
     await waitFor(() =>
       expect(mockPdfViewerProps.current.redactions).toEqual([
-        expect.objectContaining({ id: 'r-new', status: 'proposed' }),
+        // The add response has no `type`; a proposed record is a proposal.
+        expect.objectContaining({ id: 'r-new', status: 'proposed', type: 'proposed' }),
       ]),
     );
     expect(await screen.findByText(/proposed for review/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not a proposal/i)).not.toBeInTheDocument();
     expect(screen.getByText(/1 redaction awaiting review/i)).toBeInTheDocument();
   });
 

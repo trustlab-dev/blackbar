@@ -5,6 +5,10 @@ import {
   validateUploadFile,
   partitionUploadFiles,
   getUploadWarnings,
+  withUploadMimeType,
+  ALLOWED_UPLOAD_EXTENSIONS,
+  ALLOWED_UPLOAD_MIME_TYPES,
+  EXTENSION_MIME_TYPES,
 } from './uploadValidation';
 
 function fakeFile(name: string, size: number, type = ''): File {
@@ -32,6 +36,16 @@ describe('upload validation (mirrors backend processing_service limits)', () => 
     ['notes.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
   ])('accepts %s', (name, type) => {
     expect(validateUploadFile(fakeFile(name, 1024, type))).toBeNull();
+  });
+
+  it('accepts a known extension the browser labels application/octet-stream', () => {
+    expect(validateUploadFile(fakeFile('mail.msg', 1024, 'application/octet-stream'))).toBeNull();
+  });
+
+  it('still rejects octet-stream for an extension outside the allow-list', () => {
+    expect(validateUploadFile(fakeFile('tool.bin', 10, 'application/octet-stream'))).toMatch(
+      /not a supported file type/i,
+    );
   });
 
   it('rejects files over the size limit', () => {
@@ -85,5 +99,45 @@ describe('getUploadWarnings (POST /documents/ response)', () => {
     expect(getUploadWarnings({ id: 'd1' })).toEqual([]);
     expect(getUploadWarnings(undefined)).toEqual([]);
     expect(getUploadWarnings('nope')).toEqual([]);
+  });
+});
+
+describe('MIME type for files the browser cannot type (backend rejects octet-stream)', () => {
+  it('maps every allowed extension to an allowed MIME type', () => {
+    for (const ext of ALLOWED_UPLOAD_EXTENSIONS) {
+      expect(ALLOWED_UPLOAD_MIME_TYPES.has(EXTENSION_MIME_TYPES[ext])).toBe(true);
+    }
+  });
+
+  it.each(['', 'application/octet-stream'])(
+    're-wraps a .msg reported as %j with the Outlook MIME type',
+    async (type) => {
+      const original = new File(['msg-bytes'], 'Quarterly.MSG', { type, lastModified: 42 });
+      const wrapped = withUploadMimeType(original);
+      expect(wrapped).not.toBe(original);
+      expect(wrapped.type).toBe('application/vnd.ms-outlook');
+      expect(wrapped.name).toBe('Quarterly.MSG');
+      expect(wrapped.lastModified).toBe(42);
+      expect(await wrapped.text()).toBe('msg-bytes');
+    },
+  );
+
+  it('leaves a file the browser already typed untouched', () => {
+    const pdf = new File(['x'], 'a.pdf', { type: 'application/pdf' });
+    expect(withUploadMimeType(pdf)).toBe(pdf);
+  });
+
+  it('leaves an unknown extension alone (validation rejects it)', () => {
+    const odd = new File(['x'], 'constructor', { type: '' });
+    expect(withUploadMimeType(odd)).toBe(odd);
+  });
+
+  it('partitionUploadFiles hands back typed files ready for FormData', () => {
+    const msg = new File(['m'], 'mail.msg', { type: '' });
+    const { valid, errors } = partitionUploadFiles([msg]);
+    expect(errors).toEqual([]);
+    expect(valid).toHaveLength(1);
+    expect(valid[0].name).toBe('mail.msg');
+    expect(valid[0].type).toBe('application/vnd.ms-outlook');
   });
 });

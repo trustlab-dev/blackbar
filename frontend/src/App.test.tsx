@@ -78,8 +78,13 @@ vi.mock('./components/ProtectedRoute', () => ({
 vi.mock('./components/public/ContributorPortal', () => ({
   default: () => <div data-testid="contributor-portal" />,
 }));
+vi.mock('./utils/telemetry', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/telemetry')>()),
+  syncReplayWithRoute: vi.fn(),
+}));
 
 import App from './App';
+import { syncReplayWithRoute } from './utils/telemetry';
 
 /**
  * App owns its own BrowserRouter, so route is driven via window.history
@@ -163,6 +168,35 @@ describe('App — public routes', () => {
   it('renders the contributor portal at /contribute/:contributorId', () => {
     renderAppAt('/contribute/contrib-1');
     expect(screen.getByTestId('contributor-portal')).toBeInTheDocument();
+  });
+});
+
+describe('App — token-stripped capability routes (refresh after the token left the URL)', () => {
+  it('renders the verify page at /public/verify with no token', () => {
+    renderAppAt('/public/verify');
+    expect(screen.getByTestId('public-verify-page')).toBeInTheDocument();
+  });
+
+  it('renders the contributor portal at /contribute with no id', () => {
+    renderAppAt('/contribute');
+    expect(screen.getByTestId('contributor-portal')).toBeInTheDocument();
+  });
+
+  it('renders the tracking page at /track with no number', async () => {
+    renderAppAt('/track');
+    expect(await screen.findByTestId('public-tracking-page')).toBeInTheDocument();
+  });
+
+  it('renders the upload portal at /collect with no token', async () => {
+    renderAppAt('/collect');
+    expect(await screen.findByTestId('public-upload-portal')).toBeInTheDocument();
+  });
+});
+
+describe('App — Session Replay follows the route', () => {
+  it('reports each route to the replay gate', () => {
+    renderAppAt('/collect/tok-1');
+    expect(syncReplayWithRoute).toHaveBeenCalledWith('/collect/tok-1');
   });
 });
 

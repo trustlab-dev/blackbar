@@ -228,6 +228,29 @@ describe('PDFViewerWithSelection', () => {
     expect(screen.getByTestId('mock-page')).toHaveAttribute('data-scale', '1.5');
   });
 
+  it('waits for the parent instead of fetching when pdfUrl is null (parent owns the download)', async () => {
+    let docFetched = false;
+    server.use(
+      http.get(DOC_URL, () => {
+        docFetched = true;
+        return new HttpResponse(null, { status: 500 });
+      }),
+      http.get(META_URL, () => HttpResponse.json({})),
+    );
+    const { rerender } = renderWithProviders(
+      <PDFViewerWithSelection documentId="doc-1" currentPage={1} zoom={1} pdfUrl={null} onNumPagesChange={() => {}} />,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(docFetched).toBe(false);
+    expect(screen.queryByText(/failed to load pdf/i)).not.toBeInTheDocument();
+
+    rerender(
+      <PDFViewerWithSelection documentId="doc-1" currentPage={1} zoom={1} pdfUrl="/file/foo.pdf" onNumPagesChange={() => {}} />,
+    );
+    await waitFor(() => expect(screen.getByTestId('mock-document')).toBeInTheDocument());
+    expect(docFetched).toBe(false);
+  });
+
   it('logs and shows the "Failed to load PDF" UI when fetch fails', async () => {
     const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {});
     server.use(

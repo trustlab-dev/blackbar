@@ -523,20 +523,26 @@ const CaseDocuments: React.FC = () => {
     }
   };
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files || files.length === 0) return;
-    
-    // Client-side type/size check (the backend enforces the same limits).
-    const { valid, errors } = partitionUploadFiles(Array.from(files));
+  // Picker and drop zone share one path: client-side type/size check (the
+  // backend enforces the same limits) and MIME typing for files the browser
+  // could not type, such as .msg.
+  const addSelectedFiles = (files: File[]) => {
+    const { valid, errors } = partitionUploadFiles(files);
     if (errors.length > 0) {
       alert(errors.join('\n'));
     }
-    // Reset so re-selecting the same file after a rejection fires onChange.
-    event.target.value = '';
     if (valid.length === 0) return;
     // Append new files to existing selection instead of replacing
     setSelectedFiles(prev => [...prev, ...valid]);
+  };
+
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    const picked = Array.from(files);
+    // Reset so re-selecting the same file after a rejection fires onChange.
+    event.target.value = '';
+    addSelectedFiles(picked);
   };
 
   const removeSelectedFile = (index: number) => {
@@ -1239,8 +1245,7 @@ const CaseDocuments: React.FC = () => {
                     setIsDragging(false);
                     const files = e.dataTransfer.files;
                     if (files && files.length > 0) {
-                      const fileArray = Array.from(files) as File[];
-                      setSelectedFiles(fileArray);
+                      addSelectedFiles(Array.from(files) as File[]);
                     }
                   }}
                   onClick={() => fileInputRef.current?.click()}

@@ -45,6 +45,33 @@ export const ALLOWED_UPLOAD_MIME_TYPES: ReadonlySet<string> = new Set([
   'image/webp',
 ]);
 
+/** backend EXTENSION_MIME_TYPES: the type each allowed extension is sent as. */
+export const EXTENSION_MIME_TYPES: Readonly<Record<string, string>> = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.eml': 'message/rfc822',
+  '.msg': 'application/vnd.ms-outlook',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.bmp': 'image/bmp',
+  '.tiff': 'image/tiff',
+  '.tif': 'image/tiff',
+  '.webp': 'image/webp',
+};
+
+// What a browser reports for a format it has no MIME mapping for (Outlook
+// .msg on a machine without Office, for example). An empty type is then sent
+// as application/octet-stream in the multipart body, which the backend
+// rejects, so such files are re-typed from their extension before upload.
+const UNTYPED_MIME = new Set(['', 'application/octet-stream']);
+
 /** Value for an `<input type="file" accept=...>` attribute. */
 export const UPLOAD_ACCEPT = ALLOWED_UPLOAD_EXTENSIONS.join(',');
 
@@ -60,8 +87,9 @@ export function validateUploadFile(file: File): string | null {
   const ext = extensionOf(file.name);
   const typeOk =
     (ALLOWED_UPLOAD_EXTENSIONS as readonly string[]).includes(ext) &&
-    // Browsers leave `type` empty for formats they don't know (e.g. .msg).
-    (file.type === '' || ALLOWED_UPLOAD_MIME_TYPES.has(file.type));
+    // Browsers leave `type` empty, or say octet-stream, for formats they
+    // don't know (e.g. .msg). withUploadMimeType fixes the type before upload.
+    (UNTYPED_MIME.has(file.type) || ALLOWED_UPLOAD_MIME_TYPES.has(file.type));
   if (!typeOk) {
     return `"${file.name}" is not a supported file type. Allowed: ${ALLOWED_UPLOAD_EXTENSIONS.join(', ')}.`;
   }
@@ -71,14 +99,32 @@ export function validateUploadFile(file: File): string | null {
   return null;
 }
 
-/** Split a selection into uploadable files and one error message per rejected file. */
+/**
+ * Give an untyped file (empty or application/octet-stream) the MIME type of
+ * its extension, so the multipart part carries a type the backend accepts.
+ * The backend's magic-byte sniff remains the real content check.
+ */
+export function withUploadMimeType(file: File): File {
+  if (!UNTYPED_MIME.has(file.type)) return file;
+  const ext = extensionOf(file.name);
+  if (!Object.prototype.hasOwnProperty.call(EXTENSION_MIME_TYPES, ext)) return file;
+  return new File([file], file.name, {
+    type: EXTENSION_MIME_TYPES[ext],
+    lastModified: file.lastModified,
+  });
+}
+
+/**
+ * Split a selection into uploadable files and one error message per rejected
+ * file. Valid files come back typed (withUploadMimeType), ready for FormData.
+ */
 export function partitionUploadFiles(files: File[]): { valid: File[]; errors: string[] } {
   const valid: File[] = [];
   const errors: string[] = [];
   for (const file of files) {
     const error = validateUploadFile(file);
     if (error) errors.push(error);
-    else valid.push(file);
+    else valid.push(withUploadMimeType(file));
   }
   return { valid, errors };
 }

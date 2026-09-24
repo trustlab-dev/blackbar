@@ -42,6 +42,7 @@ import Save from '@mui/icons-material/Save';
 import Close from '@mui/icons-material/Close';
 import FileDownload from '@mui/icons-material/FileDownload';
 import api, { TRANSFER_TIMEOUT_MS } from '../../api/client';
+import { useUser } from '../../contexts/UserContext';
 import {
   addRedaction,
   exportRedactedDocument,
@@ -154,12 +155,17 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   const [reasonPickerOpen, setReasonPickerOpen] = useState<boolean>(false);
   const [redactionColor, setRedactionColor] = useState<string>('blue'); // Light blue for all redactions, green for AI suggestions later
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  // The viewer waits while pdfUrl is null; after a failed download it gets
+  // undefined and makes (and reports) its own attempt.
+  const [pdfLoadFailed, setPdfLoadFailed] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [showError, setShowError] = useState<boolean>(false);
   const [snackSeverity, setSnackSeverity] = useState<SnackSeverity>('error');
   const [reviewListOpen, setReviewListOpen] = useState<boolean>(false);
   const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
   const [exporting, setExporting] = useState<boolean>(false);
+  // UI hint only: the backend role gate refuses export to guests (403).
+  const canExport = useUser().currentRole !== 'guest';
   const [isScrolling, setIsScrolling] = useState<boolean>(false);
   const [pageTransitioning, setPageTransitioning] = useState<boolean>(false);
   const [selectedRedactionIndex, setSelectedRedactionIndex] = useState<number | null>(null);
@@ -303,9 +309,11 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
         setPdfUrl(objectUrl);
       } catch (error) {
         console.error('Error fetching PDF:', error);
+        if (!cancelled) setPdfLoadFailed(true);
       }
     };
 
+    setPdfLoadFailed(false);
     fetchPDF();
 
     return () => {
@@ -494,6 +502,9 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           id: result.id,
           status: result.status,
           effectiveStatus: effectiveRedactionStatus({ status: result.status }),
+          // The add response is {message, id, status}; the server records a
+          // proposed box as type "proposed" and an approved one as professional.
+          type: result.status === 'proposed' ? 'proposed' : 'professional',
         });
       } catch (error) {
         console.error('Error saving redaction:', error);
@@ -600,7 +611,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
         // Rendered from the response: approved for analysts, proposed otherwise.
         status: backendRedaction.status,
         effectiveStatus: effectiveRedactionStatus({ status: backendRedaction.status }),
-        type: backendRedaction.type || 'professional'
+        type: backendRedaction.status === 'proposed' ? 'proposed' : 'professional'
       };
 
       setRedactions(prev => [...prev, mappedRedaction]);
@@ -748,7 +759,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           createdAt: backendRedaction.created_at || new Date().toISOString(),
           status: backendRedaction.status,
           effectiveStatus: effectiveRedactionStatus({ status: backendRedaction.status }),
-          type: backendRedaction.type || 'professional'
+          type: backendRedaction.status === 'proposed' ? 'proposed' : 'professional'
         };
 
         setRedactions(prev => [...prev, mappedRedaction]);
@@ -1118,19 +1129,21 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
 
           {/* Right Section */}
           <Box sx={{ display: 'flex', gap: 1 }}>
-            <Tooltip title="Export redacted PDF (approved redactions only)">
-              <span>
-                <IconButton
-                  size="small"
-                  aria-label="Export redacted PDF"
-                  onClick={handleExport}
-                  disabled={exporting}
-                  sx={{ color: 'var(--text-secondary)' }}
-                >
-                  <FileDownload sx={{ fontSize: 20 }} />
-                </IconButton>
-              </span>
-            </Tooltip>
+            {canExport && (
+              <Tooltip title="Export redacted PDF (approved redactions only)">
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label="Export redacted PDF"
+                    onClick={handleExport}
+                    disabled={exporting}
+                    sx={{ color: 'var(--text-secondary)' }}
+                  >
+                    <FileDownload sx={{ fontSize: 20 }} />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
 
             <Tooltip title="Share Document">
               <IconButton size="small" sx={{ color: 'var(--text-secondary)' }}>
@@ -1212,7 +1225,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
               currentPage={currentPage}
               zoom={zoom}
               onNumPagesChange={setNumPages}
-              pdfUrl={pdfUrl}
+              pdfUrl={pdfLoadFailed ? undefined : pdfUrl}
               redactions={pageRedactions}
               suggestions={suggestions.filter(s => s.page === currentPage)}
               onSuggestionAccept={handleAcceptSuggestion}

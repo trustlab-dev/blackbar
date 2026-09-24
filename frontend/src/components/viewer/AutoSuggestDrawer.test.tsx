@@ -801,6 +801,21 @@ describe('AutoSuggestDrawer', () => {
     expect(screen.queryByRole('button', { name: /Generate AI Suggestions/ })).toBeNull();
   });
 
+  it('does not offer Generate for a document with no text (it could only return no_text again)', async () => {
+    aiHandler(() =>
+      HttpResponse.json({
+        suggestions: [],
+        status: 'no_text',
+        method: null,
+        summary: 'No text could be extracted from this document.',
+      }),
+    );
+    renderDrawer();
+    await openAiTab();
+    expect(await screen.findByText(/No text could be extracted/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Generate AI Suggestions/ })).toBeNull();
+  });
+
   it('renders ai_error with the error code and reference', async () => {
     aiHandler(() =>
       HttpResponse.json({

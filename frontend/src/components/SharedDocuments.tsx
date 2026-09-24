@@ -34,15 +34,8 @@ const SharedDocuments: React.FC = () => {
       setDocuments(response.data?.documents ?? []);
     } catch (err: any) {
       console.error('Error fetching shared documents:', err);
-      // Handle authentication errors explicitly
-      if (err.response?.status === 401) {
-        // Clear auth data and redirect to login
-        localStorage.removeItem('token');
-        localStorage.removeItem('userRole');
-        localStorage.removeItem('username');
-        window.location.href = '/login';
-        return;
-      }
+      // A 401 is handled by the api client interceptor (it clears auth and
+      // redirects to /login with the reason and return path).
       setError(getApiErrorMessage(err, 'Failed to load shared documents'));
     } finally {
       setLoading(false);

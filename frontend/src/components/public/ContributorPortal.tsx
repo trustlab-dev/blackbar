@@ -26,6 +26,20 @@ import { useParams, useLocation } from 'react-router-dom';
 import { publicApi, TRANSFER_TIMEOUT_MS } from '../../api/client';
 import { getApiErrorMessage } from '../../api/errors';
 import { partitionUploadFiles, UPLOAD_ACCEPT } from '../../utils/uploadValidation';
+import { useCapabilityFromUrl } from '../../utils/capabilityUrl';
+
+function parseContributorLink(raw: string | null): { id: string; token: string } | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as { id?: unknown; token?: unknown };
+    if (typeof value.id === 'string' && typeof value.token === 'string') {
+      return { id: value.id, token: value.token };
+    }
+  } catch {
+    // Corrupt stash: treat as no link.
+  }
+  return null;
+}
 
 // Phase 4 Batch 4.4 (audit F2): use the shared `publicApi` from
 // `src/api/client.ts` instead of a local axios.create + duplicated
@@ -49,10 +63,22 @@ interface ContributorInfo {
 }
 
 const ContributorPortal: React.FC = () => {
-  const { contributorId } = useParams();
+  const { contributorId: idParam } = useParams();
   const location = useLocation();
-  const searchParams = new URLSearchParams(location.search);
-  const token = searchParams.get('token');
+  const tokenParam = new URLSearchParams(location.search).get('token');
+
+  // The contributor link (/contribute/<id>?token=...) is a bearer credential.
+  // Move it out of the address bar; sessionStorage keeps a refresh working
+  // in this tab. A stash for a different contributor is never reused.
+  const stashed = parseContributorLink(
+    useCapabilityFromUrl(
+      idParam && tokenParam ? JSON.stringify({ id: idParam, token: tokenParam }) : null,
+      { cleanPath: '/contribute', storageKey: 'contributor' },
+    ),
+  );
+  const link = stashed && (!idParam || stashed.id === idParam) ? stashed : null;
+  const contributorId = link?.id ?? idParam;
+  const token = link?.token ?? null;
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

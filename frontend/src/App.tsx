@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Route, Routes, Link, Navigate, useNavigate, useParams } from 'react-router-dom';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
+import { BrowserRouter as Router, Route, Routes, Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Box, CircularProgress, MenuItem, IconButton, Avatar, Divider } from '@mui/material';
 import Menu from '@mui/material/Menu';
 import LogoutIcon from '@mui/icons-material/Logout';
@@ -28,6 +28,7 @@ import SharedDocuments from './components/SharedDocuments';
 import ProtectedRoute from './components/ProtectedRoute';
 import ContributorPortal from './components/public/ContributorPortal';
 import { publicApi } from './api/client';
+import { syncReplayWithRoute } from './utils/telemetry';
 
 const DocumentViewerWrapper: React.FC = () => {
   const { documentId } = useParams();
@@ -207,6 +208,15 @@ const ConfigLoadingGate: React.FC = () => (
 const AppContent = () => {
   const { currentRole } = useUser();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+
+  // Session Replay must not record public or capability-token pages. A layout
+  // effect runs in the same commit as the new route's DOM, before rrweb's
+  // mutation observer delivers it.
+  useLayoutEffect(() => {
+    syncReplayWithRoute(pathname);
+  }, [pathname]);
+
   // Phase 4 Batch 4.4 (audit F7): the prior default of
   // `enable_public_requests: true` caused the root `/` and `/request`
   // routes to redirect through the magic-link portal on first render
@@ -293,24 +303,33 @@ const AppContent = () => {
           )
         } />
 
-        <Route path="/track/:trackingNumber" element={
-          publicConfig.enable_request_tracking ? (
-            <PublicTrackingPage />
-          ) : (
-            <FeatureDisabled featureName="Request Tracking" />
-          )
-        } />
+        {/* Capability-token routes. Each page reads its token, stashes it
+            where a refresh can find it, and strips it from the address bar
+            (utils/capabilityUrl.ts), so each also has a token-less route. */}
+        <Route path="/public/verify" element={<PublicVerifyPage />} />
+        {['/track/:trackingNumber', '/track'].map((path) => (
+          <Route key={path} path={path} element={
+            publicConfig.enable_request_tracking ? (
+              <PublicTrackingPage />
+            ) : (
+              <FeatureDisabled featureName="Request Tracking" />
+            )
+          } />
+        ))}
 
-        <Route path="/collect/:token" element={
-          publicConfig.enable_public_upload ? (
-            <PublicUploadPortal />
-          ) : (
-            <FeatureDisabled featureName="Public Upload" />
-          )
-        } />
+        {['/collect/:token', '/collect'].map((path) => (
+          <Route key={path} path={path} element={
+            publicConfig.enable_public_upload ? (
+              <PublicUploadPortal />
+            ) : (
+              <FeatureDisabled featureName="Public Upload" />
+            )
+          } />
+        ))}
 
         {/* Contributor Portal (token-based, no auth) */}
         <Route path="/contribute/:contributorId" element={<ContributorPortal />} />
+        <Route path="/contribute" element={<ContributorPortal />} />
 
         {/* Root path - redirect based on auth status */}
         {/* Phase 4 Batch 4.4 (audit F7): wait for the public-config

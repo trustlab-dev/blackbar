@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { publicApi as api } from '../api/client';
 import './PublicTrackingPage.css';
 import { getApiErrorMessage } from '../api/errors';
+import { useCapabilityFromUrl } from '../utils/capabilityUrl';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -26,10 +27,20 @@ interface TrackingData {
 }
 
 const PublicTrackingPage: React.FC = () => {
-  const { trackingNumber } = useParams();
+  // The tracking number's random suffix is the only credential for this
+  // lookup. Move it out of the address bar; sessionStorage keeps a refresh
+  // working in this tab.
+  const trackingNumber = useCapabilityFromUrl(useParams().trackingNumber, {
+    cleanPath: '/track',
+    storageKey: 'tracking-number',
+  });
   const [data, setData] = useState<TrackingData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(Boolean(trackingNumber));
+  const [error, setError] = useState(
+    trackingNumber
+      ? ''
+      : 'No tracking number was provided. Open the tracking link in your confirmation email.',
+  );
   const [footerText, setFooterText] = useState<string | null>(null);
 
   useEffect(() => {
@@ -191,7 +202,7 @@ const PublicTrackingPage: React.FC = () => {
             <li>We will review your request and may contact you for clarification</li>
             <li>You will be notified of any updates via email</li>
             <li>The standard response time is 30 days from the date received</li>
-            <li>You can check this page anytime for status updates</li>
+            <li>You can check this page anytime using the link in your confirmation email</li>
           </ul>
         </div>
 

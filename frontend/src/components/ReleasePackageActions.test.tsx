@@ -430,6 +430,47 @@ describe('ReleasePackageActions — failed packages', () => {
     expect(screen.queryByRole('button', { name: /download package/i })).toBeNull();
   });
 
+  it('drops the failure alert once a newer package (someone else\'s) is ready', async () => {
+    const otherGenerating = {
+      ...draftPackage,
+      id: 'pkg-10',
+      status: 'generating' as const,
+      generation_progress: 50,
+      created_at: '2026-05-11T00:00:00Z',
+    };
+    let stateCalls = 0;
+    server.use(
+      http.get('/api/v1/cases/case-1/release-packages', () => {
+        stateCalls += 1;
+        if (stateCalls === 1) return HttpResponse.json(emptyState);
+        if (stateCalls === 2) return HttpResponse.json({ current_draft: otherGenerating, current_release: null });
+        return HttpResponse.json({
+          current_draft: { ...otherGenerating, status: 'draft', generation_progress: 100 },
+          current_release: null,
+        });
+      }),
+      http.post('/api/v1/cases/case-1/release-package/generate', () =>
+        HttpResponse.json({ package_id: 'pkg-9', status: 'generating', message: 'started' }),
+      ),
+      http.get('/api/v1/cases/case-1/release-package/pkg-9', () =>
+        HttpResponse.json(failedPackage),
+      ),
+    );
+    const user = userEvent.setup();
+    renderActions();
+    await user.click(await screen.findByRole('button', { name: /generate package/i }));
+    await screen.findByRole('heading', { name: /generate release package/i });
+    await user.click(screen.getByRole('button', { name: /start generation/i }));
+    // Ours failed (toast); the other package is generating meanwhile.
+    expect(await screen.findByText(/the release package failed/i)).toBeInTheDocument();
+
+    // The 2 s progress poll picks up the other package once it is ready.
+    expect(
+      await screen.findByRole('button', { name: /download package/i }, { timeout: 4000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/package generation failed/i)).toBeNull();
+  }, 10000);
+
   it('lists skipped documents on a ready draft', async () => {
     server.use(
       http.get('/api/v1/cases/case-1/release-packages', () =>

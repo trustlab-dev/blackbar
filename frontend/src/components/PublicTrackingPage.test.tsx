@@ -236,12 +236,40 @@ describe('PublicTrackingPage — defensive null guard', () => {
 });
 
 describe('PublicTrackingPage — missing tracking number', () => {
-  it('still calls config and stays loading without trackingNumber param', () => {
+  it('explains how to get back in when there is no tracking number at all', async () => {
+    let configCalls = 0;
     server.use(
-      http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+      http.get('/api/v1/admin/config/public', () => {
+        configCalls += 1;
+        return HttpResponse.json({});
+      }),
     );
     renderWithProviders(<Harness />, { route: '/track' });
-    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no tracking number/i)).toBeInTheDocument();
+    expect(screen.getByText(/confirmation email/i)).toBeInTheDocument();
+    await waitFor(() => expect(configCalls).toBe(1));
+  });
+});
+
+describe('PublicTrackingPage — tracking number leaves the address bar', () => {
+  afterEach(() => window.history.replaceState(null, '', '/'));
+
+  it('strips the number from the URL and keeps it for a refresh', async () => {
+    window.history.replaceState(null, '', '/track/TRK-001');
+    server.use(
+      http.get('/api/v1/cases/public/track/TRK-001', () =>
+        HttpResponse.json(makeTrackingData()),
+      ),
+      http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+    );
+    const first = renderWithProviders(<Harness />, { route: '/track/TRK-001' });
+    expect(await screen.findByText('My Request')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/track');
+    first.unmount();
+
+    // Refresh on /track in the same tab.
+    renderWithProviders(<Harness />, { route: '/track' });
+    expect(await screen.findByText('My Request')).toBeInTheDocument();
   });
 });
 

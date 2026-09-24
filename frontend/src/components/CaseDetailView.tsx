@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
-import { getApiErrorMessage } from '../api/errors';
+import api from '../api/client';
 import './CaseDetailView.css';
 import ReleasePackageActions from './ReleasePackageActions';
 import CaseTeamPanel from './CaseTeamPanel';
@@ -78,8 +77,6 @@ const CaseDetailView: React.FC = () => {
   const [documents, setDocuments] = useState<Array<any>>([]);
   const [newComment, setNewComment] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [saveIndicators, setSaveIndicators] = useState<Record<string, boolean>>({});
   const [newTag, setNewTag] = useState('');
   const [templates, setTemplates] = useState<Array<any>>([]);
@@ -129,52 +126,6 @@ const CaseDetailView: React.FC = () => {
         return <InsertDriveFileIcon {...iconProps} />;
     }
   };
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files || files.length === 0) return;
-
-    setUploading(true);
-    const duplicates: string[] = [];
-    
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const formData = new FormData();
-        formData.append('file', files[i]);
-        formData.append('case_id', caseId!);
-
-        const response = await api.post('/documents/', formData, {
-          headers: {
-            'Content-Type': 'multipart/form-data'
-          },
-          timeout: TRANSFER_TIMEOUT_MS,
-        });
-        
-        // Track duplicates
-        if (response.data.is_duplicate && response.data.duplicate_of_filename) {
-          duplicates.push(`${files[i].name} (matches ${response.data.duplicate_of_filename})`);
-        }
-      }
-
-      // Refresh documents list
-      await fetchDocuments();
-      
-      // Show duplicate notification if any
-      if (duplicates.length > 0) {
-        alert(`Duplicate documents detected:\n\n${duplicates.join('\n')}\n\nThese files were not uploaded as they already exist.`);
-      }
-    } catch (error) {
-      console.error('Error uploading documents:', error);
-      alert(getApiErrorMessage(error, 'Failed to upload documents. Please try again.'));
-    } finally {
-      setUploading(false);
-      // Reset file input
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    }
-  };
-
 
   const fetchDocuments = async () => {
     try {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import userEvent from '@testing-library/user-event';
 import { server } from '../test-utils/msw-handlers';
-import { renderWithProviders, screen, waitFor } from '../test-utils/render';
+import { fireEvent, renderWithProviders, screen, waitFor } from '../test-utils/render';
 import CaseDocuments from './CaseDocuments';
 import api from '../api/client';
 
@@ -805,5 +805,66 @@ describe('CaseDocuments — redaction/release readiness', () => {
     await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
     expect(await screen.findByText(/uploaded with warnings/i)).toBeInTheDocument();
     expect(screen.getByText(/thread consolidation failed: timeout/i)).toBeInTheDocument();
+  });
+});
+
+describe('CaseDocuments — files the browser cannot type', () => {
+  function stubUploadEnv() {
+    server.use(
+      http.get('/api/v1/cases/case-1/documents', () =>
+        HttpResponse.json({ documents: [] }),
+      ),
+      http.get('/api/v1/auth/users/guests', () => HttpResponse.json([])),
+    );
+    // axios's Node adapter can't serialise a File (see note above).
+    return vi.spyOn(api, 'post').mockResolvedValue({ data: { id: 'new-doc' } });
+  }
+
+  it.each(['', 'application/octet-stream'])(
+    'uploads a .msg reported as %j with the Outlook MIME type',
+    async (type) => {
+      const post = stubUploadEnv();
+      // jsdom's FormData stringifies Node's File (see setupTests), so read
+      // the part the component appends.
+      const append = vi.spyOn(FormData.prototype, 'append');
+      const user = userEvent.setup({ applyAccept: false });
+      renderWithProviders(<CaseDocuments />);
+      await screen.findByText(/no documents uploaded yet/i);
+      await user.click(screen.getByRole('button', { name: /upload documents/i }));
+      await screen.findByText(/add documents/i);
+
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      await user.upload(fileInput, new File(['m'], 'mail.msg', { type }));
+      await screen.findByText(/1 file selected/i);
+      await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
+
+      await waitFor(() => expect(post).toHaveBeenCalled());
+      const part = append.mock.calls.find(([name]) => name === 'file')?.[1] as File;
+      expect(part.name).toBe('mail.msg');
+      expect(part.type).toBe('application/vnd.ms-outlook');
+    },
+  );
+
+  it('runs dropped files through the same checks', async () => {
+    stubUploadEnv();
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText(/no documents uploaded yet/i);
+    await user.click(screen.getByRole('button', { name: /upload documents/i }));
+    await screen.findByText(/add documents/i);
+
+    const dropZone = document.querySelector('.upload-dropzone') as HTMLElement;
+    const dropped = [
+      new File(['m'], 'mail.msg', { type: '' }),
+      new File(['x'], 'tool.exe', { type: 'application/x-msdownload' }),
+    ];
+    fireEvent.drop(dropZone, { dataTransfer: { files: dropped } });
+
+    expect(await screen.findByText(/1 file selected/i)).toBeInTheDocument();
+    expect(screen.getByText('mail.msg')).toBeInTheDocument();
+    expect(screen.queryByText('tool.exe')).not.toBeInTheDocument();
+    expect(window.alert).toHaveBeenCalledWith(
+      expect.stringMatching(/tool\.exe" is not a supported file type/),
+    );
   });
 });

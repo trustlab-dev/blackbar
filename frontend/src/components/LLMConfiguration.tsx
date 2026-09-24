@@ -200,6 +200,8 @@ const LLMConfiguration: React.FC = () => {
       return;
     }
     setFormError('');
+    // Whitespace-only input means "keep the stored key", as keyEntered says.
+    const apiKey = formData.api_key.trim();
     try {
       // Headers are deliberately left out: the backend returns them masked,
       // and omitting them keeps the stored values.
@@ -215,13 +217,13 @@ const LLMConfiguration: React.FC = () => {
         },
         notes: formData.notes,
         enabled: formData.enabled,
-        ...(formData.api_key && { api_key: formData.api_key })
+        ...(apiKey && { api_key: apiKey })
       };
 
       if (editingConfig) {
         await api.put(`/llm/configs/${editingConfig.id}`, payload);
       } else {
-        await api.post('/llm/configs', { ...payload, api_key: formData.api_key });
+        await api.post('/llm/configs', { ...payload, api_key: apiKey });
       }
 
       fetchConfigs();

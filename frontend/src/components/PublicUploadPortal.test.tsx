@@ -47,6 +47,7 @@ function Harness() {
   return (
     <Routes>
       <Route path="/upload/:token" element={<PublicUploadPortal />} />
+      <Route path="/upload" element={<PublicUploadPortal />} />
     </Routes>
   );
 }
@@ -586,4 +587,82 @@ describe('PublicUploadPortal — client-side upload checks', () => {
       screen.getByText(/logo\.svg" is not a supported file type/i),
     ).toBeInTheDocument();
   });
+});
+
+describe('PublicUploadPortal — collection token leaves the address bar', () => {
+  it('strips the token from the URL and stashes it for a refresh', async () => {
+    const replace = vi.spyOn(window.history, 'replaceState');
+    server.use(
+      http.get(`${API_BASE}/cases/collect/tok`, () =>
+        HttpResponse.json(makeCollectionInfo()),
+      ),
+      http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+    );
+    renderWithProviders(<Harness />, { route: '/upload/tok' });
+    await screen.findByText('My Case');
+    expect(replace).toHaveBeenCalledWith(window.history.state, '', '/collect');
+    expect(sessionStorage.getItem('blackbar.capability.collect')).toBe('tok');
+  });
+
+  it('loads the collection from the stash after a refresh on /collect', async () => {
+    sessionStorage.setItem('blackbar.capability.collect', 'tok');
+    server.use(
+      http.get(`${API_BASE}/cases/collect/tok`, () =>
+        HttpResponse.json(makeCollectionInfo()),
+      ),
+      http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+    );
+    renderWithProviders(<Harness />, { route: '/upload' });
+    expect(await screen.findByText('My Case')).toBeInTheDocument();
+  });
+
+  it('explains a missing link instead of loading forever', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+    );
+    renderWithProviders(<Harness />, { route: '/upload' });
+    expect(await screen.findByText(/link not available/i)).toBeInTheDocument();
+    expect(screen.getByText(/open the upload link/i)).toBeInTheDocument();
+  });
+});
+
+describe('PublicUploadPortal — files the browser cannot type', () => {
+  it.each(['', 'application/octet-stream'])(
+    'sends a .msg reported as %j with the Outlook MIME type',
+    async (type) => {
+      // jsdom's FormData stringifies Node's File (see setupTests), so read
+      // the part the component appends rather than the parsed request body.
+      const append = vi.spyOn(FormData.prototype, 'append');
+      let uploaded = false;
+      server.use(
+        http.get(`${API_BASE}/cases/collect/tok`, () =>
+          HttpResponse.json(makeCollectionInfo()),
+        ),
+        http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+        http.post(`${API_BASE}/cases/collect/tok/upload`, () => {
+          uploaded = true;
+          return HttpResponse.json({ ok: true });
+        }),
+      );
+      const user = userEvent.setup();
+      renderWithProviders(<Harness />, { route: '/upload/tok' });
+      await screen.findByText('My Case');
+      await user.type(screen.getByPlaceholderText(/john doe/i), 'Tester');
+      await user.type(screen.getByPlaceholderText(/john@example\.com/i), 't@x.com');
+
+      const input = document.getElementById('file-input') as HTMLInputElement;
+      Object.defineProperty(input, 'files', {
+        value: [new File(['msg'], 'mail.msg', { type })],
+        configurable: true,
+      });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await screen.findByText('mail.msg');
+      await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
+
+      await waitFor(() => expect(uploaded).toBe(true));
+      const part = append.mock.calls.find(([name]) => name === 'file')?.[1] as File;
+      expect(part.name).toBe('mail.msg');
+      expect(part.type).toBe('application/vnd.ms-outlook');
+    },
+  );
 });

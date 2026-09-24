@@ -410,6 +410,18 @@ describe('Login — session-ended notice (?reason=)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(text);
   });
 
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'])(
+    'ignores the prototype key reason=%s instead of crashing',
+    (reason) => {
+      renderWithProviders(<Login onLoginSuccess={vi.fn()} />, {
+        withAuth: true,
+        route: `/login?reason=${reason}`,
+      });
+      expect(screen.getByRole('button', { name: /sign in|log in/i })).toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    },
+  );
+
   it('shows nothing for an unknown or missing reason', () => {
     renderWithProviders(<Login onLoginSuccess={vi.fn()} />, {
       withAuth: true,

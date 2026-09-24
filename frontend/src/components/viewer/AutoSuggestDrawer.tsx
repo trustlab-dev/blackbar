@@ -434,6 +434,7 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
   const aiStatus = aiAnalysis?.status;
   const aiNotGenerated = aiStatus === 'not_generated';
   const aiUnavailable = aiStatus === 'ai_unavailable';
+  const aiNoText = aiStatus === 'no_text';
   const aiFailed = !aiUnavailable && (aiStatus === 'ai_error' || Boolean(aiAnalysis?.error_code));
   const hasAiResult = Boolean(aiStatus) && !NO_RESULT_STATUSES.has(aiStatus as string);
   const aiPartial = Boolean(aiAnalysis?.analysis_truncated || aiAnalysis?.output_truncated);
@@ -459,6 +460,11 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
               Generating sends the document text to the configured AI provider.
             </Typography>
           )}
+        </Alert>
+      )}
+      {aiNoText && (
+        <Alert severity="info">
+          {aiAnalysis.summary || 'This document has no extractable text, so there is nothing to analyse.'}
         </Alert>
       )}
       {aiUnavailable && (
@@ -707,7 +713,8 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
                       All AI suggestions have been applied or filtered out
                     </Alert>
                   ) : null}
-                  {generateButton}
+                  {/* Generating again for a text-less document can only return no_text. */}
+                  {!aiNoText && generateButton}
                 </Box>
               ) : (
                 <>

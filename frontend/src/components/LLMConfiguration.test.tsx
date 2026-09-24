@@ -449,6 +449,36 @@ describe('LLMConfiguration — masked headers', () => {
   });
 });
 
+describe('LLMConfiguration — api key whitespace', () => {
+  it('keeps the stored key when only whitespace is typed, and trims a pasted key', async () => {
+    const bodies: any[] = [];
+    useConfigs([{ ...baseConfig, api_key_set: true }]);
+    server.use(
+      http.put('/api/v1/llm/configs/cfg1', async ({ request }) => {
+        bodies.push(await request.json());
+        return HttpResponse.json(baseConfig);
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<LLMConfiguration />);
+
+    await openEdit(user);
+    let dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByLabelText(/api key/i), '   ');
+    await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).not.toHaveProperty('api_key');
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await openEdit(user);
+    dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByLabelText(/api key/i), '  sk-new  ');
+    await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1].api_key).toBe('sk-new');
+  });
+});
+
 describe('LLMConfiguration — backend errors', () => {
   it('shows the 422 unsafe-endpoint message from the backend', async () => {
     useConfigs([]);

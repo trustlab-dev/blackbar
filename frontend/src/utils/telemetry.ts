@@ -153,6 +153,12 @@ export function scrubEvent<T extends Event>(event: T): T {
  * Replay `beforeAddRecordingEvent` hook. Custom recording events (tag
  * "breadcrumb" or "performanceSpan") embed URLs for navigations and network
  * requests; DOM snapshots are already masked by `maskAllText`.
+ *
+ * Limitation: Sentry only passes custom events through this hook. The rrweb
+ * Meta event (type 4, `data.href = window.location.href`) that opens every
+ * full snapshot never arrives here, which is why Replay is kept off token
+ * routes entirely (see `isReplayExcludedPath`) and those pages strip the
+ * token from the address bar (`utils/capabilityUrl.ts`).
  */
 export function scrubRecordingEvent<T extends { type?: number; data?: unknown }>(
   event: T,
@@ -168,6 +174,35 @@ export function scrubRecordingEvent<T extends { type?: number; data?: unknown }>
   return { ...event, data: { ...data, payload } };
 }
 
+// ---------------------------------------------------------------------------
+// Session Replay gating.
+// ---------------------------------------------------------------------------
+
+// Requester-facing and capability-token routes: magic-link verify and the
+// public portal (/public/...), account activation, collection links,
+// contributor links, public tracking and the public request form. Replay
+// never records these. Every rrweb full snapshot starts with a Meta event
+// carrying window.location.href, and in @sentry/react 8.x that event skips
+// beforeAddRecordingEvent, so no scrubber can reach the token in it.
+const REPLAY_EXCLUDED_ROUTE =
+  /^\/(?:public|activate|collect|contribute|track|request)(?:\/|$)/i;
+
+export function isReplayExcludedPath(pathname: string): boolean {
+  return REPLAY_EXCLUDED_ROUTE.test(pathname);
+}
+
+/**
+ * Stop Replay (session recording or the on-error buffer) when the app
+ * navigates onto a public or token route. Once stopped it stays off for the
+ * rest of the page life; a staff page reached afterwards is not recorded.
+ * Called from the router on every location change.
+ */
+export function syncReplayWithRoute(pathname: string): void {
+  if (!SENTRY_DSN || !isReplayExcludedPath(pathname)) return;
+  const replay = Sentry.getReplay();
+  if (replay) void replay.stop();
+}
+
 /**
  * Initialize frontend telemetry
  * Call this in index.tsx before rendering
@@ -175,6 +210,11 @@ export function scrubRecordingEvent<T extends { type?: number; data?: unknown }>
 export function initTelemetry(): void {
   // Initialize Sentry if DSN is configured
   if (SENTRY_DSN) {
+    // Replay starts recording (or buffering for on-error replays) at init,
+    // so a page loaded on a public/token route never gets the integration.
+    const recordReplay =
+      typeof window === 'undefined' || !isReplayExcludedPath(window.location.pathname);
+
     Sentry.init({
       dsn: SENTRY_DSN,
       environment: ENVIRONMENT,
@@ -196,11 +236,15 @@ export function initTelemetry(): void {
         // Console breadcrumbs would copy debug logging into every event.
         Sentry.breadcrumbsIntegration({ console: false }),
         Sentry.browserTracingIntegration(),
-        Sentry.replayIntegration({
-          maskAllText: true,
-          blockAllMedia: true,
-          beforeAddRecordingEvent: scrubRecordingEvent,
-        }),
+        ...(recordReplay
+          ? [
+              Sentry.replayIntegration({
+                maskAllText: true,
+                blockAllMedia: true,
+                beforeAddRecordingEvent: scrubRecordingEvent,
+              }),
+            ]
+          : []),
       ],
 
       // Filter sensitive data

@@ -392,3 +392,50 @@ describe('CaseQueue — UI role defaults (least privilege)', () => {
     ).toBeInTheDocument();
   });
 });
+
+describe('CaseQueue — session ended (401)', () => {
+  it('leaves the redirect to the api client, keeping reason and return path', async () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')!;
+    const assignments: string[] = [];
+    let href = 'http://localhost/cases?view=all';
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        origin: 'http://localhost',
+        protocol: 'http:',
+        host: 'localhost',
+        hostname: 'localhost',
+        pathname: '/cases',
+        search: '?view=all',
+        get href() {
+          return href;
+        },
+        set href(v: string) {
+          assignments.push(v);
+          href = v;
+        },
+      },
+    });
+    try {
+      server.use(
+        http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+        http.get('/api/v1/cases/queue/all', () =>
+          HttpResponse.json(
+            { error: { code: 'HTTP_401', message: 'Session has been revoked' } },
+            { status: 401 },
+          ),
+        ),
+      );
+      renderQueue();
+      await waitFor(() => expect(assignments.length).toBeGreaterThan(0));
+      // Give any component-level handler a chance to overwrite it.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(assignments).toEqual([
+        `/login?redirect=${encodeURIComponent('/cases?view=all')}&reason=revoked`,
+      ]);
+      expect(localStorage.getItem('token')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
+  });
+});

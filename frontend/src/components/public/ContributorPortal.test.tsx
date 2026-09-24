@@ -50,6 +50,7 @@ function Harness() {
         path="/contribute/:contributorId"
         element={<ContributorPortal />}
       />
+      <Route path="/contribute" element={<ContributorPortal />} />
     </Routes>
   );
 }
@@ -610,5 +611,76 @@ describe('ContributorPortal — client-side upload checks', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/huge\.pdf" is too large/i)).toBeInTheDocument();
     expect(uploads).toBe(0);
+  });
+});
+
+describe('ContributorPortal — link credentials leave the address bar', () => {
+  it('strips the id and token from the URL and stashes them for a refresh', async () => {
+    const replace = vi.spyOn(window.history, 'replaceState');
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () => HttpResponse.json(makeInfoResponse())),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/records upload portal/i);
+    expect(replace).toHaveBeenCalledWith(window.history.state, '', '/contribute');
+    expect(sessionStorage.getItem('blackbar.capability.contributor')).toBe(
+      JSON.stringify({ id: 'c-1', token: 'tok' }),
+    );
+  });
+
+  it('loads from the stash after a refresh on /contribute', async () => {
+    sessionStorage.setItem(
+      'blackbar.capability.contributor',
+      JSON.stringify({ id: 'c-1', token: 'tok' }),
+    );
+    let sentToken: string | null = null;
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, ({ request }) => {
+        sentToken = new URL(request.url).searchParams.get('token');
+        return HttpResponse.json(makeInfoResponse());
+      }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute' });
+    expect(await screen.findByText(/records upload portal/i)).toBeInTheDocument();
+    expect(sentToken).toBe('tok');
+  });
+
+  it("does not pair one contributor's id with another's stashed token", async () => {
+    sessionStorage.setItem(
+      'blackbar.capability.contributor',
+      JSON.stringify({ id: 'c-other', token: 'tok-other' }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1' });
+    expect(await screen.findByText(/invalid or missing access token/i)).toBeInTheDocument();
+  });
+});
+
+describe('ContributorPortal — files the browser cannot type', () => {
+  it('sends a .msg with an empty type as application/vnd.ms-outlook', async () => {
+    // jsdom's FormData stringifies Node's File (see setupTests), so read the
+    // part the component appends rather than the parsed request body.
+    const append = vi.spyOn(FormData.prototype, 'append');
+    let uploads = 0;
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () => HttpResponse.json(makeInfoResponse())),
+      http.post(`${API_BASE}/contribute/c-1/upload`, () => {
+        uploads += 1;
+        return HttpResponse.json({ id: 'doc-new' });
+      }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/select files to upload/i);
+
+    const input = document.getElementById('file-upload') as HTMLInputElement;
+    Object.defineProperty(input, 'files', {
+      value: [new File(['m'], 'mail.msg', { type: '' })],
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await waitFor(() => expect(uploads).toBe(1));
+    const part = append.mock.calls.find(([name]) => name === 'file')?.[1] as File;
+    expect(part.name).toBe('mail.msg');
+    expect(part.type).toBe('application/vnd.ms-outlook');
   });
 });

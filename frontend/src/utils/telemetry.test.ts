@@ -16,6 +16,7 @@ const sentryMock = vi.hoisted(() => ({
   ),
   startInactiveSpan: vi.fn(() => ({ end: vi.fn() })),
   addEventProcessor: vi.fn(),
+  getReplay: vi.fn(() => undefined as undefined | { stop: () => Promise<void> }),
   breadcrumbsIntegration: vi.fn(() => 'breadcrumbs'),
   browserTracingIntegration: vi.fn(() => 'browser-tracing'),
   replayIntegration: vi.fn(() => 'replay'),
@@ -169,6 +170,80 @@ describe('initTelemetry — DSN configured', () => {
     t.initTelemetry();
     const { beforeSend } = sentryMock.init.mock.calls[0][0];
     expect(beforeSend({})).toEqual({});
+  });
+});
+
+describe('replay gating on public and capability-token routes', () => {
+  // rrweb's Meta event records window.location.href and never reaches
+  // beforeAddRecordingEvent, so replay must not run on these routes at all.
+  const setPath = (path: string) => window.history.replaceState(null, '', path);
+  afterEach(() => setPath('/'));
+
+  it.each([
+    '/public/verify/tok-123',
+    '/public/verify',
+    '/public/dashboard',
+    '/activate',
+    '/collect/tok-1',
+    '/contribute/c-1',
+    '/track/FOI-2026-ABCD',
+    '/request',
+  ])('treats %s as replay-excluded', async (path) => {
+    const t = await loadTelemetry({});
+    expect(t.isReplayExcludedPath(path)).toBe(true);
+  });
+
+  it.each(['/', '/cases', '/cases/abc', '/documents/d1', '/login', '/admin', '/publications', '/tracker'])(
+    'records replay on staff route %s',
+    async (path) => {
+      const t = await loadTelemetry({});
+      expect(t.isReplayExcludedPath(path)).toBe(false);
+    },
+  );
+
+  it('leaves the replay integration out when the page loads on a token route', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    setPath('/public/verify/secret-token');
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+    const cfg = sentryMock.init.mock.calls[0][0];
+    expect(sentryMock.replayIntegration).not.toHaveBeenCalled();
+    expect(cfg.integrations).not.toContain('replay');
+    // Tracing and scrubbing are unaffected.
+    expect(cfg.integrations).toContain('browser-tracing');
+    expect(cfg.beforeSend).toBe(t.scrubEvent);
+  });
+
+  it('includes a masked replay integration when the page loads on a staff route', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    setPath('/cases');
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+    expect(sentryMock.init.mock.calls[0][0].integrations).toContain('replay');
+    expect(sentryMock.replayIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ maskAllText: true, blockAllMedia: true }),
+    );
+  });
+
+  it('stops a running replay (session or error buffer) on navigating to a public route', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stop = vi.fn(() => Promise.resolve());
+    sentryMock.getReplay.mockReturnValue({ stop });
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+
+    t.syncReplayWithRoute('/cases');
+    expect(stop).not.toHaveBeenCalled();
+
+    t.syncReplayWithRoute('/collect/tok-1');
+    expect(stop).toHaveBeenCalledTimes(1);
+    sentryMock.getReplay.mockReturnValue(undefined);
+  });
+
+  it('does nothing on route changes when Sentry is not configured', async () => {
+    const t = await loadTelemetry({});
+    t.syncReplayWithRoute('/collect/tok-1');
+    expect(sentryMock.getReplay).not.toHaveBeenCalled();
   });
 });
 

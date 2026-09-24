@@ -12,5 +12,9 @@ globalThis.Blob = NodeBlob as unknown as typeof globalThis.Blob;
 globalThis.File = NodeFile as unknown as typeof globalThis.File;
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'warn' }));
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  // Capability-link pages stash tokens here (utils/capabilityUrl.ts).
+  sessionStorage.clear();
+});
 afterAll(() => server.close());

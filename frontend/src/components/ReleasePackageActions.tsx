@@ -95,8 +95,7 @@ const IssueList: React.FC<{ issues: PackageDocumentIssue[] }> = ({ issues }) => 
         <ListItemText
           primary={issue.filename || issue.document_id || 'Unknown document'}
           secondary={issue.reason || undefined}
-          primaryTypographyProps={{ variant: 'body2' }}
-          secondaryTypographyProps={{ variant: 'caption' }}
+          slotProps={{ primary: { variant: 'body2' }, secondary: { variant: 'caption' } }}
         />
       </ListItem>
     ))}
@@ -164,6 +163,16 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
       setPackageState(state);
 
       const tracked = trackedPackageId.current;
+      const draft = state.current_draft;
+      // A newer package (possibly started by someone else) supersedes a
+      // remembered failure.
+      if (draft && draft.status !== 'failed') {
+        setFailedPackage((prev) =>
+          prev && draft.id !== prev.id && Date.parse(draft.created_at) > Date.parse(prev.created_at)
+            ? null
+            : prev,
+        );
+      }
       if (state.current_draft?.status === 'failed') {
         trackedPackageId.current = null;
         setFailedPackage(state.current_draft);
@@ -551,11 +560,12 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
                             ? `${total} redactions · ${blocking} awaiting review (will fail release)`
                             : `${total} redactions`;
                         })()}
-                        secondaryTypographyProps={
-                          getBlockingRedactions(doc.redactions).length > 0
-                            ? { color: 'error' }
-                            : undefined
-                        }
+                        slotProps={{
+                          secondary:
+                            getBlockingRedactions(doc.redactions).length > 0
+                              ? { color: 'error' }
+                              : undefined,
+                        }}
                       />
                     </ListItemButton>
                   </ListItem>

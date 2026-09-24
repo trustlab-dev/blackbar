@@ -104,7 +104,6 @@ const CaseQueue: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const token = localStorage.getItem('token');
       const endpoint = viewMode === 'my' ? '/cases/queue/my-cases' : '/cases/queue/all';
 
       const params: any = {
@@ -118,25 +117,14 @@ const CaseQueue: React.FC = () => {
       if (priorityFilter) params.priority = priorityFilter;
       if (searchQuery) params.search = searchQuery;
 
-      const response = await api.get(endpoint, {
-        params,
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const response = await api.get(endpoint, { params });
 
       setCases(response.data.cases);
       setTotal(response.data.total);
     } catch (error: any) {
       console.error('Error fetching cases:', error);
-      // Handle authentication errors explicitly
-      if (error.response?.status === 401) {
-        // Clear auth data and redirect to login
-        localStorage.removeItem('token');
-        localStorage.removeItem('userRole');
-        localStorage.removeItem('username');
-        window.location.href = '/login';
-        return;
-      }
-      // For other errors, set error state and empty cases
+      // A 401 is handled by the api client interceptor (it clears auth and
+      // redirects to /login with the reason and return path).
       setError('Failed to load cases. Please try again.');
       setCases([]);
       setTotal(0);

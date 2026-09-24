@@ -4,6 +4,7 @@ import { publicApi as api, TRANSFER_TIMEOUT_MS } from '../api/client';
 import './PublicUploadPortal.css';
 import { getApiErrorMessage } from '../api/errors';
 import { partitionUploadFiles, UPLOAD_ACCEPT } from '../utils/uploadValidation';
+import { useCapabilityFromUrl } from '../utils/capabilityUrl';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -28,10 +29,18 @@ interface UploadedFile {
 }
 
 const PublicUploadPortal: React.FC = () => {
-  const { token } = useParams();
+  // The collection token is the only credential for this page. Move it out
+  // of the address bar; sessionStorage keeps a refresh (and "Upload More
+  // Files", which reloads) working in this tab.
+  const token = useCapabilityFromUrl(useParams().token, {
+    cleanPath: '/collect',
+    storageKey: 'collect',
+  });
   const [collectionInfo, setCollectionInfo] = useState<CollectionInfo | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(Boolean(token));
+  const [error, setError] = useState(
+    token ? '' : 'This upload link is incomplete. Open the upload link you were sent again.',
+  );
 
   // Form state
   const [submitterName, setSubmitterName] = useState('');

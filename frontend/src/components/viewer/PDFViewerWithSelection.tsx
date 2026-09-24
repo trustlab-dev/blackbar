@@ -239,9 +239,11 @@ const PDFViewerWithSelection: React.FC<Props> = ({
     if (externalPdfUrl) {
       setPdfUrl(externalPdfUrl);
       setLoading(false);
-    } else {
+    } else if (externalPdfUrl === undefined) {
       fetchPDF();
     }
+    // null: the parent (ViewerShell) owns the download and has not finished
+    // it yet. Keep the spinner rather than fetching the original twice.
     fetchOCRData();
 
     return () => {

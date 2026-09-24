@@ -67,6 +67,47 @@ describe('ActivateAccount — URL params', () => {
   });
 });
 
+describe('ActivateAccount — token leaves the address bar', () => {
+  afterEach(() => window.history.replaceState(null, '', '/'));
+
+  it('strips email and token from the URL but keeps them for the form', async () => {
+    window.history.replaceState(null, '', '/activate?email=a@b.com&token=abc123');
+    renderWithProviders(<Harness />, {
+      route: '/activate?email=a@b.com&token=abc123',
+    });
+    await waitFor(() => expect(window.location.search).toBe(''));
+    expect(window.location.pathname).toBe('/activate');
+    expect(screen.getByLabelText(/email/i)).toHaveValue('a@b.com');
+  });
+
+  it('survives a refresh on the stripped URL and submits the original token', async () => {
+    renderWithProviders(<Harness />, {
+      route: '/activate?email=a@b.com&token=abc123',
+    }).unmount();
+
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.post('/api/v1/auth/activate-owner', async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ message: 'ok' });
+      }),
+    );
+    // Refresh: same tab, token no longer in the URL.
+    renderWithProviders(<Harness />, { route: '/activate' });
+    expect(screen.queryByText(/invalid activation link/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/email/i)).toHaveValue('a@b.com');
+
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/^new password/i), 'CorrectHorse12!');
+    await user.type(screen.getByLabelText(/confirm password/i), 'CorrectHorse12!');
+    await user.click(screen.getByRole('button', { name: /activate account/i }));
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({ email: 'a@b.com', token: 'abc123' });
+    // Used up: the stash is cleared once activation succeeds.
+    await waitFor(() => expect(sessionStorage.length).toBe(0));
+  });
+});
+
 describe('ActivateAccount — form validation', () => {
   it('shows error when passwords do not match', async () => {
     const user = userEvent.setup();
