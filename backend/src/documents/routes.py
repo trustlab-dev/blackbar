@@ -633,7 +633,12 @@ async def upload_document(
     - Email thread consolidation
     - Attachment processing
     """
-    from .processing_service import DocumentProcessingService, ProcessingStatus, UploadContext
+    from .processing_service import (
+        DocumentProcessingService,
+        ProcessingStatus,
+        UploadContext,
+        read_verified_upload,
+    )
 
     # If uploading into an existing case, enforce object-level access: the
     # route role gate admits `user`, so a team-scoped user must not be able
@@ -645,8 +650,8 @@ async def upload_document(
         if case is not None:
             assert_case_access(case, current_user)
 
-    # Read file content
-    content = await file.read()
+    # Read file content (size-capped while streaming, type sniffed; DOC-11)
+    content = await read_verified_upload(file)
 
     # Use shared processing service
     service = DocumentProcessingService(db)
@@ -837,6 +842,20 @@ async def generate_ai_suggestions_async(
         )
 
 
+async def _delete_gridfs_files(db, file_ids: list) -> None:
+    """Delete GridFS files through the request's own database handle (same
+    client, credentials and database name as the rest of the app)."""
+    from gridfs.errors import NoFile
+    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+    bucket = AsyncIOMotorGridFSBucket(db)
+    for file_id in file_ids:
+        try:
+            await bucket.delete(file_id)
+        except NoFile:
+            logger.info(f"GridFS file {file_id} already absent")
+
+
 # DELETE DOCUMENT (New)
 @router.delete("/{document_id}", dependencies=[Depends(check_role(["owner", "admin"]))])
 async def delete_document(request: Request, document_id: str, db=Depends(get_db)):
@@ -854,6 +873,25 @@ async def delete_document(request: Request, document_id: str, db=Depends(get_db)
         raise HTTPException(status_code=404, detail="Document not found")
 
     case_id = doc.get("case_id")
+
+    # Remove stored content first (the PDF and the native original, for the
+    # document and every attachment). If that fails the records are kept so
+    # the delete can be retried, rather than orphaning readable files (DOC-15).
+    attachments = await db.documents.find(
+        {"parent_document_id": document_id},
+        {"_id": 0, "id": 1, "content_file_id": 1, "original_file_id": 1},
+    ).to_list(length=None)
+    gridfs_ids = [
+        file_id
+        for record in [doc, *attachments]
+        for file_id in (record.get("content_file_id"), record.get("original_file_id"))
+        if file_id is not None
+    ]
+    try:
+        await _delete_gridfs_files(db, gridfs_ids)
+    except Exception:
+        logger.exception(f"Could not delete stored content for document {document_id}")
+        raise HTTPException(status_code=500, detail="Failed to delete stored document content")
 
     # Delete all attachments associated with this document
     attachment_delete_result = await db.documents.delete_many({"parent_document_id": document_id})
@@ -898,23 +936,6 @@ async def delete_document(request: Request, document_id: str, db=Depends(get_db)
     if case_id:
         await db.cases.update_one({"id": case_id}, {"$pull": {"document_ids": document_id}})
         logger.info(f"Removed document {document_id} from case {case_id}")
-
-    # Clean up GridFS originals if they exist
-    try:
-        if "original_file_id" in doc:
-            # Get the synchronous database for GridFS
-            from pymongo import MongoClient
-
-            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
-            sync_client = MongoClient(mongo_uri)
-            sync_db = sync_client["blackbar"]
-            fs = gridfs.GridFS(sync_db)
-
-            fs.delete(doc["original_file_id"])
-            logger.info(f"Deleted GridFS original for document {document_id}")
-            sync_client.close()
-    except Exception as gridfs_error:
-        logger.warning(f"Could not delete GridFS original: {gridfs_error}")
 
     return {
         "message": "Document deleted successfully",

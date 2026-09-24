@@ -788,6 +788,43 @@ class TestUploadDocument:
         assert r.status_code == 500
         assert "GridFS" in r.text
 
+    async def test_upload_content_mismatch_returns_415(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """DOC-11: a `.pdf` whose bytes are HTML is refused before the
+        processing service ever sees it."""
+        client = await authed_client_factory(role="admin")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"<html>hi</html>", "application/pdf")},
+            )
+        assert r.status_code == 415, r.text
+
+    async def test_upload_over_limit_returns_413(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch,
+    ) -> None:
+        """DOC-11: the size limit is enforced while reading the upload."""
+        monkeypatch.setattr("src.documents.processing_service.MAX_FILE_SIZE", 64)
+        client = await authed_client_factory(role="admin")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4" + b"x" * 200, "application/pdf")},
+            )
+        assert r.status_code == 413, r.text
+
     async def test_upload_guest_forbidden(
         self,
         authed_client_factory,
@@ -968,6 +1005,77 @@ class TestDeleteDocument:
         updated_sibling = await db.documents.find_one({"id": "email-2"})
         assert updated_sibling["thread_status"] == "active"
         assert updated_sibling["superseded_by"] is None
+
+    async def test_delete_removes_gridfs_content_and_originals(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """DOC-15: the PDF (content_file_id) and native original
+        (original_file_id) of the document and of every attachment are
+        removed from GridFS in the app's own database."""
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+        bucket = AsyncIOMotorGridFSBucket(db)
+        ids = [await bucket.upload_from_stream(f"f{i}", f"bytes-{i}".encode()) for i in range(4)]
+        unrelated = await bucket.upload_from_stream("keep", b"keep me")
+        doc = make_document(
+            id="gfs-parent",
+            content_file_id=ids[0],
+            original_file_id=ids[1],
+        )
+        att = make_document(
+            parent_document_id="gfs-parent",
+            content_file_id=ids[2],
+            original_file_id=ids[3],
+        )
+        pdf_only = make_document(parent_document_id="gfs-parent", original_file_id=None)
+        await db.documents.insert_many([doc, att, pdf_only])
+        client = await authed_client_factory(role="admin")
+
+        r = await client.delete("/api/v1/documents/gfs-parent")
+
+        assert r.status_code == 200, r.text
+        assert await db["fs.files"].count_documents({"_id": {"$in": ids}}) == 0
+        assert await db["fs.chunks"].count_documents({"files_id": {"$in": ids}}) == 0
+        assert await db["fs.files"].count_documents({"_id": unrelated}) == 1
+
+    async def test_delete_tolerates_already_missing_gridfs_file(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        from bson import ObjectId
+
+        doc = make_document(content_file_id=ObjectId(), original_file_id=None)
+        await db.documents.insert_one(doc)
+        client = await authed_client_factory(role="admin")
+        r = await client.delete(f"/api/v1/documents/{doc['id']}")
+        assert r.status_code == 200, r.text
+        assert await db.documents.find_one({"id": doc["id"]}) is None
+
+    async def test_delete_keeps_record_when_gridfs_delete_fails(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """If stored content cannot be removed, the record is kept so the
+        delete can be retried, and the caller gets an error, not 200."""
+        from bson import ObjectId
+
+        doc = make_document(content_file_id=ObjectId())
+        await db.documents.insert_one(doc)
+        client = await authed_client_factory(role="admin")
+        with patch(
+            "motor.motor_asyncio.AsyncIOMotorGridFSBucket.delete",
+            new=AsyncMock(side_effect=RuntimeError("mongo down")),
+        ):
+            r = await client.delete(f"/api/v1/documents/{doc['id']}")
+        assert r.status_code == 500
+        assert await db.documents.find_one({"id": doc["id"]}) is not None
 
     async def test_delete_not_found(
         self,
@@ -1628,71 +1736,24 @@ class TestGridFSBranches:
         patch_routes_db,
         monkeypatch,
     ) -> None:
-        """Delete path with `original_file_id` set -> hits GridFS delete
-        cleanup (lines 792-802)."""
+        """Delete path with `original_file_id` set -> GridFS delete through
+        the request's database (DOC-15). Previously this pinned a sync
+        MongoClient built from the unset MONGO_URI env var and the
+        hard-coded "blackbar" database; the swallow-errors sibling test was
+        replaced by `TestDeleteDocument.test_delete_keeps_record_when_gridfs_delete_fails`."""
         client = await authed_client_factory(role="admin")
         deleted: list[str] = []
 
-        class FakeGridFS:
-            def __init__(self, _db):
-                pass
+        async def fake_delete(self, fid):
+            deleted.append(fid)
 
-            def delete(self, fid):
-                deleted.append(fid)
-
-        class FakeClient:
-            def __init__(self, _uri):
-                pass
-
-            def __getitem__(self, _name):
-                return MagicMock()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr("pymongo.MongoClient", FakeClient)
-        monkeypatch.setattr("gridfs.GridFS", FakeGridFS)
+        monkeypatch.setattr("motor.motor_asyncio.AsyncIOMotorGridFSBucket.delete", fake_delete)
 
         doc = make_document(id="del-1", original_file_id="orig-to-delete")
         await db.documents.insert_one(doc)
         r = await client.delete("/api/v1/documents/del-1")
         assert r.status_code == 200
         assert deleted == ["orig-to-delete"]
-
-    async def test_delete_gridfs_error_is_logged_not_raised(
-        self,
-        db: AsyncIOMotorDatabase,
-        authed_client_factory,
-        patch_routes_db,
-        monkeypatch,
-    ) -> None:
-        """GridFS cleanup errors are swallowed — delete still succeeds."""
-        client = await authed_client_factory(role="admin")
-
-        class FakeGridFS:
-            def __init__(self, _db):
-                pass
-
-            def delete(self, fid):
-                raise RuntimeError("gridfs unavailable")
-
-        class FakeClient:
-            def __init__(self, _uri):
-                pass
-
-            def __getitem__(self, _name):
-                return MagicMock()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr("pymongo.MongoClient", FakeClient)
-        monkeypatch.setattr("gridfs.GridFS", FakeGridFS)
-
-        doc = make_document(id="del-2", original_file_id="orig-bad")
-        await db.documents.insert_one(doc)
-        r = await client.delete("/api/v1/documents/del-2")
-        assert r.status_code == 200
 
 
 # ---------------------------------------------------------------------------

@@ -176,6 +176,7 @@ async def upload_to_collection(
         DocumentProcessingService,
         ProcessingStatus,
         UploadContext,
+        read_verified_upload,
     )
 
     db = await get_db(http_request)
@@ -199,8 +200,8 @@ async def upload_to_collection(
     if not is_valid:
         raise HTTPException(status_code=403, detail=error_msg)
 
-    # Read file content
-    content = await file.read()
+    # Read file content (size-capped while streaming, type sniffed; DOC-11)
+    content = await read_verified_upload(file)
 
     # Use shared processing service
     service = DocumentProcessingService(db)

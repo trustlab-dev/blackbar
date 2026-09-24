@@ -18,6 +18,7 @@ import httpx
 import pytest
 import pytest_asyncio
 import respx
+from docker.types import Ulimit
 from fastapi.testclient import TestClient
 from httpx import ASGITransport
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -71,7 +72,12 @@ def _mongo_container() -> Iterator[MongoDbContainer]:
     (see `db` fixture below), not by spinning up a fresh container each
     time — that would add ~5s per test.
     """
-    with MongoDbContainer("mongo:7.0") as mongo:
+    # mongod's open-file count climbs with every per-test database until a
+    # checkpoint clears them. Under the container default (nofile=1024) the
+    # full suite crashes ~35-40% through with a WiredTiger "Too many open
+    # files" panic that surfaces as a burst of connection errors.
+    nofile = Ulimit(name="nofile", soft=65536, hard=65536)
+    with MongoDbContainer("mongo:7.0").with_kwargs(ulimits=[nofile]) as mongo:
         yield mongo
 
 

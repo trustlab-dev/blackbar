@@ -77,6 +77,10 @@ async def create_indexes(db: AsyncIOMotorDatabase = None):
     await db.documents.create_index("is_duplicate")
     await db.documents.create_index([("case_id", 1), ("is_duplicate", 1)])
     await db.documents.create_index([("case_id", 1), ("file_hash", 1)])
+    # Email thread lookup (utils/email_threads.find_thread_emails) and
+    # Message-ID dedup, both scoped to a case.
+    await db.documents.create_index([("case_id", 1), ("thread_metadata.normalized_subject", 1)])
+    await db.documents.create_index([("case_id", 1), ("message_id", 1)])
 
     # Templates indexes
     await db.templates.create_index("id", unique=True)

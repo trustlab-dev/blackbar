@@ -1628,3 +1628,374 @@ class TestRealConversionIntegration:
                 context=UploadContext(),
             )
         assert result.status == ProcessingStatus.SUCCESS, result.error
+
+
+# ===========================================================================
+# Security review 2026-09: ingest fixes
+# ===========================================================================
+
+
+def _mock_pipeline_libs(monkeypatch, full_text: str = "hello text") -> None:
+    monkeypatch.setattr(
+        "src.documents.routes.extract_text_with_coordinates",
+        AsyncMock(return_value={"full_text": full_text, "pages": []}),
+    )
+    monkeypatch.setattr("src.documents.routes.get_text_summary", lambda d: "sum")
+    monkeypatch.setattr(
+        "src.admin.config_routes.get_system_config",
+        AsyncMock(return_value={"auto_generate_ai_suggestions": False}),
+    )
+
+
+class TestWorkDirCleanup:
+    """DOC-14: the per-upload work directory (converted PDFs, extracted
+    attachments) is removed after every upload, whatever the outcome."""
+
+    async def test_removed_after_success(self, service, patch_gridfs_stack, monkeypatch) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        work_dir = service.temp_dir
+        eml = b"From: a@x\nTo: b@x\nSubject: S\n\nbody\n"
+        result = await service.process_upload(
+            file_content=eml,
+            filename="m.eml",
+            content_type="message/rfc822",
+            context=UploadContext(case_id="c1"),
+        )
+        assert result.status == ProcessingStatus.SUCCESS, result.error
+        assert not os.path.exists(work_dir)
+
+    async def test_removed_after_conversion_failure(
+        self, service, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        work_dir = service.temp_dir
+        # Leave a stray converted file behind, as a real conversion would.
+        Path(work_dir, "leftover.pdf").write_bytes(b"%PDF-")
+        with patch(
+            "src.documents.processing_service.convert_to_pdf",
+            return_value={"success": False, "error": "broken"},
+        ):
+            result = await service.process_upload(
+                file_content=b"PK\x03\x04docx",
+                filename="thing.docx",
+                content_type=None,
+                context=UploadContext(),
+            )
+        assert result.status == ProcessingStatus.CONVERSION_FAILED
+        assert not os.path.exists(work_dir)
+
+    async def test_removed_after_unexpected_error(self, service, monkeypatch) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        work_dir = service.temp_dir
+        monkeypatch.setattr(
+            service, "_validate_file", MagicMock(side_effect=RuntimeError("kaboom"))
+        )
+        result = await service.process_upload(
+            file_content=b"x", filename="x.pdf", content_type=None, context=UploadContext()
+        )
+        assert result.status == ProcessingStatus.ERROR
+        assert not os.path.exists(work_dir)
+
+    async def test_instance_can_process_a_second_upload(
+        self, service, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        for i in range(2):
+            eml = f"From: a@x\nTo: b@x\nSubject: S{i}\n\nbody {i}\n".encode()
+            result = await service.process_upload(
+                file_content=eml,
+                filename=f"m{i}.eml",
+                content_type=None,
+                context=UploadContext(),
+            )
+            assert result.status == ProcessingStatus.SUCCESS, result.error
+        assert not os.path.exists(service.temp_dir)
+
+
+class TestConversionFailureRecord:
+    """DOC-19: a document whose conversion failed must not be labelled
+    application/pdf and must be excluded from release."""
+
+    async def test_failed_conversion_keeps_real_type_and_blocks_release(
+        self, service, db, patch_gridfs_stack
+    ) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        with patch(
+            "src.documents.processing_service.convert_to_pdf",
+            return_value={"success": False, "error": "broken"},
+        ):
+            result = await service.process_upload(
+                file_content=b"PK\x03\x04 docx bytes",
+                filename="thing.docx",
+                content_type=None,
+                context=UploadContext(case_id="c1"),
+            )
+        assert result.status == ProcessingStatus.CONVERSION_FAILED
+        assert result.document_id
+        doc = await db.documents.find_one({"id": result.document_id})
+        assert doc["mime_type"] == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        assert doc["conversion_failed"] is True
+        assert doc["conversion_status"] == "failed"
+        assert doc["conversion_error"] == "broken"
+        # Release only packages "approved"/"released" documents.
+        assert doc["status"] == "conversion_failed"
+        assert not doc["filename"].lower().endswith(".pdf")
+        # GridFS got the native bytes with their real type, not application/pdf.
+        put = patch_gridfs_stack["puts"][0]
+        assert put["content_type"] != "application/pdf"
+
+    async def test_failed_email_conversion_keeps_email_type(
+        self, service, db, patch_gridfs_stack
+    ) -> None:
+        from src.documents.processing_service import UploadContext
+
+        with patch(
+            "src.documents.processing_service.convert_to_pdf",
+            return_value={"success": False, "error": "broken"},
+        ):
+            result = await service.process_upload(
+                file_content=b"From: a@x\n\nbody",
+                filename="m.eml",
+                content_type=None,
+                context=UploadContext(case_id="c1"),
+            )
+        doc = await db.documents.find_one({"id": result.document_id})
+        assert doc["mime_type"] == "message/rfc822"
+        assert doc["conversion_failed"] is True
+        assert "converted_mime_type" not in doc
+
+    async def test_gridfs_failure_is_an_error_not_success(self, service, monkeypatch) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        monkeypatch.setattr(
+            service,
+            "_store_in_gridfs",
+            AsyncMock(return_value={"content_file_id": None, "original_file_id": None}),
+        )
+        result = await service.process_upload(
+            file_content=b"%PDF-1.4 fake",
+            filename="x.pdf",
+            content_type=None,
+            context=UploadContext(),
+        )
+        assert result.status == ProcessingStatus.ERROR
+        assert "storage" in result.error.lower()
+
+
+class TestExtractedTextPopulated:
+    """DOC-12: bulk search reads `extracted_text`; direct PDF uploads and
+    attachments must have it."""
+
+    async def test_direct_pdf_upload_sets_extracted_text(
+        self, service, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch, full_text="Jane Doe SIN 123")
+        result = await service.process_upload(
+            file_content=b"%PDF-1.4 fake",
+            filename="x.pdf",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        assert result.status == ProcessingStatus.SUCCESS, result.error
+        doc = await db.documents.find_one({"id": result.document_id})
+        assert doc["extracted_text"] == "Jane Doe SIN 123"
+
+    async def test_attachment_sets_extracted_text(self, service, tmp_path) -> None:
+        from src.documents.processing_service import UploadContext
+
+        att_input = tmp_path / "a.docx"
+        att_input.write_bytes(b"raw")
+        att_pdf = tmp_path / "a.pdf"
+        att_pdf.write_bytes(b"%PDF-att")
+        with (
+            patch(
+                "src.documents.processing_service.convert_to_pdf",
+                return_value={"success": True, "pdf_path": str(att_pdf)},
+            ),
+            patch.object(
+                service,
+                "_extract_text",
+                AsyncMock(return_value=({"full_text": "attachment words"}, "s")),
+            ),
+            patch.object(service, "_generate_summary", AsyncMock(return_value=None)),
+            patch.object(
+                service,
+                "_store_in_gridfs",
+                AsyncMock(return_value={"content_file_id": "f1", "original_file_id": "f2"}),
+            ),
+        ):
+            docs = await service._process_attachments(
+                [{"filename": "a.docx", "path": str(att_input)}], "p", UploadContext()
+            )
+        assert docs[0]["extracted_text"] == "attachment words"
+
+    async def test_attachment_prefers_conversion_text(self, service, tmp_path) -> None:
+        """An attached email keeps its header text (used for threading)."""
+        from src.documents.processing_service import UploadContext
+
+        att_input = tmp_path / "a.eml"
+        att_input.write_bytes(b"raw")
+        att_pdf = tmp_path / "a.pdf"
+        att_pdf.write_bytes(b"%PDF-att")
+        with (
+            patch(
+                "src.documents.processing_service.convert_to_pdf",
+                return_value={
+                    "success": True,
+                    "pdf_path": str(att_pdf),
+                    "extracted_text": "From: a@x\nSubject: S\n",
+                },
+            ),
+            patch.object(
+                service, "_extract_text", AsyncMock(return_value=({"full_text": "ocr"}, "s"))
+            ),
+            patch.object(service, "_generate_summary", AsyncMock(return_value=None)),
+            patch.object(
+                service,
+                "_store_in_gridfs",
+                AsyncMock(return_value={"content_file_id": "f1", "original_file_id": "f2"}),
+            ),
+        ):
+            docs = await service._process_attachments(
+                [{"filename": "a.eml", "path": str(att_input)}], "p", UploadContext()
+            )
+        assert docs[0]["extracted_text"].startswith("From: a@x")
+
+
+class TestAttachmentErrorsSurfaced:
+    """DOC-18: an attachment that cannot be converted is reported, not
+    silently dropped."""
+
+    async def test_failed_attachment_recorded_on_parent_and_result(
+        self, service, db, tmp_path, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        email_pdf = tmp_path / "e.pdf"
+        email_pdf.write_bytes(b"%PDF")
+        att = tmp_path / "bad.bin"
+        att.write_bytes(b"???")
+
+        def fake_convert(inp, outd):
+            if inp.endswith(".bin"):
+                return {"success": False, "error": "Unsupported file format: .bin"}
+            return {
+                "success": True,
+                "pdf_path": str(email_pdf),
+                "extracted_text": None,
+                "attachments": [{"filename": "weird.zip", "path": str(att)}],
+            }
+
+        monkeypatch.setattr("src.documents.processing_service.convert_to_pdf", fake_convert)
+        result = await service.process_upload(
+            file_content=b"From: a@x\n\nbody",
+            filename="m.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        assert result.status == ProcessingStatus.SUCCESS, result.error
+        assert any("weird.zip" in w for w in result.warnings)
+        doc = await db.documents.find_one({"id": result.document_id})
+        assert doc["attachment_errors"][0]["filename"] == "weird.zip"
+        assert "Unsupported" in doc["attachment_errors"][0]["error"]
+
+
+class TestThreadConsolidationWiring:
+    """#71 / #75 on the service side."""
+
+    async def test_in_memory_doc_carries_thread_metadata_and_self_excluded(
+        self, service, db
+    ) -> None:
+        await db.documents.insert_one({"id": "d1"})
+        captured: dict = {}
+
+        async def fake_find(db_, identifiers, case_id, exclude_id=None):
+            captured["exclude_id"] = exclude_id
+            return [{"id": "other"}]
+
+        async def fake_consolidate(db_, new_doc, thread_emails):
+            captured["thread_metadata"] = new_doc.get("thread_metadata")
+            return {"action": "none"}
+
+        document = {
+            "id": "d1",
+            "message_id": "<m@x>",
+            "extracted_text": "From: a@x\nDate: Wed, 1 Jan 2020 00:00:00 +0000\nSubject: S\n",
+        }
+        with (
+            patch("src.documents.routes.find_thread_emails", fake_find),
+            patch("src.documents.routes.consolidate_email_thread", fake_consolidate),
+        ):
+            await service._consolidate_email_thread(document, "c1")
+        assert captured["exclude_id"] == "d1"
+        assert captured["thread_metadata"]["date"] == "Wed, 1 Jan 2020 00:00:00 +0000"
+
+    async def test_failure_is_logged_with_document_id_and_surfaced(self, service, caplog) -> None:
+        import logging
+
+        warnings: list[str] = []
+        with (
+            patch(
+                "src.documents.routes.extract_thread_identifiers",
+                side_effect=TypeError("can't compare offset-naive and offset-aware datetimes"),
+            ),
+            caplog.at_level(logging.ERROR, logger="src.documents.processing_service"),
+        ):
+            result = await service._consolidate_email_thread(
+                {"id": "doc-xyz", "extracted_text": "x"}, "c1", warnings
+            )
+        assert result is None
+        assert warnings and "thread" in warnings[0].lower()
+        record = next(r for r in caplog.records if "doc-xyz" in r.getMessage())
+        assert record.exc_info is not None
+
+    async def test_real_pipeline_orders_by_email_date(
+        self, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        """#75 end to end: an email dated 2020 uploaded after one dated 2025
+        is the superseded one; the 2025 email stays active."""
+        from src.documents.processing_service import DocumentProcessingService, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        newer = (
+            b"From: alice@x\nTo: bob@x\nSubject: Budget\nMessage-ID: <b@x>\n"
+            b"In-Reply-To: <a@x>\nReferences: <a@x>\n"
+            b"Date: Sun, 1 Jun 2025 09:00:00 +0000\n\nlatest\n"
+        )
+        older = (
+            b"From: bob@x\nTo: alice@x\nSubject: Re: Budget\nMessage-ID: <a@x>\n"
+            b"Date: Wed, 1 Jan 2020 09:00:00\n\noriginal\n"
+        )
+        first = await DocumentProcessingService(db).process_upload(
+            file_content=newer,
+            filename="newer.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        second = await DocumentProcessingService(db).process_upload(
+            file_content=older,
+            filename="older.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        assert not second.warnings, second.warnings
+        assert second.thread_consolidation["action"] == "mark_new_as_superseded"
+        newer_doc = await db.documents.find_one({"id": first.document_id})
+        older_doc = await db.documents.find_one({"id": second.document_id})
+        assert older_doc["thread_status"] == "superseded"
+        assert older_doc["superseded_by"] == first.document_id
+        assert newer_doc.get("thread_status") == "active"

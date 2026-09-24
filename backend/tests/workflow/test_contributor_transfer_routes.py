@@ -573,6 +573,46 @@ class TestContributorUpload:
         contributor = await db.case_contributors.find_one({"id": cid})
         assert contributor["documents_uploaded"] == 1
 
+    @pytest.mark.parametrize(
+        "filename,body,limit,expected",
+        [
+            ("x.pdf", b"<html>not a pdf</html>", None, 415),
+            ("x.docx", b"%PDF-1.4 not a zip", None, 415),
+            ("x.pdf", b"%PDF-1.4" + b"x" * 200, 64, 413),
+        ],
+    )
+    async def test_upload_rejects_bad_content_and_oversize(
+        self,
+        db: AsyncIOMotorDatabase,
+        app,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+        filename: str,
+        body: bytes,
+        limit: int | None,
+        expected: int,
+    ) -> None:
+        """DOC-11: same shared check as the other upload entry points."""
+        case_id = await _seed_case(db)
+        cid = await _seed_contributor(db, case_id=case_id, raw_token="tok")
+        if limit is not None:
+            monkeypatch.setattr("src.documents.processing_service.MAX_FILE_SIZE", limit)
+        from src.documents import processing_service as ps_mod
+
+        async def _must_not_run(self, *args, **kwargs):
+            raise AssertionError("service must not be called")
+
+        monkeypatch.setattr(ps_mod.DocumentProcessingService, "process_upload", _must_not_run)
+        async with await self._public_client(app) as c:
+            r = await c.post(
+                f"/api/v1/contribute/{cid}/upload",
+                files={"file": (filename, body, "application/octet-stream")},
+                data={"token": "tok"},
+            )
+        assert r.status_code == expected, r.text
+        contributor = await db.case_contributors.find_one({"id": cid})
+        assert contributor.get("documents_uploaded", 0) == 0
+
     async def test_upload_bad_token_401(
         self,
         db: AsyncIOMotorDatabase,

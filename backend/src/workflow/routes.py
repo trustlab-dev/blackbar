@@ -636,6 +636,7 @@ async def contributor_upload_document(
         DocumentProcessingService,
         ProcessingStatus,
         UploadContext,
+        read_verified_upload,
     )
 
     db = await get_database_from_request(request)
@@ -652,8 +653,8 @@ async def contributor_upload_document(
             detail="You have already confirmed your records are complete. Contact the FOI coordinator to reopen.",
         )
 
-    # Read file content
-    content = await file.read()
+    # Read file content (size-capped while streaming, type sniffed; DOC-11)
+    content = await read_verified_upload(file)
 
     # Use shared processing service
     service = DocumentProcessingService(db)

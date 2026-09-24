@@ -399,6 +399,51 @@ class TestUploadCollectionPublic:
         )
         assert r.status_code == 403
 
+    @pytest.mark.parametrize(
+        "filename,body,limit,expected",
+        [
+            ("x.pdf", b"<html>not a pdf</html>", None, 415),
+            ("x.msg", b"PK\x03\x04zip", None, 415),
+            ("x.pdf", b"%PDF-1.4" + b"x" * 200, 64, 413),
+        ],
+    )
+    async def test_upload_rejects_bad_content_and_oversize(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+        filename: str,
+        body: bytes,
+        limit: int | None,
+        expected: int,
+    ) -> None:
+        """DOC-11: magic-byte mismatch -> 415, streamed size limit -> 413,
+        before the processing service runs and before the count moves."""
+        case_id = await _seed_case(
+            db,
+            collection_links=[
+                {"id": "lkm", "token": "sniff-tok", "is_active": True, "upload_count": 0}
+            ],
+        )
+        if limit is not None:
+            monkeypatch.setattr("src.documents.processing_service.MAX_FILE_SIZE", limit)
+        from src.documents import processing_service as ps_mod
+
+        async def _must_not_run(self, *args, **kwargs):
+            raise AssertionError("service must not be called")
+
+        monkeypatch.setattr(ps_mod.DocumentProcessingService, "process_upload", _must_not_run)
+        client: AsyncClient = await authed_client_factory(role="user")
+        r = await client.post(
+            "/api/v1/cases/collect/sniff-tok/upload",
+            files={"file": (filename, body, "application/octet-stream")},
+            data={"submitter_name": "X", "submitter_email": "x@example.com"},
+        )
+        assert r.status_code == expected, r.text
+        case = await db.cases.find_one({"id": case_id})
+        assert case["collection_links"][0]["upload_count"] == 0
+
     async def test_upload_happy_path_increments_count_and_logs_audit(
         self,
         db: AsyncIOMotorDatabase,

@@ -3,15 +3,20 @@ import email
 import hashlib
 import io
 import logging
+import mimetypes
 import os
+import re
 import subprocess
 import tempfile
+import unicodedata
 import uuid
+from email.header import Header
+from email.message import Message
+from typing import Any
 
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
-from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +39,243 @@ def configure_tesseract():
 
 # Call this at module initialization
 configure_tesseract()
+
+
+# =============================================================================
+# Attachment storage (DOC-01 / DOC-18)
+# =============================================================================
+
+# Extensions `convert_to_pdf` knows how to handle. An extracted attachment is
+# written to disk as `<uuid><ext>` where `ext` is taken from this allow-list;
+# anything else is stored as `.bin` (and later reported as unsupported).
+SUPPORTED_EXTENSIONS = frozenset(
+    {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".eml",
+        ".msg",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".tiff",
+        ".tif",
+        ".webp",
+    }
+)
+MAX_DISPLAY_NAME_LENGTH = 200
+
+
+def safe_display_name(name: object, fallback: str) -> str:
+    """Return a sender-supplied attachment name that is safe to display.
+
+    The result is only ever shown to users and stored as metadata; it is
+    never used as a filesystem path. Directory components (POSIX and
+    Windows separators) and control characters are removed and the length
+    is capped, keeping the extension.
+    """
+    if not isinstance(name, str):
+        return fallback
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(ch for ch in name if unicodedata.category(ch)[0] != "C").strip()
+    if name in ("", ".", ".."):
+        return fallback
+    if len(name) > MAX_DISPLAY_NAME_LENGTH:
+        stem, ext = os.path.splitext(name)
+        ext = ext[:16]
+        name = stem[: MAX_DISPLAY_NAME_LENGTH - len(ext)] + ext
+    return name
+
+
+def _safe_extension(display_name: str, content_type: str | None) -> str:
+    ext = os.path.splitext(display_name)[1].lower()
+    if ext in SUPPORTED_EXTENSIONS:
+        return ext
+    if content_type:
+        guessed = (mimetypes.guess_extension(content_type) or "").lower()
+        if guessed in SUPPORTED_EXTENSIONS:
+            return guessed
+    return ".bin"
+
+
+def write_attachment(
+    output_dir: str, display_name: str, data: bytes, content_type: str | None
+) -> str:
+    """Write attachment bytes under a generated name inside `output_dir`.
+
+    The sender-controlled filename never reaches the filesystem, so `../`,
+    absolute and Windows-style names cannot escape the work directory and
+    two attachments with the same name cannot overwrite each other.
+    """
+    base = os.path.realpath(output_dir)
+    path = os.path.join(base, f"{uuid.uuid4().hex}{_safe_extension(display_name, content_type)}")
+    # Defence in depth: the generated path must stay inside the work dir.
+    if os.path.commonpath([base, os.path.realpath(path)]) != base:
+        raise ValueError(f"Refusing to write attachment outside {base}")
+    with open(path, "xb") as f:
+        f.write(data)
+    return path
+
+
+def _header_value(value: object) -> str | None:
+    """Collapse a header value to one line; None for missing/non-string values."""
+    if isinstance(value, Header):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split())
+    return value or None
+
+
+def _email_text_header(
+    from_address: str,
+    to_address: str,
+    date: str,
+    subject: str,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> str:
+    text = f"From: {from_address}\nTo: {to_address}\nDate: {date}\nSubject: {subject}\n"
+    # Threading headers go into the extracted text so
+    # `email_threads.extract_thread_identifiers` can populate them.
+    if in_reply_to:
+        text += f"In-Reply-To: {in_reply_to}\n"
+    if references:
+        text += f"References: {references}\n"
+    return text + "\n"
+
+
+def _dropped_attachment_marker(display_name: str, reason: str) -> str:
+    logger.warning(f"Attachment not extracted: {display_name!r} ({reason})")
+    return f"\n[ATTACHMENT NOT EXTRACTED: {display_name} ({reason})]\n"
+
+
+# =============================================================================
+# Email PDF layout (DOC-06)
+# =============================================================================
+
+
+def _printable(text: str) -> str:
+    """Replace tabs and control characters so they render as spacing."""
+    text = text.replace("\t", "    ")
+    return "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in text)
+
+
+def _wrap_to_width(text: str, fontname: str, fontsize: float, max_width: float) -> list[str]:
+    """Greedy word wrap measured in points; overlong words are split."""
+
+    def width(s: str) -> float:
+        return fitz.get_text_length(s, fontname=fontname, fontsize=fontsize)
+
+    lines: list[str] = []
+    current, current_w = "", 0.0
+    for token in re.findall(r"\S+|\s+", text):
+        token_w = width(token)
+        if current_w + token_w <= max_width:
+            current += token
+            current_w += token_w
+            continue
+        if token.isspace():
+            lines.append(current.rstrip())
+            current, current_w = "", 0.0
+            continue
+        if current.strip():
+            lines.append(current.rstrip())
+        current, current_w = "", 0.0
+        for ch in token:
+            ch_w = width(ch)
+            if current and current_w + ch_w > max_width:
+                lines.append(current)
+                current, current_w = "", 0.0
+            current += ch
+            current_w += ch_w
+    lines.append(current.rstrip())
+    return lines
+
+
+class EmailPdfWriter:
+    """Lays out email text on Letter pages without writing past any edge.
+
+    Every line is wrapped to the printable width and a new page is started
+    before the baseline would cross the bottom margin, so all text in the
+    content stream is visible (and therefore reviewable and redactable).
+    """
+
+    PAGE_WIDTH = 612
+    PAGE_HEIGHT = 792
+    MARGIN = 40
+
+    def __init__(self) -> None:
+        self.doc = fitz.open()
+        self.page = self.doc.new_page(width=self.PAGE_WIDTH, height=self.PAGE_HEIGHT)
+        self.y = float(self.MARGIN)
+
+    @property
+    def max_width(self) -> float:
+        return self.PAGE_WIDTH - 2 * self.MARGIN
+
+    @property
+    def bottom(self) -> float:
+        return self.PAGE_HEIGHT - self.MARGIN
+
+    def _new_page(self) -> None:
+        self.page = self.doc.new_page(width=self.PAGE_WIDTH, height=self.PAGE_HEIGHT)
+        self.y = float(self.MARGIN)
+
+    def new_page(self) -> None:
+        self._new_page()
+
+    def space(self, height: float) -> None:
+        self.y += height
+
+    def ensure_space(self, height: float) -> None:
+        if self.y + height > self.bottom:
+            self._new_page()
+
+    def write(
+        self,
+        text: str,
+        fontsize: float = 10,
+        fontname: str = "helv",
+        line_height: float = 14,
+    ) -> None:
+        """Write text (may contain newlines), wrapping and paginating."""
+        for source_line in text.split("\n"):
+            for line in _wrap_to_width(_printable(source_line), fontname, fontsize, self.max_width):
+                if self.y > self.bottom:
+                    self._new_page()
+                if line:
+                    self.page.insert_text(
+                        (self.MARGIN, self.y), line, fontsize=fontsize, fontname=fontname
+                    )
+                self.y += line_height
+
+    def insert_image(self, width: float, height: float, filename: str) -> None:
+        self.ensure_space(height)
+        rect = fitz.Rect(self.MARGIN, self.y, self.MARGIN + width, self.y + height)
+        self.page.insert_image(rect, filename=filename)
+        self.y += height + 10
+
+    def save(self, output_file: str) -> None:
+        self.doc.save(output_file)
+        self.doc.close()
+
+
+def _write_attachment_summary(writer: EmailPdfWriter, attachment_info: list[dict]) -> None:
+    writer.new_page()
+    writer.write("Attachments:", fontsize=12, fontname="hebo", line_height=20)
+    for i, attachment in enumerate(attachment_info, 1):
+        size_kb = attachment["size"] / 1024
+        writer.write(
+            f"{i}. {attachment['filename']} ({attachment['mime_type']}, {size_kb:.1f} KB)",
+            line_height=15,
+        )
 
 
 def convert_office_to_pdf(input_file: str, output_dir: str) -> str:
@@ -132,7 +374,6 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     Returns:
         tuple: (pdf_path, [attachment_paths], extracted_text)
     """
-    import re
     from html.parser import HTMLParser
 
     class HTMLStripper(HTMLParser):
@@ -200,7 +441,14 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     message_id = msg.get("Message-ID", None)  # For deduplication
 
     # Start with email metadata
-    text = f"From: {from_address}\nTo: {to_address}\nDate: {date}\nSubject: {subject}\n\n"
+    text = _email_text_header(
+        from_address,
+        to_address,
+        date,
+        subject,
+        in_reply_to=_header_value(msg.get("In-Reply-To")),
+        references=_header_value(msg.get("References")),
+    )
 
     # Extract attachments and inline images
     attachment_info = []
@@ -209,12 +457,54 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     body_found = False
     html_body = None
 
+    def walk_parts(part: Any):
+        """Like Message.walk(), but a forwarded message (message/rfc822) is
+        yielded as one part instead of being flattened into this email."""
+        yield part
+        if part.get_content_type() == "message/rfc822":
+            return
+        if part.is_multipart():
+            for sub in part.get_payload():
+                yield from walk_parts(sub)
+
+    def save_attachment(display: str, data: bytes, mime: str) -> None:
+        path = write_attachment(output_dir, display, data, mime)
+        attachment_info.append(
+            {
+                "filename": display,
+                "path": path,
+                "mime_type": mime,
+                "size": len(data),
+            }
+        )
+
     # Process message parts
     if msg.is_multipart():
-        for part in msg.walk():
+        for part in walk_parts(msg):
             content_disposition = part.get("Content-Disposition", "")
             content_type = part.get_content_type()
             content_id = part.get("Content-ID", "").strip("<>")
+
+            # Forwarded message: keep it whole as an .eml attachment so it is
+            # converted (and its own attachments extracted) as a child record.
+            if content_type == "message/rfc822":
+                payload = part.get_payload()
+                inner = payload[0] if isinstance(payload, list) and payload else None
+                inner_subject = _header_value(inner.get("Subject")) if inner is not None else None
+                display = safe_display_name(
+                    part.get_filename(),
+                    safe_display_name(inner_subject, "forwarded_message") + ".eml",
+                )
+                if not display.lower().endswith(".eml"):
+                    display += ".eml"
+                try:
+                    if inner is None:
+                        raise ValueError("empty message/rfc822 part")
+                    save_attachment(display, inner.as_bytes(), "message/rfc822")
+                    text += f"\n[ATTACHMENT: {display}]\n"
+                except Exception as e:
+                    text += _dropped_attachment_marker(display, str(e))
+                continue
 
             # Handle text/plain parts (email body)
             if content_type == "text/plain" and "attachment" not in content_disposition:
@@ -234,7 +524,6 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
 
                 # Extract base64-encoded inline images from HTML
                 import base64
-                import re
 
                 base64_pattern = r'<img[^>]+src="data:image/([^;]+);base64,([^"]+)"'
                 for match in re.finditer(base64_pattern, html_body):
@@ -265,27 +554,19 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
                 content_type.startswith("application/")
                 or (content_type.startswith("image/") and not content_id)
             ):
-                filename = part.get_filename()
-                if not filename:
-                    filename = f"unknown_attachment_{uuid.uuid4()}"
-
-                # Save attachment
-                attachment_path = os.path.join(output_dir, filename)
-                with open(attachment_path, "wb") as f:
-                    f.write(part.get_payload(decode=True))
-
-                # Add to list of attachments
-                attachment_info.append(
-                    {
-                        "filename": filename,
-                        "path": attachment_path,
-                        "mime_type": content_type,
-                        "size": os.path.getsize(attachment_path),
-                    }
+                # The sender-supplied name is display metadata only; the
+                # bytes are written under a generated name (DOC-01).
+                display = safe_display_name(
+                    part.get_filename(), f"unknown_attachment_{uuid.uuid4()}"
                 )
+                data = part.get_payload(decode=True)
+                if data is None:
+                    text += _dropped_attachment_marker(display, "no decodable content")
+                    continue
+                save_attachment(display, data, content_type)
 
                 # Add attachment info to email text
-                text += f"\n[ATTACHMENT: {filename}]\n"
+                text += f"\n[ATTACHMENT: {display}]\n"
     else:
         # Non-multipart email - just get the body
         charset = msg.get_content_charset() or "utf-8"
@@ -295,29 +576,17 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
             body_text = strip_html(body_text)
         text += body_text
 
-    # Create PDF from email content using PyMuPDF for better HTML/image handling
-    doc = fitz.open()
-    page = doc.new_page(width=612, height=792)  # Letter size
-
-    # Set up text insertion
-    y_position = 40
-    line_height = 14
-
-    # Add header line by line to avoid overlap
-    page.insert_text((40, y_position), f"From: {from_address}", fontsize=10, fontname="helv")
-    y_position += line_height
-    page.insert_text((40, y_position), f"To: {to_address}", fontsize=10, fontname="helv")
-    y_position += line_height
-    page.insert_text((40, y_position), f"Date: {date}", fontsize=10, fontname="helv")
-    y_position += line_height
-    page.insert_text((40, y_position), f"Subject: {subject}", fontsize=10, fontname="helv")
-    y_position += line_height * 2  # Extra space before body
+    # Render the PDF. EmailPdfWriter wraps every line to the page width and
+    # paginates, so no text is placed outside the visible page (DOC-06).
+    writer = EmailPdfWriter()
+    writer.write(f"From: {from_address}")
+    writer.write(f"To: {to_address}")
+    writer.write(f"Date: {date}")
+    writer.write(f"Subject: {subject}")
+    writer.space(14)  # Extra space before body
 
     # If we have HTML with inline images, parse and render with images
     if html_body and inline_images:
-        import base64
-        import re
-
         # Replace CID references with placeholders
         for cid in inline_images.keys():
             if not cid.startswith("base64_"):
@@ -334,23 +603,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
             if i % 2 == 0:
                 # Text part
                 if part.strip():
-                    lines = part.strip().split("\n")
-                    for line in lines:
-                        if y_position > 740:  # Near bottom of page
-                            page = doc.new_page(width=612, height=792)
-                            y_position = 40
-
-                        # Wrap long lines
-                        if len(line) > 90:
-                            wrapped = [line[j : j + 90] for j in range(0, len(line), 90)]
-                            for wrapped_line in wrapped:
-                                page.insert_text(
-                                    (40, y_position), wrapped_line, fontsize=10, fontname="helv"
-                                )
-                                y_position += line_height
-                        else:
-                            page.insert_text((40, y_position), line, fontsize=10, fontname="helv")
-                            y_position += line_height
+                    writer.write(part.strip())
             else:
                 # Image marker - insert actual image
                 img_id = part
@@ -377,7 +630,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
 
                         # Calculate scaling
                         img_width, img_height = img.size
-                        max_width = 532  # Page width minus margins
+                        max_width = writer.max_width
                         max_height = 400
 
                         width_ratio = max_width / img_width
@@ -387,72 +640,29 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
                         new_width = img_width * scale
                         new_height = img_height * scale
 
-                        # Check if we need a new page
-                        if y_position + new_height > 740:
-                            page = doc.new_page(width=612, height=792)
-                            y_position = 40
-
                         # Save temp image
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
                             img.save(tmp.name, "PNG")
                             temp_img_path = tmp.name
 
                         try:
-                            img_rect = fitz.Rect(
-                                40, y_position, 40 + new_width, y_position + new_height
-                            )
-                            page.insert_image(img_rect, filename=temp_img_path)
-                            y_position += new_height + 10
+                            writer.insert_image(new_width, new_height, temp_img_path)
                         finally:
                             os.unlink(temp_img_path)
 
                     except Exception as e:
                         logger.warning(f"Could not embed inline image {img_id}: {e}")
-                        page.insert_text(
-                            (40, y_position), f"[Image: {img_id}]", fontsize=10, fontname="helv"
-                        )
-                        y_position += line_height
+                        writer.write(f"[Image: {img_id}]")
     else:
         # No inline images or no HTML - just render text
-        for line in text.splitlines():
-            if y_position > 740:
-                page = doc.new_page(width=612, height=792)
-                y_position = 40
-
-            # Wrap long lines
-            if len(line) > 90:
-                wrapped = [line[i : i + 90] for i in range(0, len(line), 90)]
-                for wrapped_line in wrapped:
-                    page.insert_text((40, y_position), wrapped_line, fontsize=10, fontname="helv")
-                    y_position += line_height
-            else:
-                page.insert_text((40, y_position), line, fontsize=10, fontname="helv")
-                y_position += line_height
+        writer.write(text)
 
     # Add attachment summary at the end
     if attachment_info:
-        # New page for attachments
-        page = doc.new_page(width=612, height=792)
-        y_position = 40
-
-        page.insert_text((40, y_position), "Attachments:", fontsize=12, fontname="hebo")
-        y_position += 20
-
-        for i, attachment in enumerate(attachment_info, 1):
-            size_kb = attachment["size"] / 1024
-            att_text = (
-                f"{i}. {attachment['filename']} ({attachment['mime_type']}, {size_kb:.1f} KB)"
-            )
-            page.insert_text((40, y_position), att_text, fontsize=10, fontname="helv")
-            y_position += 15
-
-            if y_position > 740:
-                page = doc.new_page(width=612, height=792)
-                y_position = 40
+        _write_attachment_summary(writer, attachment_info)
 
     # Save the PDF
-    doc.save(output_file)
-    doc.close()
+    writer.save(output_file)
 
     if not os.path.exists(output_file):
         raise Exception("EML to PDF conversion failed.")
@@ -518,7 +728,6 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
     except ImportError:
         raise Exception("extract-msg library not installed. Run: pip install extract-msg")
 
-    import re
     from html.parser import HTMLParser
 
     class HTMLStripper(HTMLParser):
@@ -578,8 +787,17 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
         date = str(msg.date) if msg.date else "Unknown"
         message_id = msg.messageId if hasattr(msg, "messageId") else None  # For deduplication
 
+        # Threading headers: extract_msg exposes In-Reply-To directly; the
+        # References header is only available from the transport headers.
+        transport_headers = getattr(msg, "header", None)
+        in_reply_to = _header_value(getattr(msg, "inReplyTo", None))
+        references = None
+        if isinstance(transport_headers, Message):
+            references = _header_value(transport_headers.get("References"))
+            in_reply_to = in_reply_to or _header_value(transport_headers.get("In-Reply-To"))
+
         # Start with email metadata
-        text = f"From: {from_address}\nTo: {to_address}\nDate: {date}\nSubject: {subject}\n\n"
+        text = _email_text_header(from_address, to_address, date, subject, in_reply_to, references)
 
         # Try to get body - prefer plain text, fall back to HTML
         body = ""
@@ -603,120 +821,69 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
         if body:
             text += body + "\n"
 
-        # Extract attachments
+        # Extract attachments. The sender-supplied name is display metadata
+        # only; bytes are written under a generated name (DOC-01).
         attachment_info = []
         output_dir = os.path.dirname(output_file)
 
         for attachment in msg.attachments:
+            display = safe_display_name(
+                getattr(attachment, "longFilename", None)
+                or getattr(attachment, "shortFilename", None),
+                f"attachment_{uuid.uuid4()}",
+            )
             try:
-                filename = (
-                    attachment.longFilename
-                    or attachment.shortFilename
-                    or f"attachment_{uuid.uuid4()}"
-                )
-                attachment_path = os.path.join(output_dir, filename)
+                data = attachment.data
+                mime = getattr(attachment, "mimeType", None)
+                if not isinstance(mime, str) or not mime:
+                    mime = "application/octet-stream"
+                if isinstance(data, (bytes, bytearray)):
+                    payload = bytes(data)
+                elif data is not None and hasattr(data, "exportBytes"):
+                    # Embedded Outlook message: keep it as a child .msg record.
+                    payload = data.exportBytes()
+                    if not display.lower().endswith(".msg"):
+                        inner_subject = safe_display_name(
+                            getattr(data, "subject", None), "embedded_message"
+                        )
+                        display = (
+                            inner_subject if display.startswith("attachment_") else display
+                        ) + ".msg"
+                    mime = "application/vnd.ms-outlook"
+                else:
+                    text += _dropped_attachment_marker(display, "no extractable data")
+                    continue
 
-                # Save attachment
-                with open(attachment_path, "wb") as f:
-                    f.write(attachment.data)
-
+                attachment_path = write_attachment(output_dir, display, payload, mime)
                 attachment_info.append(
                     {
-                        "filename": filename,
+                        "filename": display,
                         "path": attachment_path,
-                        "mime_type": getattr(attachment, "mimeType", "application/octet-stream"),
-                        "size": len(attachment.data),
+                        "mime_type": mime,
+                        "size": len(payload),
                     }
                 )
 
                 # Add attachment info to email text
-                text += f"\n[ATTACHMENT: {filename}]\n"
+                text += f"\n[ATTACHMENT: {display}]\n"
             except Exception as e:
                 logger.error(f"Error extracting attachment from MSG: {str(e)}")
+                text += _dropped_attachment_marker(display, "extraction error")
                 continue
 
         msg.close()
 
-        # Create PDF from email content (same as EML)
+        # Create PDF from email content (same layout engine as EML, DOC-06)
         try:
-            c = canvas.Canvas(output_file, pagesize=letter)
-            width, height = letter
-            c.setFont("Helvetica", 10)
-            x, y = 40, height - 40
-
-            # Add header
-            c.setFont("Helvetica-Bold", 12)
-            # Escape any problematic characters in subject
-            safe_subject = subject[:100] if subject else "No Subject"
-            c.drawString(x, y, safe_subject)
-            y -= 20
-            c.setFont("Helvetica", 10)
-
-            # Add body text
-            for line in text.splitlines():
-                # Skip empty lines that might cause issues
-                if not line.strip():
-                    y -= 12
-                    if y < 40:
-                        c.showPage()
-                        c.setFont("Helvetica", 10)
-                        y = height - 40
-                    continue
-
-                # Handle long lines
-                if len(line) > 90:
-                    wrapped_lines = [line[i : i + 90] for i in range(0, len(line), 90)]
-                    for wrapped in wrapped_lines:
-                        try:
-                            # Remove any non-printable characters
-                            safe_line = "".join(
-                                char if ord(char) >= 32 or char == "\t" else " " for char in wrapped
-                            )
-                            c.drawString(x, y, safe_line)
-                        except:
-                            c.drawString(x, y, "[Content could not be displayed]")
-                        y -= 12
-                        if y < 40:
-                            c.showPage()
-                            c.setFont("Helvetica", 10)
-                            y = height - 40
-                else:
-                    try:
-                        # Remove any non-printable characters
-                        safe_line = "".join(
-                            char if ord(char) >= 32 or char == "\t" else " " for char in line
-                        )
-                        c.drawString(x, y, safe_line)
-                    except:
-                        c.drawString(x, y, "[Content could not be displayed]")
-                    y -= 12
-                    if y < 40:
-                        c.showPage()
-                        c.setFont("Helvetica", 10)
-                        y = height - 40
+            writer = EmailPdfWriter()
+            writer.write(subject or "No Subject", fontsize=12, fontname="hebo", line_height=20)
+            writer.write(text)
 
             # Add attachment summary
             if attachment_info:
-                c.showPage()
-                y = height - 40
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(x, y, "Attachments:")
-                y -= 20
-                c.setFont("Helvetica", 10)
+                _write_attachment_summary(writer, attachment_info)
 
-                for i, attachment in enumerate(attachment_info, 1):
-                    size_kb = attachment["size"] / 1024
-                    safe_filename = attachment["filename"][:80]
-                    c.drawString(
-                        x, y, f"{i}. {safe_filename} ({attachment['mime_type']}, {size_kb:.1f} KB)"
-                    )
-                    y -= 15
-                    if y < 40:
-                        c.showPage()
-                        c.setFont("Helvetica", 10)
-                        y = height - 40
-
-            c.save()
+            writer.save(output_file)
 
             if not os.path.exists(output_file):
                 raise Exception("MSG to PDF conversion failed - output file not created")
