@@ -14,23 +14,35 @@ Pipeline (``apply_redactions_to_pdf``):
    marker are used as they are on unrotated pages and refused on rotated
    pages, where their space is unknown (C1; see
    ``src.utils.redaction_records``).
-3. Burn the boxes with ``page.apply_redactions`` removing text and blanking
+3. Check that every redaction carrying ``text`` sits on that text (DOC-07,
+   C1): the text layer inside the box must contain the string, or a
+   substantial part of it for a box over part of a word or one line of a
+   wrapped string. A box that does not is misplaced and raises
+   RedactionVerificationError before anything is burned. Boxes over content
+   with no text layer (scanned images) cannot be checked this way.
+4. Burn the boxes with ``page.apply_redactions`` removing text and blanking
    image pixels under each box.
-4. Sanitise the whole document (DOC-05): metadata, XMP, embedded files,
+5. Sanitise the whole document (DOC-05): metadata, XMP, embedded files,
    outline, annotations, form fields, links, JavaScript and open actions.
    This also runs when there are no redactions.
-5. Save with garbage collection so replaced objects are not carried over.
-6. Re-open the output and verify it (DOC-07): no characters left under any
-   box, the string of every text-based redaction gone from the whole page
-   (not only from inside its box), and the sanitised parts empty.
-   A failed check raises RedactionVerificationError.
+6. Save with garbage collection so replaced objects are not carried over.
+7. Re-open the output and verify it (DOC-07): no characters left under any
+   box, the sanitised parts empty, and for "all occurrences" redactions
+   (``source`` in ``PAGE_SCOPE_SOURCES``: bulk text search and AI bulk
+   apply) the string gone from the whole page. A manual box, or a legacy
+   record without ``source``, covers one occurrence: the same string may
+   legitimately stay elsewhere on the page. A failed check raises
+   RedactionVerificationError.
 """
 
 from __future__ import annotations
 
+import difflib
 import io
 import logging
+import math
 import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
@@ -48,9 +60,15 @@ from src.utils.redaction_records import (
 logger = logging.getLogger(__name__)
 
 # Redactions created from a text search mark every occurrence on the page,
-# so the string must not survive even as part of a longer word. Other
-# text-based redactions are checked for the string as a whole word.
+# so after burning the string must not survive anywhere on the page, even
+# as part of a longer word. Every other source (manual, proposal, legacy
+# records without a source) covers the one occurrence under its box.
 PAGE_SCOPE_SOURCES = frozenset({"bulk_text", "ai_bulk_apply"})
+
+# Pre-check: a box that does not contain its whole string must share a run
+# of at least this many characters with it (fewer only when the string or
+# the box's text is shorter), and at least half of the shorter of the two.
+_MIN_PARTIAL_MATCH = 3
 
 # Image handling for apply_redactions: blank the pixels under the box.
 # PDF_REDACT_IMAGE_REMOVE would delete a whole scanned page image for a
@@ -81,7 +99,65 @@ class _Box:
 
 
 def _normalise_text(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value)
     return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _compact(value: str) -> str:
+    """Normalised with all whitespace removed: line breaks inside a box and
+    missing inter-word spaces in a text layer do not matter."""
+    return re.sub(r"\s+", "", _normalise_text(value))
+
+
+def _longest_common_run(a: str, b: str) -> int:
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return matcher.find_longest_match(0, len(a), 0, len(b)).size
+
+
+def _box_holds_text(expected: str, found: str) -> bool:
+    """True when ``found`` (the text layer inside a box) is the expected
+    string or a substantial part of it."""
+    if not expected:
+        return True
+    if not found:
+        return False
+    if expected in found:
+        return True
+    shorter = min(len(expected), len(found))
+    needed = max(min(_MIN_PARTIAL_MATCH, shorter), math.ceil(shorter / 2))
+    return _longest_common_run(expected, found) >= needed
+
+
+def _box_over_image(page: fitz.Page, rect: fitz.Rect) -> bool:
+    for info in page.get_image_info():
+        if fitz.Rect(info["bbox"]).intersects(rect):
+            return True
+    return False
+
+
+def _check_placement(doc: fitz.Document, boxes: list[_Box]) -> None:
+    """Refuse text-based redactions whose box does not sit on their text.
+
+    This catches boxes in the wrong coordinate space (C1) or otherwise
+    misplaced, which would burn the wrong area and leave the text. It runs
+    on the source document before anything is burned.
+    """
+    problems = []
+    for box in boxes:
+        if not box.text:
+            continue
+        page = doc[box.page_index]
+        found = _compact(page.get_text("text", clip=box.rect))
+        if not found and _box_over_image(page, box.rect):
+            # Scanned content located by OCR: no text layer to compare.
+            continue
+        if not _box_holds_text(_compact(box.text), found):
+            problems.append(
+                f"redaction {box.label} on page {box.page_index + 1} is misplaced: "
+                f"its box does not contain the expected text {box.text!r}"
+            )
+    if problems:
+        raise RedactionVerificationError("; ".join(problems))
 
 
 def _prepare_boxes(doc: fitz.Document, redactions: list[dict[str, Any]]) -> list[_Box]:
@@ -145,16 +221,6 @@ def _to_unrotated(
     unrotated = fitz.Rect(box * page.derotation_matrix)
     unrotated.normalize()
     return unrotated
-
-
-def _text_survives(needle: str, haystack: str, *, whole_word: bool) -> bool:
-    if not needle:
-        return False
-    if not whole_word:
-        return needle in haystack
-    prefix = r"(?<!\w)" if re.match(r"\w", needle[0]) else ""
-    suffix = r"(?!\w)" if re.match(r"\w", needle[-1]) else ""
-    return re.search(prefix + re.escape(needle) + suffix, haystack) is not None
 
 
 def sanitize_pdf_document(doc: fitz.Document) -> None:
@@ -268,19 +334,20 @@ def verify_redacted_pdf(pdf_content: bytes, boxes: list[_Box]) -> None:
                     f"page {page_index + 1}: {count} characters remain under redaction {label}"
                 )
 
-            # A box in the wrong place burns the wrong text and leaves the
-            # real one in place, so the character check above cannot see it.
-            # Text-based redactions are therefore checked on the whole page.
+            # "All occurrences" redactions promise the string is gone from
+            # the page. Manual boxes cover one occurrence; the same string
+            # may stay elsewhere, and their placement was checked before
+            # burning (_check_placement).
             page_text = _normalise_text(page.get_text())
             for box in page_boxes:
-                if not box.text:
+                if not (box.text and box.page_scope):
                     continue
                 needle = _normalise_text(box.text)
-                if _text_survives(needle, page_text, whole_word=not box.page_scope):
+                if needle and needle in page_text:
                     problems.append(
                         f"page {page_index + 1}: redacted text of {box.label} is still "
-                        "extractable on the page (the box may be misplaced, or the text "
-                        "occurs again outside it)"
+                        f"extractable on the page: an occurrence of {box.text!r} was "
+                        "not redacted"
                     )
     finally:
         doc.close()
@@ -313,6 +380,7 @@ def apply_redactions_to_pdf(pdf_content: bytes, redactions: list[dict]) -> bytes
             raise RedactionError("Failed to apply redactions: PDF is password protected")
         check_page_count(doc.page_count)
         boxes = _prepare_boxes(doc, list(redactions or []))
+        _check_placement(doc, boxes)
         _burn(doc, boxes)
         sanitize_pdf_document(doc)
 

@@ -44,8 +44,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unrotated page space, so a redaction placed from them on a /Rotate 90/270
   page was burned in the wrong place. Every coordinate the API returns is now
   in the viewer's (rotated) space, redactions and suggestions record
-  `coord_space` and `page_rotation`, and verification checks that a
-  text-based redaction's string is gone from the whole page.
+  `coord_space` and `page_rotation`. Before burning, every redaction that
+  carries text must sit on that text, so a misplaced box fails the export
+  or release. After burning, nothing may remain under any box, and bulk
+  text and AI bulk apply redactions (which cover every occurrence) must
+  leave no occurrence on the page. A manual box covers one occurrence, so
+  the same text may stay elsewhere on the page.
 - Resolving a contest as kept only approves a proposed or contested
   redaction, and a contest can be resolved once (409 otherwise). Rejected
   redactions cannot be contested.

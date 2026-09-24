@@ -300,9 +300,9 @@ class TestRotatedPages:
 
     @pytest.mark.parametrize("rotation", [90, 270])
     def test_misplaced_text_box_fails_verification(self, rotation: int) -> None:
-        """C1 reproduction: an unrotated box treated as displayed space burns
-        the wrong area. The character check only looks inside that area, so
-        the whole-page text check must catch the surviving string."""
+        """C1 reproduction: an unrotated box treated as displayed space lands
+        on the wrong area. The character check only looks inside that area,
+        so the pre-check must see that the box does not hold its text."""
         from src.utils.pdf_redaction import RedactionVerificationError
 
         doc = fitz.open()
@@ -313,8 +313,10 @@ class TestRotatedPages:
         pdf = doc.tobytes()
         doc.close()
 
-        wrong = _box(unrotated, text=SECRET, coord_space="displayed", page_rotation=rotation)
-        with pytest.raises(RedactionVerificationError, match="still extractable"):
+        wrong = _box(
+            unrotated, id="r1", text=SECRET, coord_space="displayed", page_rotation=rotation
+        )
+        with pytest.raises(RedactionVerificationError, match="misplaced"):
             apply_redactions_to_pdf(pdf, [wrong])
 
 
@@ -412,44 +414,6 @@ class TestVerification:
         with pytest.raises(RedactionVerificationError, match="remain under redaction"):
             apply_redactions_to_pdf(pdf, [_box(rect, id="r1")])
 
-    def test_page_scope_text_redaction_must_remove_every_occurrence(self) -> None:
-        """Bulk text redactions promise every occurrence on the page. If a
-        second occurrence is left, verification fails."""
-        from src.utils.pdf_redaction import RedactionVerificationError
-
-        doc = fitz.open()
-        page = doc.new_page()
-        page.insert_text((72, 100), SECRET, fontsize=12)
-        page.insert_text((72, 400), SECRET, fontsize=12)
-        first = page.search_for(SECRET)[0]
-        pdf = doc.tobytes()
-        doc.close()
-
-        with pytest.raises(RedactionVerificationError, match="still extractable"):
-            apply_redactions_to_pdf(pdf, [_box(first, text=SECRET, source="bulk_text")])
-
-        # Any text-based redaction is checked against the whole page (C1),
-        # so a manual box carrying the text fails the same way.
-        with pytest.raises(RedactionVerificationError, match="still extractable"):
-            apply_redactions_to_pdf(pdf, [_box(first, text=SECRET, source="manual")])
-
-        # A box without text is only checked inside the box.
-        out = apply_redactions_to_pdf(pdf, [_box(first, source="manual")])
-        assert _all_text(out).count(SECRET) == 1
-
-    def test_manual_text_check_matches_whole_words(self) -> None:
-        """A manual redaction of "Ann" must not fail because "Annual" stays."""
-        doc = fitz.open()
-        page = doc.new_page()
-        page.insert_text((72, 100), "Ann", fontsize=12)
-        page.insert_text((72, 400), "Annual report", fontsize=12)
-        first = page.search_for("Ann")[0]
-        pdf = doc.tobytes()
-        doc.close()
-
-        out = apply_redactions_to_pdf(pdf, [_box(first, text="Ann", source="manual")])
-        assert "Annual report" in _all_text(out)
-
     def test_image_pixels_under_box_are_blanked(self) -> None:
         doc = fitz.open()
         page = doc.new_page(width=200, height=200)
@@ -468,3 +432,149 @@ class TestVerification:
         assert image.pixel(100, 100) != (255, 0, 0)  # under the box: gone
         assert image.pixel(10, 10) == (255, 0, 0)  # outside: kept
         result.close()
+
+
+def _two_johns_pdf() -> tuple[bytes, fitz.Rect, fitz.Rect]:
+    """One page with "John" twice. Returns the bytes and both boxes."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 100), "Witness: John Smith", fontsize=12)
+    page.insert_text((72, 400), "Signed by John on Monday", fontsize=12)
+    first, second = page.search_for("John")
+    pdf = doc.tobytes()
+    doc.close()
+    return pdf, first, second
+
+
+class TestTextChecks:
+    """Redactions that carry ``text``: the box must hold that text before it
+    is burned (misplacement guard), and only "all occurrences" redactions
+    promise the string is gone from the whole page."""
+
+    @pytest.mark.parametrize("source", ["manual", "proposal", None])
+    def test_manual_box_over_one_occurrence_keeps_the_other(self, source: str | None) -> None:
+        pdf, first, _ = _two_johns_pdf()
+        extra = {"source": source} if source else {}  # None: legacy record
+        out = apply_redactions_to_pdf(pdf, [_box(first, id="r1", text="John", **extra)])
+        text = _all_text(out)
+        assert "Witness:" in text and "Smith" in text
+        assert "Signed by John on Monday" in text
+        assert text.count("John") == 1
+
+    @pytest.mark.parametrize("source", ["manual", None])
+    def test_manual_box_over_blank_space_is_misplaced(self, source: str | None) -> None:
+        from src.utils.pdf_redaction import RedactionVerificationError
+
+        pdf, _, _ = _two_johns_pdf()
+        blank = fitz.Rect(300, 600, 340, 614)
+        extra = {"source": source} if source else {}
+        with pytest.raises(RedactionVerificationError, match="misplaced") as exc:
+            apply_redactions_to_pdf(pdf, [_box(blank, id="r-blank", text="John", **extra)])
+        message = str(exc.value)
+        assert "r-blank" in message
+        assert "page 1" in message
+        assert "'John'" in message
+
+    def test_box_over_other_text_is_misplaced(self) -> None:
+        from src.utils.pdf_redaction import RedactionVerificationError
+
+        pdf, rect = _secret_pdf()
+        doc = fitz.open(stream=pdf, filetype="pdf")
+        public = doc[0].search_for("public text here")[0]
+        doc.close()
+        with pytest.raises(RedactionVerificationError, match="misplaced"):
+            apply_redactions_to_pdf(pdf, [_box(public, id="r1", text=SECRET, source="manual")])
+        # The same text on the right box is fine.
+        apply_redactions_to_pdf(pdf, [_box(rect, id="r1", text=SECRET, source="manual")])
+
+    def test_misplaced_box_is_refused_before_burning(self, monkeypatch) -> None:
+        from src.utils.pdf_redaction import RedactionVerificationError
+
+        calls: list[int] = []
+        original = fitz.Page.apply_redactions
+
+        def spy(self, *args, **kwargs):
+            calls.append(1)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(fitz.Page, "apply_redactions", spy)
+        pdf, _, _ = _two_johns_pdf()
+        with pytest.raises(RedactionVerificationError, match="misplaced"):
+            apply_redactions_to_pdf(pdf, [_box(fitz.Rect(300, 600, 340, 614), text="John")])
+        assert calls == []
+
+    def test_box_over_part_of_the_text_passes(self) -> None:
+        """A box that covers part of the string (a partial word, or one line
+        of a string that wraps) is not misplaced."""
+        pdf, rect = _secret_pdf()
+        half = fitz.Rect(rect.x0, rect.y0, (rect.x0 + rect.x1) / 2, rect.y1)
+        out = apply_redactions_to_pdf(pdf, [_box(half, text=SECRET, source="manual")])
+        assert SECRET not in _all_text(out)
+
+        pdf, first, _ = _two_johns_pdf()
+        apply_redactions_to_pdf(pdf, [_box(first, text="John Smith", source="bulk_text")])
+
+    def test_text_is_compared_case_and_whitespace_insensitively(self) -> None:
+        pdf, first, _ = _two_johns_pdf()
+        apply_redactions_to_pdf(pdf, [_box(first, text="  JOHN\n", source="manual")])
+
+    def test_box_over_image_only_content_is_not_prechecked(self) -> None:
+        """OCR-located boxes on scanned pages have no text layer to check."""
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=200)
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 200), False)
+        pix.set_rect(pix.irect, (255, 255, 255))
+        page.insert_image(page.rect, pixmap=pix)
+        pdf = doc.tobytes()
+        doc.close()
+
+        box = {"page": 1, "x": 50, "y": 50, "width": 60, "height": 14, "text": "John"}
+        apply_redactions_to_pdf(pdf, [dict(box, source="bulk_text")])
+        apply_redactions_to_pdf(pdf, [dict(box, source="manual")])
+
+    @pytest.mark.parametrize("source", ["bulk_text", "ai_bulk_apply"])
+    def test_all_occurrences_record_must_remove_every_occurrence(self, source: str) -> None:
+        from src.utils.pdf_redaction import RedactionVerificationError
+
+        pdf, first, second = _two_johns_pdf()
+        with pytest.raises(RedactionVerificationError, match="still extractable"):
+            apply_redactions_to_pdf(pdf, [_box(first, id="b1", text="John", source=source)])
+
+        out = apply_redactions_to_pdf(
+            pdf,
+            [
+                _box(first, id="b1", text="John", source=source),
+                _box(second, id="b2", text="John", source=source),
+            ],
+        )
+        assert "John" not in _all_text(out)
+
+    def test_all_occurrences_check_matches_inside_longer_words(self) -> None:
+        """A text search marks every occurrence, so "Ann" left inside
+        "Annual" means an occurrence was missed."""
+        from src.utils.pdf_redaction import RedactionVerificationError
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 100), "Ann", fontsize=12)
+        page.insert_text((72, 400), "Annual report", fontsize=12)
+        first = page.search_for("Ann")[0]
+        pdf = doc.tobytes()
+        doc.close()
+
+        with pytest.raises(RedactionVerificationError, match="still extractable"):
+            apply_redactions_to_pdf(pdf, [_box(first, text="Ann", source="bulk_text")])
+        out = apply_redactions_to_pdf(pdf, [_box(first, text="Ann", source="manual")])
+        assert "Annual report" in _all_text(out)
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_rotated_displayed_box_passes_precheck(self, rotation: int) -> None:
+        pdf, displayed = _secret_pdf(rotation)
+        box = _box(
+            displayed,
+            text=SECRET,
+            source="bulk_text",
+            coord_space="displayed",
+            page_rotation=rotation,
+        )
+        assert SECRET not in _all_text(apply_redactions_to_pdf(pdf, [box]))
