@@ -695,7 +695,7 @@ async def contributor_upload_document(
             "duplicate_of_filename": result.duplicate_of_filename,
         }
     elif result.status in [ProcessingStatus.VALIDATION_FAILED, ProcessingStatus.ERROR]:
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(status_code=result.http_status or 400, detail=result.message)
 
     return {
         "success": True,

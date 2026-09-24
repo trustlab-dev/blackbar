@@ -43,11 +43,12 @@ from fastapi import BackgroundTasks, HTTPException, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import MongoClient
 
-from src.config import MONGODB_URI
+from src.config import MAX_UPLOAD_SIZE_MB, MONGODB_URI
 from src.utils.conversion import (
     calculate_file_hash,
     convert_to_pdf,
 )
+from src.utils.pdf_limits import PdfLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ ALLOWED_MIME_TYPES = {
     "image/webp",
 }
 
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_FILE_SIZE = MAX_UPLOAD_SIZE_MB * 1024 * 1024  # MAX_UPLOAD_SIZE_MB, default 100
 
 # Server-side MIME type for each accepted extension. Used for records whose
 # conversion failed (so native bytes are never labelled application/pdf) and
@@ -278,6 +279,9 @@ class ProcessingResult:
     # Warnings/errors
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    # HTTP status the upload routes should use for VALIDATION_FAILED
+    # (None means 400); 413 when the file exceeds a processing limit.
+    http_status: int | None = None
 
 
 @dataclass
@@ -459,7 +463,18 @@ class DocumentProcessingService:
             text_data = None
             text_summary = None
             if pdf_content:
-                text_data, text_summary = await self._extract_text(pdf_content, filename)
+                try:
+                    text_data, text_summary = await self._extract_text(pdf_content, filename)
+                except PdfLimitExceeded as exc:
+                    # Reject rather than store a document no later step
+                    # (redaction, release) can process (DOC-09).
+                    message = f"{filename} exceeds a processing limit: {exc}"
+                    logger.warning(message)
+                    result.status = ProcessingStatus.VALIDATION_FAILED
+                    result.error = message
+                    result.message = message
+                    result.http_status = 413
+                    return result
                 result.has_ocr = text_data is not None
             # Bulk search reads extracted_text; direct PDF uploads only have
             # the OCR/native text layer (DOC-12).
@@ -690,6 +705,8 @@ class DocumentProcessingService:
 
             return text_data, text_summary
 
+        except PdfLimitExceeded:
+            raise
         except Exception as e:
             logger.error(f"OCR failed for {filename}: {str(e)}")
             return None, None

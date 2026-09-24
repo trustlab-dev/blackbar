@@ -249,6 +249,11 @@ class Config:
         # (the default) leaves the middleware off.
         self.TRUSTED_HOSTS = _split_csv(os.getenv("TRUSTED_HOSTS"))
 
+        # Upload size cap in MB for every upload route (default 100; keep the
+        # frontend nginx client_max_body_size in step). Invalid values -> 100.
+        size_mb = _env_int("MAX_UPLOAD_SIZE_MB", 100)
+        self.MAX_UPLOAD_SIZE_MB = size_mb if size_mb > 0 else 100
+
     def _load_jwt_secret(self) -> str:
         secret = os.getenv("JWT_SECRET") or ""
         problem = "is not set" if not secret else jwt_secret_weakness(secret)
@@ -332,3 +337,4 @@ ALGORITHM = config.ALGORITHM
 MONGODB_URI = config.MONGODB_URI
 ALLOWED_ORIGINS = config.ALLOWED_ORIGINS
 ACCESS_TOKEN_EXPIRE_MINUTES = config.ACCESS_TOKEN_EXPIRE_MINUTES
+MAX_UPLOAD_SIZE_MB = config.MAX_UPLOAD_SIZE_MB

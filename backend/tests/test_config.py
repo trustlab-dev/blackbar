@@ -281,6 +281,33 @@ class TestSecuritySettings:
         assert Config().TRUSTED_HOSTS == ["foi.example.org", "localhost"]
 
 
+class TestMaxUploadSize:
+    def test_default_is_100_mb(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.delenv("MAX_UPLOAD_SIZE_MB", raising=False)
+        assert Config().MAX_UPLOAD_SIZE_MB == 100
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "25")
+        assert Config().MAX_UPLOAD_SIZE_MB == 25
+
+    @pytest.mark.parametrize("value", ["20MB", "0", "-5"])
+    def test_invalid_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch, value):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", value)
+        assert Config().MAX_UPLOAD_SIZE_MB == 100
+
+    def test_processing_service_uses_configured_limit(self):
+        from src import config as config_mod
+        from src.documents import processing_service
+
+        assert processing_service.MAX_FILE_SIZE == config_mod.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+
 class TestPublicBaseUrl:
     def test_prefers_public_base_url(self, monkeypatch: pytest.MonkeyPatch):
         from src.config import public_base_url

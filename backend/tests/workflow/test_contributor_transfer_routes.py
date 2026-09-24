@@ -723,6 +723,7 @@ class TestContributorUpload:
         class _Bad:
             status = ps_mod.ProcessingStatus.VALIDATION_FAILED
             message = "Bad file"
+            http_status = None
 
         async def _fake(self, *args, **kwargs):
             return _Bad()

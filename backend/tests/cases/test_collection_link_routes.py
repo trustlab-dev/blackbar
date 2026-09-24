@@ -590,6 +590,7 @@ class TestUploadCollectionPublic:
         class _FailResult:
             status = ps_mod.ProcessingStatus.VALIDATION_FAILED
             message = "Bad file"
+            http_status = None
 
         async def _fake(self, *args, **kwargs):
             return _FailResult()
@@ -606,3 +607,38 @@ class TestUploadCollectionPublic:
             },
         )
         assert r.status_code == 400
+
+    async def test_upload_over_processing_limit_returns_413(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A processing-limit rejection (e.g. too many PDF pages) keeps its 413."""
+        await _seed_case(
+            db,
+            collection_links=[
+                {"id": "lk413", "token": "tl-tok", "is_active": True, "upload_count": 0}
+            ],
+        )
+
+        from src.documents import processing_service as ps_mod
+
+        async def _fake(self, *args, **kwargs):
+            return ps_mod.ProcessingResult(
+                status=ps_mod.ProcessingStatus.VALIDATION_FAILED,
+                message="long.pdf exceeds a processing limit",
+                http_status=413,
+            )
+
+        monkeypatch.setattr(ps_mod.DocumentProcessingService, "process_upload", _fake)
+
+        client: AsyncClient = await authed_client_factory(role="user")
+        r = await client.post(
+            "/api/v1/cases/collect/tl-tok/upload",
+            files={"file": ("long.pdf", b"%PDF-1.4", "application/pdf")},
+            data={"submitter_name": "X", "submitter_email": "x@example.com"},
+        )
+        assert r.status_code == 413
+        assert "processing limit" in r.json()["error"]["message"]

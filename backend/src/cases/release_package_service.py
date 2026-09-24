@@ -727,23 +727,51 @@ async def get_current_package_state(
     """
     Get current draft and released packages for a case.
 
+    ``current_draft`` is the newest generating/draft package. When there is
+    none, it is the case's latest package if that one FAILED, so a failed
+    generation stays visible after a reload until a newer package replaces it.
+
+    ``current_release`` is the RELEASED package, or failing that the most
+    recently released package if it has since EXPIRED. Revoked packages are
+    deliberately hidden.
+
     Returns:
         Tuple of (current_draft, current_release)
     """
-    # Get current draft (generating or draft status)
+    newest_first = [("created_at", -1)]
     current_draft = await db.release_packages.find_one(
         {
             "case_id": case_id,
             "status": {
                 "$in": [ReleasePackageStatus.GENERATING.value, ReleasePackageStatus.DRAFT.value]
             },
-        }
+        },
+        sort=newest_first,
     )
+    if current_draft is None:
+        latest = await db.release_packages.find_one({"case_id": case_id}, sort=newest_first)
+        if latest and latest.get("status") == ReleasePackageStatus.FAILED.value:
+            current_draft = latest
 
-    # Get current release
     current_release = await db.release_packages.find_one(
-        {"case_id": case_id, "status": ReleasePackageStatus.RELEASED.value}
+        {"case_id": case_id, "status": ReleasePackageStatus.RELEASED.value},
+        sort=newest_first,
     )
+    if current_release is None:
+        latest_released = await db.release_packages.find_one(
+            {
+                "case_id": case_id,
+                "status": {
+                    "$in": [
+                        ReleasePackageStatus.EXPIRED.value,
+                        ReleasePackageStatus.REVOKED.value,
+                    ]
+                },
+            },
+            sort=[("released_at", -1), ("created_at", -1)],
+        )
+        if latest_released and latest_released.get("status") == ReleasePackageStatus.EXPIRED.value:
+            current_release = latest_released
 
     draft = ReleasePackageDB(**current_draft) if current_draft else None
     release = ReleasePackageDB(**current_release) if current_release else None

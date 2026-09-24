@@ -21,6 +21,7 @@ def _sanitize_filename(name: str) -> str:
 
 
 import asyncio
+import copy
 import logging
 import os
 import uuid
@@ -48,7 +49,11 @@ from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
 )
 from src.utils.pdf_limits import PdfLimitExceeded
 from src.utils.pdf_redaction import RedactionError, apply_redactions_to_pdf
-from src.utils.redaction_records import RedactionValidationError, partition_redactions
+from src.utils.redaction_records import (
+    RedactionValidationError,
+    ensure_redaction_ids,
+    partition_redactions,
+)
 
 from ..core.authz import assert_case_access, check_document_access, has_global_access
 from ..database import db
@@ -294,15 +299,45 @@ async def get_document_metadata(
             "pages": [],  # No page-level data for simple extraction
         }
 
+    redactions = await _redactions_with_ids(db, doc)
+
     return {
         "id": doc["id"],
         "filename": doc["filename"],
-        "redactions": doc.get("redactions", []),
+        "redactions": redactions,
         "text_data": text_data,
         "text_summary": doc.get("text_summary"),
         "mime_type": doc.get("mime_type"),
         "size": doc.get("size"),
+        "status": doc.get("status"),
+        "conversion_failed": bool(
+            doc.get("conversion_failed") or doc.get("status") == "conversion_failed"
+        ),
     }
+
+
+async def _redactions_with_ids(db, doc: dict) -> list[dict]:
+    """Return the document's redactions, giving legacy records without an id
+    a uuid and saving it so clients can address every record by id.
+
+    The write is conditional on the array being unchanged since it was read,
+    so a concurrent edit is never overwritten; on a lost race we re-read.
+    """
+    redactions = doc.get("redactions") or []
+    for _ in range(3):
+        original = copy.deepcopy(redactions)
+        if not ensure_redaction_ids(redactions):
+            return redactions
+        result = await db.documents.update_one(
+            {"id": doc["id"], "redactions": original},
+            {"$set": {"redactions": redactions}},
+        )
+        if result.matched_count:
+            return redactions
+        fresh = await db.documents.find_one({"id": doc["id"]}, {"redactions": 1})
+        redactions = (fresh or {}).get("redactions") or []
+    logger.warning("Could not persist backfilled redaction ids for document %s", doc["id"])
+    return redactions
 
 
 # EXPORT DOCUMENT WITH APPLIED REDACTIONS
@@ -427,7 +462,6 @@ ALLOWED_EXTENSIONS = [
     ".tif",
     ".webp",
 ]
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB — matches processing_service.py
 
 
 async def merge_attachments_into_existing_email(
@@ -681,7 +715,7 @@ async def upload_document(
             "upload_date": None,  # Could fetch from DB if needed
         }
     elif result.status == ProcessingStatus.VALIDATION_FAILED:
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(status_code=result.http_status or 400, detail=result.message)
     elif result.status == ProcessingStatus.CONVERSION_FAILED:
         # Still return success but with warning
         logger.warning(f"Conversion failed for {file.filename}: {result.error}")

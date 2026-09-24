@@ -6,6 +6,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Breaking:** JWT secrets that are placeholders, short or low-entropy are
+  rejected; production refuses to start without a strong `JWT_SECRET`.
+- **Breaking:** public-portal (magic-link) tokens get 403
+  `PUBLIC_TOKEN_FORBIDDEN` on staff routes.
+- **Breaking:** passwords must be 12 to 72 bytes. Logout, password change,
+  disable and role change revoke existing tokens.
+- **Breaking:** LLM endpoints must use https (plain http only for loopback);
+  private and link-local ranges need `LLM_ALLOW_PRIVATE_ENDPOINTS=true`.
+- Rate limits on login, magic link, reset, activation and public tracking
+  lookup; `X-Forwarded-For` trusted only from `TRUSTED_PROXIES`; no response
+  carries password hashes.
+- Email attachment names can no longer write outside the work directory; uploads
+  are size-capped while streaming (413) and must match their file type (415).
+- Released and exported PDFs are sanitised (metadata, attachments, annotations,
+  links, JavaScript) and re-checked for text left under redaction boxes.
+- LLM provider keys no longer leak through URLs, errors or logs; disabled
+  configs are never used; model output is schema-validated.
+- Frontend: same-origin login redirects, Sentry scrubbing, CSP and security
+  headers, pdf.js eval disabled.
+
+### Fixed
+
+- AI bulk apply stored zero-area redactions, so released PDFs kept the text.
+  Redactions now carry validated geometry (422 on invalid boxes).
+- Failed conversions are never released; email threading (#71-#75) and
+  attachment dedup (#70) repaired.
+- Failed and expired release packages stay visible after a reload.
+- Dict error details (`{message, errors}`) reach clients as `error.message` plus
+  `error.details`, not a Python repr.
+- PDFs over `BLACKBAR_MAX_PDF_PAGES` are rejected at upload (413) instead of
+  being stored without text.
+- Attachment downloads read GridFS content and use RFC 6266 filenames.
+
+### Changed
+
+- **Breaking:** approve and contest address redactions by stable id, not array
+  index. Document metadata backfills missing ids and returns `status` and
+  `conversion_failed`.
+- **Breaking:** only approved redactions are burned in on export and release;
+  proposed or contested ones block the document (409).
+- Long documents are analysed by the LLM in overlapping chunks; per-user rate
+  limit, per-document cooldown and timeouts are configurable.
+- Upload limit read from `MAX_UPLOAD_SIZE_MB` (default 100); `.env.example`
+  drops `OPENAI_API_KEY` and documents the new settings.
+
+### Dependencies
+
+- Backend: CVE floors raised (pillow, jinja2, pymongo, python-multipart,
+  sentry-sdk, cryptography, anyio, protobuf); unused openai, anthropic, cohere
+  and python-dotenv removed; passlib replaced by bcrypt.
+- Frontend and e2e: react-router-dom 7.18.4, vite 8.3.0, axios 1.20.0, react
+  19.3.0, @playwright/test 1.63.0; npm audit clean.
+
 ## [0.1.0] - 2026-07-24
 
 First tagged release. Everything below shipped in `v0.1.0`, on top of the

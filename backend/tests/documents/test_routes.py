@@ -393,9 +393,14 @@ class TestGetDocumentMetadata:
             "text_summary",
             "mime_type",
             "size",
+            "status",
+            "conversion_failed",
         }
         assert body["filename"] == "meta.pdf"
-        assert body["redactions"] == [{"x": 1, "y": 2}]
+        assert len(body["redactions"]) == 1
+        assert {k: v for k, v in body["redactions"][0].items() if k != "id"} == {"x": 1, "y": 2}
+        assert body["status"] == doc.get("status")
+        assert body["conversion_failed"] is False
         assert body["text_data"] == {
             "full_text": "Hello",
             "pages": [{"page": 1, "text": "Hello"}],
@@ -422,6 +427,54 @@ class TestGetDocumentMetadata:
             "full_text": "Plain text extraction",
             "pages": [],
         }
+
+    async def test_metadata_backfills_and_persists_redaction_ids(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Legacy redactions without an id get a stable uuid, saved to the
+        document, so approve/contest by id works for them."""
+        import uuid
+
+        client = await authed_client_factory(role="admin")
+        doc = make_document(
+            redactions=[
+                {"id": "keep-me", "x": 1},
+                {"x": 2},
+                {"id": None, "x": 3},
+            ]
+        )
+        await db.documents.insert_one(doc)
+
+        r = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        assert r.status_code == 200, r.text
+        ids = [red["id"] for red in r.json()["redactions"]]
+        assert ids[0] == "keep-me"
+        for new_id in ids[1:]:
+            uuid.UUID(new_id)
+
+        stored = await db.documents.find_one({"id": doc["id"]})
+        assert [red["id"] for red in stored["redactions"]] == ids
+
+        # Stable across reads
+        r2 = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        assert [red["id"] for red in r2.json()["redactions"]] == ids
+
+    async def test_metadata_reports_status_and_conversion_failure(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="admin")
+        doc = make_document(status="conversion_failed", conversion_failed=True)
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        body = r.json()
+        assert body["status"] == "conversion_failed"
+        assert body["conversion_failed"] is True
 
     async def test_metadata_not_found(
         self,
@@ -739,6 +792,31 @@ class TestUploadDocument:
         assert r.status_code == 400
         # error_handler wraps detail string in `error.message` envelope
         assert "Invalid file type" in r.text
+
+    async def test_upload_over_processing_limit_returns_413(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="admin")
+        from src.documents.processing_service import ProcessingResult, ProcessingStatus
+
+        mock_result = ProcessingResult(
+            status=ProcessingStatus.VALIDATION_FAILED,
+            message="Document has 3000 pages; the limit is 2000 pages per document.",
+            http_status=413,
+        )
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("long.pdf", _make_minimal_pdf_bytes(), "application/pdf")},
+            )
+
+        assert r.status_code == 413
+        assert "limit is 2000 pages" in r.json()["error"]["message"]
 
     async def test_upload_conversion_failed_returns_200_with_warning(
         self,
@@ -2107,6 +2185,40 @@ class TestGenerateAISuggestionsAsync:
         assert updated["ai_suggestions"]["method"] == "llm"
         assert updated["ai_suggestions"]["provider"] == "openai"
         assert updated["ai_suggestions"]["model"] == "test-model"
+
+    async def test_enrichment_reads_pdf_from_gridfs(
+        self, db: AsyncIOMotorDatabase, patch_routes_db, monkeypatch
+    ) -> None:
+        """Current uploads have no inline ``content``; the PDF comes from
+        GridFS (DOC-12)."""
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+        from src.documents import routes as documents_routes
+        from src.documents.routes import generate_ai_suggestions_async
+
+        file_id = await AsyncIOMotorGridFSBucket(db).upload_from_stream("g.pdf", b"%PDF-grid")
+        doc = make_document(
+            id="ai-grid", extracted_text="Alice", content_file_id=str(file_id), content=None
+        )
+        await db.documents.insert_one(doc)
+
+        async def fake_suggestions(text, ctx=None):
+            return {"suggestions": [{"text": "Alice"}], "summary": ""}
+
+        seen: list[bytes] = []
+
+        def fake_enrich(suggestions, pdf, text_data):
+            seen.append(pdf)
+            return suggestions
+
+        monkeypatch.setattr(documents_routes, "get_redaction_suggestions", fake_suggestions)
+        monkeypatch.setattr(documents_routes, "enrich_suggestions_with_coordinates", fake_enrich)
+
+        await generate_ai_suggestions_async("ai-grid", timeout=5, db=db)
+
+        assert seen == [b"%PDF-grid"]
+        updated = await db.documents.find_one({"id": "ai-grid"})
+        assert updated["processing_status"] == "ai_complete"
 
     async def test_doc_not_found_returns_early(
         self, db: AsyncIOMotorDatabase, patch_routes_db

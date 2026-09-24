@@ -357,6 +357,16 @@ class TestExtractText:
         assert len(data["full_text"]) == 500_000
         assert data["truncated"] is True
 
+    async def test_limit_exceeded_is_not_swallowed(self, service) -> None:
+        from src.utils.pdf_limits import PdfLimitExceeded
+
+        with patch(
+            "src.documents.routes.extract_text_with_coordinates",
+            AsyncMock(side_effect=PdfLimitExceeded("too many pages")),
+        ):
+            with pytest.raises(PdfLimitExceeded):
+                await service._extract_text(b"%PDF", "doc.pdf")
+
     async def test_exception_returns_none(self, service) -> None:
         with patch(
             "src.documents.routes.extract_text_with_coordinates",
@@ -1225,6 +1235,36 @@ class TestProcessUploadOrchestration:
         )
         assert result.status == ProcessingStatus.VALIDATION_FAILED
         assert "Invalid file type" in result.error
+
+    async def test_pdf_over_page_limit_is_rejected_not_stored(
+        self, service, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        """An upload over BLACKBAR_MAX_PDF_PAGES must fail validation (413),
+        not be stored with no text (DOC-09)."""
+        import fitz
+
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+        from src.utils import pdf_limits
+
+        monkeypatch.setattr(pdf_limits, "MAX_PDF_PAGES", 2)
+        pdf = fitz.open()
+        for _ in range(3):
+            pdf.new_page(width=100, height=100).insert_text((10, 50), "text", fontsize=8)
+        content = pdf.tobytes()
+        pdf.close()
+
+        result = await service.process_upload(
+            file_content=content,
+            filename="long.pdf",
+            content_type="application/pdf",
+            context=UploadContext(),
+        )
+        assert result.status == ProcessingStatus.VALIDATION_FAILED
+        assert result.http_status == 413
+        assert "3 pages" in result.message and "limit is 2" in result.message
+        assert result.document_id is None
+        assert await db.documents.count_documents({}) == 0
+        assert patch_gridfs_stack["puts"] == []
 
     async def test_duplicate_by_hash_short_circuits(self, service, db, patch_gridfs_stack) -> None:
         from src.documents.processing_service import (
