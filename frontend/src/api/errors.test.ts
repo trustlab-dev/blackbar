@@ -1,0 +1,84 @@
+import { describe, it, expect } from 'vitest';
+import { AxiosError, AxiosHeaders } from 'axios';
+import { getApiErrorMessage, DEFAULT_ERROR_MESSAGE } from './errors';
+
+function axiosError(status: number, data: unknown): AxiosError {
+  const config = { headers: new AxiosHeaders() };
+  return new AxiosError('Request failed', 'ERR_BAD_RESPONSE', config, null, {
+    status,
+    statusText: '',
+    headers: {},
+    config,
+    data,
+  });
+}
+
+describe('getApiErrorMessage', () => {
+  it('reads the standard backend envelope {error: {message}}', () => {
+    const err = axiosError(404, {
+      error: { code: 'HTTP_404', message: 'Case not found', details: {}, correlation_id: 'x' },
+    });
+    expect(getApiErrorMessage(err, 'fallback')).toBe('Case not found');
+  });
+
+  it('reads a {error: code, message} body (e.g. magic-link invalid_token)', () => {
+    const err = axiosError(400, {
+      error: 'invalid_token',
+      message: 'Magic link is invalid or has expired.',
+    });
+    expect(getApiErrorMessage(err, 'fallback')).toBe('Magic link is invalid or has expired.');
+  });
+
+  it('reads a legacy FastAPI {detail: string} body', () => {
+    expect(getApiErrorMessage(axiosError(400, { detail: 'Bad thing' }), 'fb')).toBe('Bad thing');
+  });
+
+  it('reads the first message of a FastAPI validation {detail: [...]} array', () => {
+    const err = axiosError(422, { detail: [{ loc: ['body', 'email'], msg: 'field required' }] });
+    expect(getApiErrorMessage(err, 'fb')).toBe('email: field required');
+    const noLoc = axiosError(422, { detail: [{ msg: 'field required' }] });
+    expect(getApiErrorMessage(noLoc, 'fb')).toBe('field required');
+  });
+
+  it('adds the first validation error to the envelope message', () => {
+    const err = axiosError(422, {
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid request data',
+        details: { errors: [{ loc: ['body', 'password'], msg: 'String too short' }] },
+      },
+    });
+    expect(getApiErrorMessage(err, 'fb')).toBe(
+      'Invalid request data: password: String too short',
+    );
+  });
+
+  it('never returns a non-string (objects would crash React rendering)', () => {
+    expect(getApiErrorMessage(axiosError(400, { detail: { nested: true } }), 'fb')).toBe('fb');
+    expect(getApiErrorMessage(axiosError(400, { error: { message: 42 } }), 'fb')).toBe('fb');
+    expect(getApiErrorMessage(axiosError(400, { detail: [] }), 'fb')).toBe('fb');
+  });
+
+  it('uses the fallback for 5xx responses so internal messages stay generic', () => {
+    const err = axiosError(500, { error: { message: 'Internal server error' } });
+    expect(getApiErrorMessage(err, 'Failed to save')).toBe('Failed to save');
+  });
+
+  it('uses the fallback for non-JSON bodies (e.g. blob downloads)', () => {
+    expect(getApiErrorMessage(axiosError(400, new Blob(['x'])), 'fb')).toBe('fb');
+    expect(getApiErrorMessage(axiosError(400, 'plain text'), 'fb')).toBe('fb');
+    expect(getApiErrorMessage(axiosError(400, null), 'fb')).toBe('fb');
+  });
+
+  it('reports timeouts explicitly', () => {
+    const err = new AxiosError('timeout of 30000ms exceeded', 'ECONNABORTED');
+    expect(getApiErrorMessage(err, 'fb')).toMatch(/timed out/i);
+  });
+
+  it('uses the fallback for network errors and non-axios values', () => {
+    expect(getApiErrorMessage(new AxiosError('Network Error', 'ERR_NETWORK'), 'fb')).toBe('fb');
+    expect(getApiErrorMessage(new Error('boom'), 'fb')).toBe('fb');
+    expect(getApiErrorMessage(undefined, 'fb')).toBe('fb');
+    expect(getApiErrorMessage('oops')).toBe(DEFAULT_ERROR_MESSAGE);
+  });
+});

@@ -21,7 +21,8 @@ import Refresh from '@mui/icons-material/Refresh';
 import Collapse from '@mui/material/Collapse';
 import ExpandMore from '@mui/icons-material/ExpandMore';
 import ExpandLess from '@mui/icons-material/ExpandLess';
-import api from '../../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface Suggestion {
   text: string;
@@ -140,22 +141,17 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
     setErrorMessage('');
     try {
       const response = await api.get(`/documents/${documentId}/redaction-suggestions?quick=true`);
-      console.log('Quick PII full response:', response.data);
-      console.log('Quick PII array:', response.data.suggestions);
       const allSuggestions = response.data.suggestions || [];
       
       // Filter out already applied suggestions
       const suggestions = allSuggestions.filter((s: Suggestion) => !isAlreadyRedacted(s));
       
-      console.log('Quick PII suggestions count (after filtering):', suggestions.length);
-      console.log('Filtered out:', allSuggestions.length - suggestions.length);
-      console.log('First Quick PII suggestion:', suggestions[0]);
       setQuickPiiSuggestions(suggestions);
       // Select all by default
       setSelectedQuickPii(new Set(suggestions.map((_: any, i: number) => i)));
     } catch (error: any) {
       console.error('Error fetching quick PII:', error);
-      setErrorMessage(error.response?.data?.detail || 'Failed to load PII suggestions');
+      setErrorMessage(getApiErrorMessage(error, 'Failed to load PII suggestions'));
     } finally {
       setLoadingQuickPii(false);
     }
@@ -170,24 +166,22 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
     setErrorMessage('');
     try {
       const qs = forceRegenerate ? '?quick=false&force_regenerate=true' : '?quick=false';
-      const response = await api.get(`/documents/${documentId}/redaction-suggestions${qs}`);
-      console.log('AI suggestions full response:', response.data);
-      console.log('AI suggestions array:', response.data.suggestions);
+      // LLM-backed; can run well past the default request timeout.
+      const response = await api.get(`/documents/${documentId}/redaction-suggestions${qs}`, {
+        timeout: TRANSFER_TIMEOUT_MS,
+      });
       const allSuggestions = response.data.suggestions || [];
       
       // Filter out already applied suggestions
       const suggestions = allSuggestions.filter((s: Suggestion) => !isAlreadyRedacted(s));
       
-      console.log('AI suggestions count (after filtering):', suggestions.length);
-      console.log('Filtered out:', allSuggestions.length - suggestions.length);
-      console.log('First suggestion:', suggestions[0]);
       setAiSuggestions(suggestions);
       setAiSuggestionsFetched(true);
       // Don't auto-select AI suggestions - user must explicitly choose
       setSelectedAi(new Set());
     } catch (error: any) {
       console.error('Error fetching AI suggestions:', error);
-      setErrorMessage(error.response?.data?.detail || 'Failed to load AI suggestions');
+      setErrorMessage(getApiErrorMessage(error, 'Failed to load AI suggestions'));
       setAiSuggestionsFetched(true);
     } finally {
       setLoadingAi(false);

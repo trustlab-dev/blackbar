@@ -212,7 +212,7 @@ describe('ReleasePackageActions — generate flow', () => {
         HttpResponse.json(emptyState),
       ),
       http.post('/api/v1/cases/case-1/release-package/generate', () =>
-        HttpResponse.json({ detail: 'generation broke' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'generation broke' } }, { status: 400 }),
       ),
     );
     const user = userEvent.setup();

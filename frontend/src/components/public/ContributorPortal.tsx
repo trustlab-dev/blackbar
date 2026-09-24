@@ -23,7 +23,9 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import DescriptionIcon from '@mui/icons-material/Description';
 import WarningIcon from '@mui/icons-material/Warning';
 import { useParams, useLocation } from 'react-router-dom';
-import { publicApi } from '../../api/client';
+import { publicApi, TRANSFER_TIMEOUT_MS } from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
+import { partitionUploadFiles, UPLOAD_ACCEPT } from '../../utils/uploadValidation';
 
 // Phase 4 Batch 4.4 (audit F2): use the shared `publicApi` from
 // `src/api/client.ts` instead of a local axios.create + duplicated
@@ -91,12 +93,18 @@ const ContributorPortal: React.FC = () => {
   }, [fetchContributorInfo]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files || files.length === 0 || !contributorId || !token) return;
+    if (!event.target.files || event.target.files.length === 0 || !contributorId || !token) return;
+
+    // Client-side type/size check (the backend enforces the same limits).
+    const { valid: files, errors } = partitionUploadFiles(Array.from(event.target.files));
+    setError(errors.length > 0 ? errors.join(' ') : null);
+    setSuccess(null);
+    if (files.length === 0) {
+      event.target.value = '';
+      return;
+    }
 
     setUploading(true);
-    setError(null);
-    setSuccess(null);
 
     try {
       for (let i = 0; i < files.length; i++) {
@@ -105,14 +113,15 @@ const ContributorPortal: React.FC = () => {
         formData.append('token', token);
 
         await publicApi.post(`/contribute/${contributorId}/upload`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' }
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: TRANSFER_TIMEOUT_MS,
         });
       }
 
       setSuccess(`Successfully uploaded ${files.length} file(s)`);
       await fetchContributorInfo(); // Refresh the list
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to upload file(s)');
+      setError(getApiErrorMessage(err, 'Failed to upload file(s)'));
     } finally {
       setUploading(false);
       // Reset the file input
@@ -133,7 +142,7 @@ const ContributorPortal: React.FC = () => {
       setSuccess('Thank you! Your records submission has been confirmed.');
       await fetchContributorInfo();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to confirm submission');
+      setError(getApiErrorMessage(err, 'Failed to confirm submission'));
     } finally {
       setConfirming(false);
     }
@@ -230,7 +239,7 @@ const ContributorPortal: React.FC = () => {
             
             <Box sx={{ textAlign: 'center', py: 3, border: '2px dashed #ccc', borderRadius: 2, bgcolor: '#fafafa' }}>
               <input
-                accept="*/*"
+                accept={UPLOAD_ACCEPT}
                 style={{ display: 'none' }}
                 id="file-upload"
                 multiple

@@ -32,7 +32,8 @@ import StarIcon from '@mui/icons-material/Star';
 import TestIcon from '@mui/icons-material/PlayArrow';
 import SuccessIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
-import api from '../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 interface LLMConfigData {
   id: string;
@@ -177,7 +178,7 @@ const LLMConfiguration: React.FC = () => {
       await api.delete(`/llm/configs/${id}`);
       fetchConfigs();
     } catch (error: any) {
-      alert(error.response?.data?.detail || 'Failed to delete configuration');
+      alert(getApiErrorMessage(error, 'Failed to delete configuration'));
     }
   };
 
@@ -194,7 +195,12 @@ const LLMConfiguration: React.FC = () => {
     setTesting(prev => ({ ...prev, [config.id]: true }));
     setTestResults(prev => ({ ...prev, [config.id]: undefined as any }));
     try {
-      const response = await api.post('/llm/test', { config_id: config.id });
+      // A round trip to the model provider can exceed the default timeout.
+      const response = await api.post(
+        '/llm/test',
+        { config_id: config.id },
+        { timeout: TRANSFER_TIMEOUT_MS },
+      );
       const data = response.data;
       setTestResults(prev => ({
         ...prev,
@@ -206,7 +212,7 @@ const LLMConfiguration: React.FC = () => {
     } catch (error: any) {
       setTestResults(prev => ({
         ...prev,
-        [config.id]: { success: false, message: error.response?.data?.detail || 'Connection failed' }
+        [config.id]: { success: false, message: getApiErrorMessage(error, 'Connection failed') }
       }));
     } finally {
       setTesting(prev => ({ ...prev, [config.id]: false }));

@@ -1,8 +1,8 @@
 // frontend/src/components/viewer/PDFViewerWithSelection.tsx
 import React, { useState, useEffect, useRef } from 'react';
-import { Document, Page, pdfjs } from 'react-pdf';
+import { Document, Page } from 'react-pdf';
 import { Box, CircularProgress } from '@mui/material';
-import api from '../../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../../api/client';
 import SuggestionOverlayInline from './SuggestionOverlayInline';
 import {
   screenRectToPdf,
@@ -13,16 +13,12 @@ import {
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import './PDFViewerWithSelection.css';
+import { PDF_DOCUMENT_OPTIONS } from './pdfSetup';
 
 // Type assertion for react-pdf v10 compatibility
 const DocumentComponent = Document as any;
 const PageComponent = Page as any;
 
-// Set PDF.js worker - use local worker from node_modules
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString();
 
 interface Redaction {
   // Present on persisted redactions; absent on ones not yet saved. The resize
@@ -218,6 +214,28 @@ const PDFViewerWithSelection: React.FC<Props> = ({
   // Will implement when we have proper search API with text positions
 
   useEffect(() => {
+    // Object URL for the original (unredacted) PDF when we fetch it
+    // ourselves; revoked on cleanup so it doesn't outlive this view.
+    let objectUrl: string | null = null;
+    let cancelled = false;
+
+    const fetchPDF = async () => {
+      try {
+        setLoading(true);
+        const response = await api.get(`/documents/${documentId}`, {
+          responseType: 'blob',
+          timeout: TRANSFER_TIMEOUT_MS,
+        });
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(response.data);
+        setPdfUrl(objectUrl);
+      } catch (error) {
+        console.error('Error fetching PDF:', error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
     if (externalPdfUrl) {
       setPdfUrl(externalPdfUrl);
       setLoading(false);
@@ -225,24 +243,12 @@ const PDFViewerWithSelection: React.FC<Props> = ({
       fetchPDF();
     }
     fetchOCRData();
-  }, [documentId, externalPdfUrl]);
 
-  const fetchPDF = async () => {
-    if (externalPdfUrl) return; // Don't fetch if URL provided
-    
-    try {
-      setLoading(true);
-      const response = await api.get(`/documents/${documentId}`, {
-        responseType: 'blob'
-      });
-      const url = URL.createObjectURL(response.data);
-      setPdfUrl(url);
-    } catch (error) {
-      console.error('Error fetching PDF:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [documentId, externalPdfUrl]);
 
   const fetchOCRData = async () => {
     try {
@@ -292,8 +298,6 @@ const PDFViewerWithSelection: React.FC<Props> = ({
     
     setSelectedText(selectedTextData);
 
-    console.log('Selected text:', selection.toString());
-    console.log('PDF coordinates:', pdfCoords);
 
     // Trigger redaction creation callback - pass all rectangles at once
     if (onTextSelected) {
@@ -331,9 +335,6 @@ const PDFViewerWithSelection: React.FC<Props> = ({
       return undefined;
     }
 
-    console.log('Canvas rect:', canvasRect);
-    console.log('Valid rects (before dedup):', rects.length);
-    console.log('Zoom:', zoom);
 
     // Deduplicate very similar rectangles (within 2px tolerance)
     const uniqueRects: ClientRect[] = [];
@@ -352,29 +353,19 @@ const PDFViewerWithSelection: React.FC<Props> = ({
       }
     }
 
-    console.log('Valid rects (after dedup):', uniqueRects.length);
 
     // Find bounding box of all unique rects (relative to PDF canvas)
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
-    uniqueRects.forEach((rect, idx) => {
+    uniqueRects.forEach((rect) => {
       const x = rect.left - canvasRect.left;
       const y = rect.top - canvasRect.top;
-      console.log(`Rect ${idx}:`, {
-        left: rect.left,
-        top: rect.top,
-        width: rect.width,
-        height: rect.height,
-        relativeX: x,
-        relativeY: y
-      });
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x + rect.width);
       maxY = Math.max(maxY, y + rect.height);
     });
 
-    console.log('Bounding box (before zoom):', { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY });
 
     // Check if we got valid coordinates
     if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
@@ -388,7 +379,6 @@ const PDFViewerWithSelection: React.FC<Props> = ({
       zoom,
     );
 
-    console.log('Final PDF coords (after zoom division):', coords);
 
     return coords;
   };
@@ -427,6 +417,7 @@ const PDFViewerWithSelection: React.FC<Props> = ({
         <DocumentComponent
           key={pdfUrl}
           file={pdfUrl}
+          options={PDF_DOCUMENT_OPTIONS}
           onLoadSuccess={handleDocumentLoadSuccess}
           onLoadError={(error: any) => {
             console.error('PDF load error:', error);

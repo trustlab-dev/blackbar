@@ -4,6 +4,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from '../test-utils/msw-handlers';
 import { AuthProvider, useAuth } from './AuthContext';
 import type { ReactNode } from 'react';
+import * as telemetry from '../utils/telemetry';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -346,6 +347,7 @@ describe('AuthProvider — logout', () => {
       ),
     );
 
+    const clearUserSpy = vi.spyOn(telemetry, 'clearUser');
     const { result } = renderHook(() => useAuth(), { wrapper });
     await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
 
@@ -353,6 +355,8 @@ describe('AuthProvider — logout', () => {
       result.current.logout();
     });
 
+    // The Sentry scope must not keep the previous user after logout.
+    expect(clearUserSpy).toHaveBeenCalled();
     expect(result.current.user).toBeNull();
     expect(result.current.token).toBeNull();
     expect(result.current.roles).toEqual([]);

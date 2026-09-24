@@ -206,7 +206,7 @@ describe('UserManagement — add user', () => {
       screen.getByRole('button', { name: /send invitation/i }),
     );
     expect(
-      await screen.findByText(/body\.email: invalid email/i),
+      await screen.findByText(/^email: invalid email$/i),
     ).toBeInTheDocument();
   });
 

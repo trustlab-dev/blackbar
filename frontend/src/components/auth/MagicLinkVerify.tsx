@@ -14,7 +14,8 @@ import {
 } from '@mui/material';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
-import axios from 'axios';
+import { publicApi } from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
 
 export const MagicLinkVerify: React.FC = () => {
   const { token } = useParams();
@@ -40,7 +41,7 @@ export const MagicLinkVerify: React.FC = () => {
       }
 
       try {
-        const response = await axios.post('/api/v1/auth/public/magic-link/verify', {
+        const response = await publicApi.post('/auth/public/magic-link/verify', {
           token,
           email: savedEmail
         });
@@ -68,7 +69,7 @@ export const MagicLinkVerify: React.FC = () => {
         if (err.response?.data?.error === 'invalid_token') {
           setError('This magic link is invalid or has expired. Please request a new one.');
         } else {
-          setError(err.response?.data?.detail || 'Failed to verify magic link. Please try again.');
+          setError(getApiErrorMessage(err, 'Failed to verify magic link. Please try again.'));
         }
       }
     };

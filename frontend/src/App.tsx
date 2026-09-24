@@ -27,6 +27,8 @@ import Login from './components/Login';
 import SharedDocuments from './components/SharedDocuments';
 import ProtectedRoute from './components/ProtectedRoute';
 import ContributorPortal from './components/public/ContributorPortal';
+import { clearUser as clearTelemetryUser } from './utils/telemetry';
+import { publicApi } from './api/client';
 
 const DocumentViewerWrapper: React.FC = () => {
   const { documentId } = useParams();
@@ -54,6 +56,7 @@ const Header: React.FC = () => {
   };
 
   const handleLogout = () => {
+    clearTelemetryUser();
     localStorage.clear();
     window.location.href = '/login';
   };
@@ -62,13 +65,10 @@ const Header: React.FC = () => {
   useEffect(() => {
     const fetchBranding = async () => {
       try {
-        const response = await fetch('/api/v1/admin/config/public');
-        if (response.ok) {
-          const data = await response.json();
-          setOrgName(data.org_name || 'Freedom of Information Office');
-          if (data.primary_color) {
-            document.documentElement.style.setProperty('--primary-color', data.primary_color);
-          }
+        const { data } = await publicApi.get('/admin/config/public');
+        setOrgName(data.org_name || 'Freedom of Information Office');
+        if (data.primary_color) {
+          document.documentElement.style.setProperty('--primary-color', data.primary_color);
         }
       } catch (error) {
         console.error('Error fetching branding:', error);
@@ -225,8 +225,7 @@ const AppContent = () => {
   useEffect(() => {
     const fetchPublicConfig = async () => {
       try {
-        const response = await fetch('/api/v1/admin/config/public');
-        const data = await response.json();
+        const { data } = await publicApi.get('/admin/config/public');
         setPublicConfig({
           enable_public_requests: data.enable_public_requests,
           enable_request_tracking: data.enable_request_tracking,

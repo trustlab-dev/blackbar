@@ -25,6 +25,7 @@ import PersonAddIcon from '@mui/icons-material/PersonAdd';
 import DeleteIcon from '@mui/icons-material/Delete';
 import api from '../api/client';
 import UserPicker from './UserPicker';
+import { getApiErrorMessage } from '../api/errors';
 
 // API_BASE_URL not needed - using api client directly
 
@@ -102,7 +103,7 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
       setError(null);
     } catch (err: any) {
       console.error('Error fetching team members:', err);
-      setError(err.response?.data?.detail || 'Failed to fetch team members');
+      setError(getApiErrorMessage(err, 'Failed to fetch team members'));
     } finally {
       setLoading(false);
     }
@@ -132,7 +133,7 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
       await fetchTeamMembers();
     } catch (err: any) {
       console.error('Error adding team member:', err);
-      setError(err.response?.data?.detail || 'Failed to add team member');
+      setError(getApiErrorMessage(err, 'Failed to add team member'));
     } finally {
       setLoading(false);
     }
@@ -149,7 +150,7 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
       await fetchTeamMembers();
     } catch (err: any) {
       console.error('Error removing team member:', err);
-      setError(err.response?.data?.detail || 'Failed to remove team member');
+      setError(getApiErrorMessage(err, 'Failed to remove team member'));
     } finally {
       setLoading(false);
     }

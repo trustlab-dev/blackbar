@@ -22,6 +22,19 @@ const getBaseURL = (): string => {
   return '/api/v1';
 };
 
+/**
+ * Default request timeout. Without one a stalled backend leaves spinners
+ * (viewer, uploads) hanging forever.
+ */
+export const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Timeout for calls that move whole files (uploads, PDF/package downloads) or
+ * wait on slow server-side work (LLM suggestions, OCR on upload). Pass it
+ * per request: `api.post(url, form, { timeout: TRANSFER_TIMEOUT_MS })`.
+ */
+export const TRANSFER_TIMEOUT_MS = 300_000;
+
 // NOTE: do NOT set a default Content-Type header here. axios's default
 // transformRequest auto-derives the correct Content-Type from the body
 // type — `application/json` for plain objects, `multipart/form-data;
@@ -30,6 +43,7 @@ const getBaseURL = (): string => {
 // as F4 / F5, but at the client level rather than per-component).
 const api = axios.create({
   baseURL: getBaseURL(),
+  timeout: DEFAULT_TIMEOUT_MS,
 });
 
 // Attach the bearer token (if present) to every outgoing request.
@@ -77,9 +91,14 @@ api.interceptors.response.use(
     }
 
     // Surface correlation IDs in the console to help support debug requests.
+    // Log only the status and error code: response bodies can echo document
+    // text or PII back, and console output can reach third-party telemetry.
     const correlationId = error.response?.headers?.['x-correlation-id'];
     if (correlationId) {
-      console.error(`API Error [${correlationId}]:`, error.response?.data);
+      console.error(`API Error [${correlationId}]:`, {
+        status: error.response?.status,
+        code: error.response?.data?.error?.code,
+      });
     }
 
     return Promise.reject(error);
@@ -93,6 +112,7 @@ api.interceptors.response.use(
  */
 export const publicApi: AxiosInstance = axios.create({
   baseURL: getBaseURL(),
+  timeout: DEFAULT_TIMEOUT_MS,
   headers: {
     'Content-Type': 'application/json',
   },

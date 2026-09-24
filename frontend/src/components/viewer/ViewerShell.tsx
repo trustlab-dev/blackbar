@@ -40,7 +40,7 @@ import Delete from '@mui/icons-material/Delete';
 import Edit from '@mui/icons-material/Edit';
 import Save from '@mui/icons-material/Save';
 import Close from '@mui/icons-material/Close';
-import api from '../../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../../api/client';
 import PDFViewerWithSelection from './PDFViewerWithSelection';
 import LeftToolRail from './LeftToolRail';
 import RightUtilityBar from './RightUtilityBar';
@@ -54,6 +54,7 @@ import HistoryDrawer from './HistoryDrawer';
 import ReasonPickerModal, { RedactionReason } from './ReasonPickerModal';
 import SuggestedRedactionOverlay from './SuggestedRedactionOverlay';
 import './ViewerShell.css';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface Props {
   documentId: string;
@@ -212,7 +213,9 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   const fetchSuggestions = async () => {
     setLoadingSuggestions(true);
     try {
-      const response = await api.get(`/documents/${documentId}/redaction-suggestions?quick=false`);
+      const response = await api.get(`/documents/${documentId}/redaction-suggestions?quick=false`, {
+        timeout: TRANSFER_TIMEOUT_MS,
+      });
       const allSuggestions = response.data.suggestions || [];
 
       // Filter out already-applied suggestions
@@ -233,20 +236,34 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
     );
   };
 
-  const fetchPDF = async () => {
-    try {
-      const response = await api.get(`/documents/${documentId}`, {
-        responseType: 'blob'
-      });
-      const url = URL.createObjectURL(response.data);
-      setPdfUrl(url);
-    } catch (error) {
-      console.error('Error fetching PDF:', error);
-    }
-  };
-
   useEffect(() => {
+    // Object URL for the original (unredacted) PDF. Revoke it when the
+    // document changes or the viewer unmounts so it doesn't stay reachable
+    // for the rest of the SPA session.
+    let objectUrl: string | null = null;
+    let cancelled = false;
+
+    const fetchPDF = async () => {
+      try {
+        const response = await api.get(`/documents/${documentId}`, {
+          responseType: 'blob',
+          timeout: TRANSFER_TIMEOUT_MS,
+        });
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(response.data);
+        setPdfUrl(objectUrl);
+      } catch (error) {
+        console.error('Error fetching PDF:', error);
+      }
+    };
+
     fetchPDF();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setPdfUrl(null);
+    };
   }, [documentId]);
 
   // Escape key closes the redaction menu first, then deselects the
@@ -433,7 +450,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       console.error('Error saving redaction:', error);
       const message = error.response?.status === 401
         ? 'Authentication required. Please log in to save redactions.'
-        : error.response?.data?.detail || 'Failed to save redaction. Please try again.';
+        : getApiErrorMessage(error, 'Failed to save redaction. Please try again.');
       setErrorMessage(message);
       setShowError(true);
     }
@@ -453,7 +470,6 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   };
 
   const handleRedactMatches = async (matches: any[], searchTerm: string) => {
-    console.log('Redacting matches:', matches, 'for term:', searchTerm);
 
     // Convert search matches to pending redactions format
     // Include page number for each match
@@ -598,8 +614,6 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   };
 
   const handleApplySuggestions = async (suggestions: any[]) => {
-    console.log('Applying suggestions:', suggestions);
-
     // Apply each suggestion directly with its category/reason
     for (const suggestion of suggestions) {
       // Use provided coordinates, or look up from OCR data
@@ -617,9 +631,8 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           y = ocrCoords.y;
           width = ocrCoords.width;
           height = ocrCoords.height;
-          console.log(`Found OCR coordinates for "${suggestion.text}":`, ocrCoords);
         } else {
-          console.warn(`Could not find OCR coordinates for "${suggestion.text}" on page ${page}`);
+          console.warn(`Could not find OCR coordinates for a suggestion on page ${page}`);
         }
       }
 
@@ -741,13 +754,10 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       description: editedDescription
     };
 
-    console.log('Updating redaction:', redaction.id);
-    console.log('Update data:', updateData);
 
     try {
       // Update backend using the /edit endpoint
       const response = await api.put(`/documents/${documentId}/redactions/${redaction.id}/edit`, updateData);
-      console.log('Update response:', response.data);
 
       // Update local state
       const updatedRedactions = [...redactions];
@@ -793,7 +803,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       handleDeselectRedaction();
     } catch (error: any) {
       console.error('Error deleting redaction:', error);
-      const message = error.response?.data?.detail || 'Failed to delete redaction.';
+      const message = getApiErrorMessage(error, 'Failed to delete redaction.');
       setErrorMessage(message);
       setShowError(true);
     }

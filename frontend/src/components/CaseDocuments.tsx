@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import api from '../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
 import DownloadIcon from '@mui/icons-material/Download';
 import ShareIcon from '@mui/icons-material/Share';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -19,6 +19,8 @@ import TableChartIcon from '@mui/icons-material/TableChart';
 import SlideshowIcon from '@mui/icons-material/Slideshow';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import './CaseDocuments.css';
+import { getApiErrorMessage } from '../api/errors';
+import { partitionUploadFiles, UPLOAD_ACCEPT } from '../utils/uploadValidation';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -354,7 +356,8 @@ const CaseDocuments: React.FC = () => {
   const downloadDocument = async (docId: string, filename: string) => {
     try {
       const response = await api.get(`/documents/${docId}/download`, {
-        responseType: 'blob'
+        responseType: 'blob',
+        timeout: TRANSFER_TIMEOUT_MS,
       });
       
       // Extract filename from Content-Disposition header if available
@@ -487,9 +490,16 @@ const CaseDocuments: React.FC = () => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
     
-    const fileArray = Array.from(files);
+    // Client-side type/size check (the backend enforces the same limits).
+    const { valid, errors } = partitionUploadFiles(Array.from(files));
+    if (errors.length > 0) {
+      alert(errors.join('\n'));
+    }
+    // Reset so re-selecting the same file after a rejection fires onChange.
+    event.target.value = '';
+    if (valid.length === 0) return;
     // Append new files to existing selection instead of replacing
-    setSelectedFiles(prev => [...prev, ...fileArray]);
+    setSelectedFiles(prev => [...prev, ...valid]);
   };
 
   const removeSelectedFile = (index: number) => {
@@ -532,7 +542,9 @@ const CaseDocuments: React.FC = () => {
           // Let axios set the multipart Content-Type itself: it derives the
           // required `boundary` from the FormData body. Setting the header
           // manually omits the boundary, which breaks request parsing.
-          const response = await api.post('/documents/', formData);
+          const response = await api.post('/documents/', formData, {
+            timeout: TRANSFER_TIMEOUT_MS,
+          });
           
           // Update to processing
           setUploadProgress(prev => ({
@@ -571,15 +583,8 @@ const CaseDocuments: React.FC = () => {
           console.error(`Error uploading ${file.name}:`, error);
           
           // Extract error message
-          let errorMsg = 'Failed';
-          let errorDetail = 'Unknown error';
-          if (error.response?.data?.detail) {
-            errorDetail = error.response.data.detail;
-            errorMsg = `Failed: ${errorDetail}`;
-          } else if (error.message) {
-            errorDetail = error.message;
-            errorMsg = `Failed: ${errorDetail}`;
-          }
+          const errorDetail = getApiErrorMessage(error, error?.message || 'Unknown error');
+          const errorMsg = `Failed: ${errorDetail}`;
           
           // Track failure for results modal
           failures.push({
@@ -641,7 +646,7 @@ const CaseDocuments: React.FC = () => {
               type="file"
               ref={fileInputRef}
               multiple
-              accept=".pdf,.doc,.docx,.eml,.msg,.jpg,.jpeg,.png,.gif,.bmp,.tiff,.tif,.webp"
+              accept={UPLOAD_ACCEPT}
               onChange={handleFileSelect}
               style={{ display: 'none' }}
             />
@@ -994,7 +999,7 @@ const CaseDocuments: React.FC = () => {
                     setSelectedGuestId('');
                     setShareNotes('');
                   } catch (err: any) {
-                    alert(err.response?.data?.detail || 'Failed to share document');
+                    alert(getApiErrorMessage(err, 'Failed to share document'));
                   }
                 }}
                 className="btn-primary"

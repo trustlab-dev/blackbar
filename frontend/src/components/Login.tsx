@@ -2,6 +2,8 @@ import React, { useState, useEffect } from "react";
 import api from "../api/client";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
+import { getSafeRedirect } from "../utils/safeRedirect";
+import { getApiErrorMessage } from "../api/errors";
 import './Login.css';
 
 interface Props {
@@ -30,8 +32,7 @@ const Login: React.FC<Props> = ({ onLoginSuccess }) => {
 
   // Get redirect URL from query params — validate to prevent open redirect
   const searchParams = new URLSearchParams(location.search);
-  const rawRedirect = searchParams.get('redirect') || '/';
-  const redirectUrl = rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') ? rawRedirect : '/';
+  const redirectUrl = getSafeRedirect(searchParams.get('redirect'), '/');
 
   // Fetch org branding on mount
   useEffect(() => {
@@ -67,10 +68,7 @@ const Login: React.FC<Props> = ({ onLoginSuccess }) => {
       navigate(redirectUrl);
     } catch (err: any) {
       console.error('Login error:', err);
-      const errorMessage = err.response?.data?.error?.message ||
-        err.response?.data?.detail ||
-        "Login failed. Please check your credentials.";
-      setError(errorMessage);
+      setError(getApiErrorMessage(err, "Login failed. Please check your credentials."));
     } finally {
       setLoading(false);
     }

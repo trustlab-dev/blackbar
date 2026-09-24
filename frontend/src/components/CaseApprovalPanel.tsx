@@ -15,6 +15,7 @@ import {
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
 import api from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -76,7 +77,7 @@ const CaseApprovalPanel: React.FC<CaseApprovalPanelProps> = ({ caseId, userRole 
       await fetchApprovalStatus();
     } catch (err: any) {
       console.error('Error approving case:', err);
-      setError(err.response?.data?.detail || 'Failed to approve case');
+      setError(getApiErrorMessage(err, 'Failed to approve case'));
     } finally {
       setLoading(false);
     }
@@ -102,7 +103,7 @@ const CaseApprovalPanel: React.FC<CaseApprovalPanelProps> = ({ caseId, userRole 
       await fetchApprovalStatus();
     } catch (err: any) {
       console.error('Error rejecting approval:', err);
-      setError(err.response?.data?.detail || 'Failed to reject approval');
+      setError(getApiErrorMessage(err, 'Failed to reject approval'));
     } finally {
       setLoading(false);
     }

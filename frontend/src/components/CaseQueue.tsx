@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import './CaseQueue.css';
-import { useUser } from '../contexts/UserContext';
+import { useUser, getStoredRoles } from '../contexts/UserContext';
 import FiberNewIcon from '@mui/icons-material/FiberNew';
 import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
 import RateReviewIcon from '@mui/icons-material/RateReview';
@@ -20,6 +20,7 @@ import DialogActions from '@mui/material/DialogActions';
 import TextField from '@mui/material/TextField';
 import MenuItem from '@mui/material/MenuItem';
 import Alert from '@mui/material/Alert';
+import { getApiErrorMessage } from '../api/errors';
 
 interface Case {
   id: string;
@@ -42,6 +43,10 @@ interface Case {
 const CaseQueue: React.FC = () => {
   const navigate = useNavigate();
   const { currentRole } = useUser();
+  // UI hint only: /cases/queue/all is role-gated on the backend
+  // (owner/admin/analyst). Unknown or missing roles get the "My Cases" view.
+  const uiRoles = currentRole ? [...getStoredRoles(), currentRole] : getStoredRoles();
+  const canViewAllCases = uiRoles.some((r) => ['owner', 'admin', 'analyst'].includes(r));
   const [cases, setCases] = useState<Case[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -58,10 +63,9 @@ const CaseQueue: React.FC = () => {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   // Admins see all cases by default, others see only their cases
   // Initialize from localStorage to avoid race condition
-  const [viewMode, setViewMode] = useState<'all' | 'my'>(() => {
-    const storedRole = localStorage.getItem('userRole');
-    return storedRole === 'admin' ? 'all' : 'my';
-  });
+  const [viewMode, setViewMode] = useState<'all' | 'my'>(() =>
+    uiRoles.some((r) => r === 'owner' || r === 'admin') ? 'all' : 'my',
+  );
 
   // Create Case Modal State
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -247,7 +251,7 @@ const CaseQueue: React.FC = () => {
       // Navigate to the new case
       navigate(`/cases/${response.data.id}`);
     } catch (err: any) {
-      setCreateError(err.response?.data?.detail || 'Failed to create case');
+      setCreateError(getApiErrorMessage(err, 'Failed to create case'));
     } finally {
       setCreateLoading(false);
     }
@@ -265,7 +269,7 @@ const CaseQueue: React.FC = () => {
             <span className="tab-indicator" />
             My Cases
           </button>
-          {currentRole === 'admin' && (
+          {canViewAllCases && (
             <button
               className={`view-tab ${viewMode === 'all' ? 'active' : ''}`}
               onClick={() => setViewMode('all')}

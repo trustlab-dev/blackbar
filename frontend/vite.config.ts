@@ -28,7 +28,10 @@ export default defineConfig({
   },
   build: {
     outDir: 'build', // match CRA's output dir so Dockerfile doesn't need changes
-    sourcemap: true,
+    // No source maps in the production bundle: nginx would serve them
+    // publicly next to the JS. If Sentry symbolication is wanted later,
+    // switch to 'hidden' and upload + delete the maps in CI.
+    sourcemap: false,
   },
   test: {
     globals: true,

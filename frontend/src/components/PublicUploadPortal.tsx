@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { publicApi as api } from '../api/client';
+import { publicApi as api, TRANSFER_TIMEOUT_MS } from '../api/client';
 import './PublicUploadPortal.css';
+import { getApiErrorMessage } from '../api/errors';
+import { partitionUploadFiles, UPLOAD_ACCEPT } from '../utils/uploadValidation';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -64,7 +66,7 @@ const PublicUploadPortal: React.FC = () => {
       setCollectionInfo(response.data);
       setError('');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Collection link not found or expired');
+      setError(getApiErrorMessage(err, 'Collection link not found or expired'));
     } finally {
       setLoading(false);
     }
@@ -96,7 +98,10 @@ const PublicUploadPortal: React.FC = () => {
   };
 
   const addFiles = (newFiles: File[]) => {
-    const uploadFiles: UploadedFile[] = newFiles.map(file => ({
+    // Client-side type/size check (the backend enforces the same limits).
+    const { valid, errors } = partitionUploadFiles(newFiles);
+    if (errors.length > 0) setError(errors.join(' '));
+    const uploadFiles: UploadedFile[] = valid.map(file => ({
       file,
       id: Math.random().toString(36).substr(2, 9),
       status: 'pending',
@@ -126,7 +131,8 @@ const PublicUploadPortal: React.FC = () => {
         `/cases/collect/${token}/upload`,
         formData,
         {
-          headers: { 'Content-Type': 'multipart/form-data' }
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: TRANSFER_TIMEOUT_MS,
         }
       );
 
@@ -139,7 +145,7 @@ const PublicUploadPortal: React.FC = () => {
         f.id === uploadFile.id ? {
           ...f,
           status: 'error' as const,
-          error: err.response?.data?.detail || 'Upload failed'
+          error: getApiErrorMessage(err, 'Upload failed')
         } : f
       ));
     }
@@ -293,6 +299,7 @@ const PublicUploadPortal: React.FC = () => {
               id="file-input"
               type="file"
               multiple
+              accept={UPLOAD_ACCEPT}
               onChange={handleFileSelect}
               style={{ display: 'none' }}
             />

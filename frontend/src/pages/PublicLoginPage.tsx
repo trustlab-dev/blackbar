@@ -7,7 +7,8 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Box, Typography, Paper, Button, Alert, Divider } from '@mui/material';
 import { MagicLinkLogin } from '../components/auth/MagicLinkLogin';
-import axios from 'axios';
+import { publicApi } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 export const PublicLoginPage: React.FC = () => {
   const navigate = useNavigate();
@@ -31,7 +32,7 @@ export const PublicLoginPage: React.FC = () => {
   useEffect(() => {
     const fetchBranding = async () => {
       try {
-        const response = await axios.get('/api/v1/admin/config/public');
+        const response = await publicApi.get('/admin/config/public');
         setOrgConfig({
           org_name: response.data.org_name || 'Freedom of Information Portal',
           org_logo_url: response.data.org_logo_url,
@@ -50,7 +51,7 @@ export const PublicLoginPage: React.FC = () => {
     setDemoLoginLoading(true);
     setDemoLoginError(null);
     try {
-      const response = await axios.post('/api/v1/auth/public/demo-login');
+      const response = await publicApi.post('/auth/public/demo-login');
       const { access_token, user } = response.data;
       // Same localStorage shape as MagicLinkVerify so downstream pages
       // can't tell the difference between a demo and a real session.
@@ -62,7 +63,7 @@ export const PublicLoginPage: React.FC = () => {
       setDemoLoginError(
         err.response?.status === 404
           ? 'Demo mode is disabled on this deployment.'
-          : (err.response?.data?.detail || 'Demo login failed. Try again.')
+          : (getApiErrorMessage(err, 'Demo login failed. Try again.'))
       );
     } finally {
       setDemoLoginLoading(false);

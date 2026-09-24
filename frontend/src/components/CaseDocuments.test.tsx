@@ -363,6 +363,32 @@ describe('CaseDocuments — upload modal', () => {
     await waitFor(() => expect(uploaded.length).toBe(1));
   });
 
+  it('rejects unsupported or oversized files at selection time', async () => {
+    server.use(
+      http.get('/api/v1/cases/case-1/documents', () =>
+        HttpResponse.json({ documents: [] }),
+      ),
+      http.get('/api/v1/auth/users/guests', () => HttpResponse.json([])),
+    );
+    const user = userEvent.setup({ applyAccept: false });
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText(/no documents uploaded yet/i);
+    await user.click(screen.getByRole('button', { name: /upload documents/i }));
+    await screen.findByText(/add documents/i);
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const ok = new File(['a'], 'ok.pdf', { type: 'application/pdf' });
+    const exe = new File(['x'], 'tool.exe', { type: 'application/x-msdownload' });
+    const big = new File(['x'], 'big.pdf', { type: 'application/pdf' });
+    Object.defineProperty(big, 'size', { value: 101 * 1024 * 1024 });
+    await user.upload(fileInput, [ok, exe, big]);
+
+    expect(await screen.findByText(/1 file selected/i)).toBeInTheDocument();
+    expect(window.alert).toHaveBeenCalledWith(
+      expect.stringMatching(/tool\.exe" is not a supported file type[\s\S]*big\.pdf" is too large/),
+    );
+  });
+
   // The next two tests assert on UI state AFTER the upload response.
   // axios's Node adapter (jsdom) can't serialise a real File inside
   // FormData (the form-data package needs Buffer/stream inputs, not

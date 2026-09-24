@@ -19,6 +19,7 @@ import Delete from '@mui/icons-material/Delete';
 import Search from '@mui/icons-material/Search';
 import AutoAwesome from '@mui/icons-material/AutoAwesome';
 import api from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface AuditLogEntry {
   action: string;
@@ -50,18 +51,14 @@ const HistoryDrawer: React.FC<Props> = ({ open, onClose, documentId }) => {
     setErrorMessage('');
     try {
       const response = await api.get(`/documents/${documentId}/audit-logs`);
-      console.log('Audit logs full response:', response.data);
-      console.log('Response keys:', Object.keys(response.data));
       
       // Try different possible keys
       const logs = response.data.audit_logs || response.data.logs || response.data || [];
-      console.log('Parsed logs:', logs);
-      console.log('Logs count:', Array.isArray(logs) ? logs.length : 'not an array');
       
       setAuditLogs(Array.isArray(logs) ? logs : []);
     } catch (error: any) {
       console.error('Error fetching audit logs:', error);
-      setErrorMessage(error.response?.data?.detail || 'Failed to load history');
+      setErrorMessage(getApiErrorMessage(error, 'Failed to load history'));
     } finally {
       setLoading(false);
     }

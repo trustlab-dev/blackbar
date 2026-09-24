@@ -11,6 +11,7 @@ import {
 } from '@mui/material';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import { publicApi } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 // Phase 4 Batch 4.4 (audit F2): use the shared `publicApi` from
 // `src/api/client.ts` instead of a local axios + duplicated
@@ -86,11 +87,7 @@ const ActivateAccount: React.FC = () => {
         navigate('/login');
       }, 3000);
     } catch (err: any) {
-      if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
-      } else {
-        setError('Failed to activate account. The link may have expired.');
-      }
+      setError(getApiErrorMessage(err, 'Failed to activate account. The link may have expired.'));
     } finally {
       setLoading(false);
     }

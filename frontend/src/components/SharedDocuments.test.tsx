@@ -108,7 +108,7 @@ describe('SharedDocuments', () => {
   it('shows an error message when the fetch fails', async () => {
     server.use(
       http.get('/api/v1/documents/shared-with-me', () =>
-        HttpResponse.json({ detail: 'server unavailable' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'server unavailable' } }, { status: 400 }),
       ),
     );
     renderWithProviders(<SharedDocuments />);

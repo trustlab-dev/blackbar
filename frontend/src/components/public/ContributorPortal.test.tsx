@@ -262,7 +262,7 @@ describe('ContributorPortal — upload flow', () => {
                 : [
                     {
                       id: 'doc-new',
-                      filename: 'test.txt',
+                      filename: 'test.pdf',
                       uploaded_at: '2026-05-13T10:00:00Z',
                     },
                   ],
@@ -278,7 +278,7 @@ describe('ContributorPortal — upload flow', () => {
     renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
     await screen.findByText(/select files to upload/i);
 
-    const file = new File(['hi'], 'test.txt', { type: 'text/plain' });
+    const file = new File(['hi'], 'test.pdf', { type: 'application/pdf' });
     const input = document.getElementById('file-upload') as HTMLInputElement;
     Object.defineProperty(input, 'files', { value: [file], configurable: true });
     input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -288,7 +288,7 @@ describe('ContributorPortal — upload flow', () => {
         screen.getByText(/successfully uploaded 1 file/i),
       ).toBeInTheDocument(),
     );
-    expect(await screen.findByText('test.txt')).toBeInTheDocument();
+    expect(await screen.findByText('test.pdf')).toBeInTheDocument();
   });
 
   it('does nothing when the input change has no files', async () => {
@@ -567,5 +567,48 @@ describe('ContributorPortal — alert dismissal', () => {
     expect(
       screen.queryByText(/failed to confirm submission/i),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe('ContributorPortal — client-side upload checks', () => {
+  it('uses the backend allow-list for the file input', async () => {
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () =>
+        HttpResponse.json(makeInfoResponse()),
+      ),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/select files to upload/i);
+    const input = document.getElementById('file-upload') as HTMLInputElement;
+    expect(input.accept).toContain('.pdf');
+    expect(input.accept).not.toContain('*/*');
+  });
+
+  it('rejects disallowed and oversized files without uploading them', async () => {
+    let uploads = 0;
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () =>
+        HttpResponse.json(makeInfoResponse()),
+      ),
+      http.post(`${API_BASE}/contribute/c-1/upload`, () => {
+        uploads += 1;
+        return HttpResponse.json({ id: 'doc-new' });
+      }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/select files to upload/i);
+
+    const exe = new File(['x'], 'payload.exe', { type: 'application/x-msdownload' });
+    const big = new File(['x'], 'huge.pdf', { type: 'application/pdf' });
+    Object.defineProperty(big, 'size', { value: 101 * 1024 * 1024 });
+    const input = document.getElementById('file-upload') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [exe, big], configurable: true });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(
+      await screen.findByText(/payload\.exe" is not a supported file type/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/huge\.pdf" is too large/i)).toBeInTheDocument();
+    expect(uploads).toBe(0);
   });
 });

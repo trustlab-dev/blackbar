@@ -232,6 +232,26 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('ViewerShell — original PDF object URL lifecycle', () => {
+  it('revokes the blob URL on unmount and when the document changes', async () => {
+    let n = 0;
+    (global.URL.createObjectURL as any) = vi.fn(() => `blob:doc-${++n}`);
+    const revoke = vi.fn();
+    (global.URL.revokeObjectURL as any) = revoke;
+
+    const { rerender, unmount } = renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(mockPdfViewerProps.current?.pdfUrl).toBe('blob:doc-1'));
+    expect(revoke).not.toHaveBeenCalled();
+
+    rerender(<ViewerShell documentId="doc-2" />);
+    expect(revoke).toHaveBeenCalledWith('blob:doc-1');
+    await waitFor(() => expect(mockPdfViewerProps.current?.pdfUrl).toBe('blob:doc-2'));
+
+    unmount();
+    expect(revoke).toHaveBeenCalledWith('blob:doc-2');
+  });
+});
+
 describe('ViewerShell', () => {
   it('renders filename from document metadata', async () => {
     renderWithProviders(<ViewerShell documentId="doc-1" />);

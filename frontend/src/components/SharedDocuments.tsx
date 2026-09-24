@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import './SharedDocuments.css';
+import { getApiErrorMessage } from '../api/errors';
 
 interface SharedDocument {
   id: string;
@@ -42,7 +43,7 @@ const SharedDocuments: React.FC = () => {
         window.location.href = '/login';
         return;
       }
-      setError(err.response?.data?.detail || 'Failed to load shared documents');
+      setError(getApiErrorMessage(err, 'Failed to load shared documents'));
     } finally {
       setLoading(false);
     }

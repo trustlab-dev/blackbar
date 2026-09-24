@@ -304,14 +304,14 @@ describe('client.ts — response interceptor (401 redirect)', () => {
 // Response interceptor — correlation-ID logging
 // ---------------------------------------------------------------------------
 describe('client.ts — correlation-ID logging', () => {
-  it('logs x-correlation-id and the response body to console.error on error', async () => {
+  it('logs x-correlation-id with status and error code (not the body) on error', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { default: api } = await import('./client');
 
     server.use(
       http.get('/api/v1/whoami', () =>
         HttpResponse.json(
-          { detail: 'kaboom' },
+          { error: { code: 'HTTP_500', message: 'Jane Doe lives at 1 Main St' } },
           {
             status: 500,
             headers: { 'x-correlation-id': 'corr-xyz' },
@@ -322,10 +322,11 @@ describe('client.ts — correlation-ID logging', () => {
 
     await expect(api.get('/whoami')).rejects.toThrow();
 
-    expect(errSpy).toHaveBeenCalledWith(
-      'API Error [corr-xyz]:',
-      expect.objectContaining({ detail: 'kaboom' }),
-    );
+    expect(errSpy).toHaveBeenCalledWith('API Error [corr-xyz]:', {
+      status: 500,
+      code: 'HTTP_500',
+    });
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain('Jane Doe');
   });
 
   it('does NOT log when the response has no x-correlation-id header', async () => {
@@ -426,5 +427,19 @@ describe('client.ts — apiClient class wrapper', () => {
     );
     await apiClient.get('/things');
     expect(observedAuth).toBe('Bearer shared-tok');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Timeouts
+// ---------------------------------------------------------------------------
+describe('client.ts — request timeouts', () => {
+  it('sets a default timeout on both shared clients', async () => {
+    const { default: api, publicApi, DEFAULT_TIMEOUT_MS, TRANSFER_TIMEOUT_MS } =
+      await import('./client');
+    expect(DEFAULT_TIMEOUT_MS).toBe(30_000);
+    expect(api.defaults.timeout).toBe(DEFAULT_TIMEOUT_MS);
+    expect(publicApi.defaults.timeout).toBe(DEFAULT_TIMEOUT_MS);
+    expect(TRANSFER_TIMEOUT_MS).toBeGreaterThan(DEFAULT_TIMEOUT_MS);
   });
 });

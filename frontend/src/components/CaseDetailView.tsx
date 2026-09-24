@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import api from '../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
 import './CaseDetailView.css';
 import ReleasePackageActions from './ReleasePackageActions';
 import CaseTeamPanel from './CaseTeamPanel';
@@ -145,7 +145,8 @@ const CaseDetailView: React.FC = () => {
         const response = await api.post('/documents/', formData, {
           headers: {
             'Content-Type': 'multipart/form-data'
-          }
+          },
+          timeout: TRANSFER_TIMEOUT_MS,
         });
         
         // Track duplicates

@@ -31,6 +31,7 @@ import {
   Lock
 } from '@mui/icons-material';
 import { getUsers, createUser, updateUser, deleteUser } from '../services/userService';
+import { getApiErrorMessage } from '../api/errors';
 
 // Define User interface
 interface User {
@@ -224,19 +225,7 @@ const UserManagement: React.FC = () => {
         handleCloseDialogs();
       }
     } catch (err: any) {
-      const detail = err.response?.data?.detail;
-      let errorMsg = 'Failed to save user';
-
-      if (Array.isArray(detail)) {
-        // FastAPI validation errors are arrays
-        errorMsg = detail.map((e: any) => `${e.loc.join('.')}: ${e.msg}`).join(', ');
-      } else if (typeof detail === 'string') {
-        errorMsg = detail;
-      } else if (err.message) {
-        errorMsg = err.message;
-      }
-
-      setError(errorMsg);
+      setError(getApiErrorMessage(err, 'Failed to save user'));
     }
   };
 

@@ -28,7 +28,8 @@ import PublishIcon from '@mui/icons-material/Publish';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CloseIcon from '@mui/icons-material/Close';
 import DescriptionIcon from '@mui/icons-material/Description';
-import api from '../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 // Types matching backend models
 interface IncludedDocument {
@@ -195,7 +196,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
       await fetchPackageState();
     } catch (err: any) {
       console.error('Error starting generation:', err);
-      setError(err.response?.data?.detail || 'Failed to start package generation');
+      setError(getApiErrorMessage(err, 'Failed to start package generation'));
     } finally {
       setLoading(false);
     }
@@ -208,7 +209,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
     try {
       const response = await api.get(
         `/cases/${caseId}/release-package/${packageState.current_draft.id}/download`,
-        { responseType: 'blob' }
+        { responseType: 'blob', timeout: TRANSFER_TIMEOUT_MS }
       );
 
       // Create download link
@@ -222,7 +223,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
       console.error('Error downloading draft:', err);
-      showToast(err.response?.data?.detail || 'Failed to download package', 'error');
+      showToast(getApiErrorMessage(err, 'Failed to download package'), 'error');
     }
   };
 
@@ -256,7 +257,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
       onPackageReleased?.();
     } catch (err: any) {
       console.error('Error releasing package:', err);
-      setError(err.response?.data?.detail || 'Failed to release package');
+      setError(getApiErrorMessage(err, 'Failed to release package'));
     } finally {
       setLoading(false);
     }

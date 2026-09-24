@@ -305,7 +305,7 @@ describe('AutoSuggestDrawer', () => {
       http.get(SUGG_URL, ({ request }) => {
         const url = new URL(request.url);
         if (url.searchParams.get('quick') === 'false') {
-          return HttpResponse.json({ detail: 'llm down' }, { status: 500 });
+          return HttpResponse.json({ error: { code: 'HTTP_400', message: 'llm down' } }, { status: 400 });
         }
         return HttpResponse.json({ suggestions: [] });
       }),

@@ -17,6 +17,7 @@ import {
 } from '@mui/material';
 // Using text icons instead of @mui/icons-material
 import api from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -72,7 +73,7 @@ const ReportingDashboard: React.FC = () => {
       setAttentionCases(response.data.attention_required || []);
     } catch (err: any) {
       console.error('Error fetching dashboard data:', err);
-      setError(err.response?.data?.detail || 'Failed to load dashboard');
+      setError(getApiErrorMessage(err, 'Failed to load dashboard'));
     } finally {
       setLoading(false);
     }

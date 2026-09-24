@@ -124,6 +124,11 @@ describe('ThumbnailsRail', () => {
       expect(imgs.length).toBe(2);
       expect(imgs[0].getAttribute('src')).toContain('data:image/png');
     });
+    // pdf.js must be opened with eval disabled (untrusted uploads).
+    expect(mockGetDocument).toHaveBeenCalledWith({
+      url: '/tmp/foo.pdf',
+      isEvalSupported: false,
+    });
   });
 
   it('swallows MissingPDFException without logging', async () => {

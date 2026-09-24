@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../api/client';
 import './PublicTrackingPage.css';
+import { getApiErrorMessage } from '../api/errors';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -53,7 +54,7 @@ const PublicTrackingPage: React.FC = () => {
       setData(response.data);
       setError('');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Tracking number not found');
+      setError(getApiErrorMessage(err, 'Tracking number not found'));
     } finally {
       setLoading(false);
     }

@@ -346,3 +346,49 @@ describe('CaseQueue — Create Case dialog', () => {
     );
   });
 });
+
+describe('CaseQueue — UI role defaults (least privilege)', () => {
+  it('hides "All Cases" and loads My Cases when no role is known', async () => {
+    localStorage.removeItem('userRole');
+    let myCalls = 0;
+    server.use(
+      http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+      http.get('/api/v1/cases/queue/my-cases', () => {
+        myCalls += 1;
+        return HttpResponse.json({ cases: [], total: 0 });
+      }),
+    );
+    renderQueue();
+    await waitFor(() => expect(myCalls).toBeGreaterThanOrEqual(1));
+    expect(screen.queryByRole('button', { name: /all cases/i })).toBeNull();
+  });
+
+  it('hides "All Cases" for a plain user role saved at login', async () => {
+    localStorage.removeItem('userRole');
+    localStorage.setItem('userRoles', JSON.stringify(['user']));
+    server.use(
+      http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+      http.get('/api/v1/cases/queue/my-cases', () =>
+        HttpResponse.json({ cases: [], total: 0 }),
+      ),
+    );
+    renderQueue();
+    await screen.findByRole('button', { name: /my cases/i });
+    expect(screen.queryByRole('button', { name: /all cases/i })).toBeNull();
+  });
+
+  it('shows "All Cases" when the roles saved at login include admin', async () => {
+    localStorage.removeItem('userRole');
+    localStorage.setItem('userRoles', JSON.stringify(['admin']));
+    server.use(
+      http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+      http.get('/api/v1/cases/queue/all', () =>
+        HttpResponse.json({ cases: [], total: 0 }),
+      ),
+    );
+    renderQueue();
+    expect(
+      await screen.findByRole('button', { name: /all cases/i }),
+    ).toBeInTheDocument();
+  });
+});

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import api from '../api/client';
 import './SystemConfiguration.css';
+import { getApiErrorMessage } from '../api/errors';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -81,7 +82,7 @@ const SystemConfiguration: React.FC = () => {
       setTimeout(() => setSuccess(''), 3000);
     } catch (err: any) {
       console.error('Error saving configuration:', err);
-      setError(err.response?.data?.detail || 'Failed to save configuration');
+      setError(getApiErrorMessage(err, 'Failed to save configuration'));
     } finally {
       setSaving(false);
     }

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { jwtDecode } from 'jwt-decode';
 import { apiClient } from '../api/client';
+import { clearUser as clearTelemetryUser } from '../utils/telemetry';
 
 interface User {
   id: string;
@@ -108,10 +109,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       await fetchCurrentUser(access_token);
     } catch (error: any) {
       // Phase 4 Batch 4.4 (audit F1): re-throw the underlying axios
-      // error so callers (e.g. `Login.tsx`) can inspect
-      // `err.response?.data?.error?.message` /
-      // `err.response?.data?.detail` and show backend-specific
-      // messages. The previous `throw new Error(...)` flattened the
+      // error so callers (e.g. `Login.tsx`) can pass it to
+      // `getApiErrorMessage` and show backend-specific messages. The previous `throw new Error(...)` flattened the
       // error and made `Login.tsx`'s fallback branches unreachable.
       console.error('Login failed:', error);
       throw error;
@@ -128,6 +127,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       'user', 'user_type', 'magic_link_email', 'dev_current_user'
     ];
     authKeys.forEach(key => localStorage.removeItem(key));
+    clearTelemetryUser();
   };
 
   const value: AuthContextType = {

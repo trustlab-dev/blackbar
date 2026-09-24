@@ -7,6 +7,7 @@ import {
   screen,
   waitFor,
 } from '../test-utils/render';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import Login from './Login';
 
 // Build a JWT whose exp claim is in the future
@@ -342,5 +343,56 @@ describe('Login — query-string redirect handling', () => {
     await user.click(screen.getByRole('button', { name: /sign in/i }));
 
     await waitFor(() => expect(onLoginSuccess).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe('Login — post-login redirect target', () => {
+  function LocationProbe() {
+    const loc = useLocation();
+    return <div data-testid="landed">{loc.pathname + loc.search}</div>;
+  }
+
+  async function loginWithRedirect(query: string): Promise<string> {
+    const token = makeJwt(3600);
+    server.use(
+      http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+      http.post('/api/v1/auth/login', () =>
+        HttpResponse.json({ access_token: token, roles: [], user_id: 'u' }),
+      ),
+      http.get('/api/v1/auth/me', () =>
+        HttpResponse.json({
+          id: 'u',
+          email: 'a@b.com',
+          name: 'A',
+          status: 'active',
+          roles: [],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(
+      <Routes>
+        <Route path="/login" element={<Login onLoginSuccess={vi.fn()} />} />
+        <Route path="*" element={<LocationProbe />} />
+      </Routes>,
+      { withAuth: true, route: `/login?redirect=${query}` },
+    );
+    await user.type(screen.getByLabelText(/email/i), 'a@b.com');
+    await user.type(screen.getByLabelText(/password/i), 'pw');
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+    return (await screen.findByTestId('landed')).textContent ?? '';
+  }
+
+  it('navigates to a valid same-origin path', async () => {
+    expect(await loginWithRedirect('/cases/123')).toBe('/cases/123');
+  });
+
+  it.each([
+    ['backslash', '/\\evil.example'],
+    ['URL-encoded backslash', '/%5Cevil.example'],
+    ['protocol-relative', '//evil.example'],
+    ['absolute URL', 'https://evil.example'],
+  ])('falls back to / for a %s redirect', async (_label, query) => {
+    expect(await loginWithRedirect(query)).toBe('/');
   });
 });

@@ -125,7 +125,7 @@ describe('ReportingDashboard', () => {
   it('shows an error alert when the fetch fails', async () => {
     server.use(
       http.get('/api/v1/cases/deadline-dashboard', () =>
-        HttpResponse.json({ detail: 'boom' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'boom' } }, { status: 400 }),
       ),
     );
     renderWithProviders(<ReportingDashboard />);
