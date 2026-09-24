@@ -728,7 +728,10 @@ class DocumentProcessingService:
                     "id": att_id,
                     "filename": Path(att_filename).stem + ".pdf",
                     "original_filename": att_filename,
-                    "content_hash": calculate_file_hash(att_pdf_content),
+                    # Hash the original attachment bytes, not the converted
+                    # PDF, so dedup matches a direct upload of the same file
+                    # (issue #70; process_upload hashes originals too).
+                    "content_hash": calculate_file_hash(att_original_bytes),
                     "mime_type": "application/pdf",
                     "original_mime_type": att_mime,
                     "size": len(att_pdf_content),
