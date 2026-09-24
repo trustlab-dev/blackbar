@@ -366,3 +366,99 @@ describe('ReleasePackageActions — release flow', () => {
     expect(await screen.findByText(/release blocked/i)).toBeInTheDocument();
   });
 });
+
+// Backend contract (backend/src/cases/release_package_models.py,
+// release_package_service.py): a package whose documents could not be safely
+// redacted is FAILED with failed_documents; conversion-failed documents are
+// listed in skipped_documents. GET /release-packages only returns
+// generating/draft packages, so a failed one is fetched by id.
+describe('ReleasePackageActions — failed packages', () => {
+  const failedPackage = {
+    ...draftPackage,
+    id: 'pkg-9',
+    status: 'failed' as const,
+    generation_message: 'Generation failed: 1 document(s) could not be safely redacted',
+    failed_documents: [
+      { document_id: 'd1', filename: 'a.pdf', reason: '2 redaction(s) awaiting review (proposed, contested or pending); approve or reject them before release' },
+    ],
+    skipped_documents: [
+      { document_id: 'd4', filename: 'scan.docx', reason: 'document failed conversion to PDF and cannot be released' },
+    ],
+  };
+
+  it('shows the failed state with failed and skipped documents and no download link', async () => {
+    server.use(
+      http.get('/api/v1/cases/case-1/release-packages', () =>
+        HttpResponse.json({ current_draft: failedPackage, current_release: null }),
+      ),
+    );
+    renderActions();
+    expect(await screen.findByText(/package generation failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/could not be safely redacted/i)).toBeInTheDocument();
+    expect(screen.getByText('a.pdf')).toBeInTheDocument();
+    expect(screen.getByText(/awaiting review/i)).toBeInTheDocument();
+    expect(screen.getByText('scan.docx')).toBeInTheDocument();
+    expect(screen.getByText(/failed conversion to PDF/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /download package/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^release package/i })).toBeNull();
+    // The operator can fix the documents and generate again.
+    expect(screen.getByRole('button', { name: /generate package/i })).toBeEnabled();
+  });
+
+  it('fetches the generated package by id when it drops out of the draft slot as failed', async () => {
+    let stateCalls = 0;
+    server.use(
+      http.get('/api/v1/cases/case-1/release-packages', () => {
+        stateCalls += 1;
+        return HttpResponse.json(emptyState);
+      }),
+      http.post('/api/v1/cases/case-1/release-package/generate', () =>
+        HttpResponse.json({ package_id: 'pkg-9', status: 'generating', message: 'started' }),
+      ),
+      http.get('/api/v1/cases/case-1/release-package/pkg-9', () =>
+        HttpResponse.json(failedPackage),
+      ),
+    );
+    const user = userEvent.setup();
+    renderActions();
+    await user.click(await screen.findByRole('button', { name: /generate package/i }));
+    await screen.findByRole('heading', { name: /generate release package/i });
+    await user.click(screen.getByRole('button', { name: /start generation/i }));
+    expect(await screen.findByText(/package generation failed/i)).toBeInTheDocument();
+    expect(screen.getByText('scan.docx')).toBeInTheDocument();
+    expect(stateCalls).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole('button', { name: /download package/i })).toBeNull();
+  });
+
+  it('lists skipped documents on a ready draft', async () => {
+    server.use(
+      http.get('/api/v1/cases/case-1/release-packages', () =>
+        HttpResponse.json({
+          current_draft: { ...draftPackage, skipped_documents: failedPackage.skipped_documents },
+          current_release: null,
+        }),
+      ),
+    );
+    renderActions();
+    expect(await screen.findByText(/1 document left out/i)).toBeInTheDocument();
+    expect(screen.getByText('scan.docx')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /download package/i })).toBeInTheDocument();
+  });
+
+  it('flags documents with redactions awaiting review and excludes conversion-failed ones in the generate dialog', async () => {
+    server.use(
+      http.get('/api/v1/cases/case-1/release-packages', () => HttpResponse.json(emptyState)),
+    );
+    const user = userEvent.setup();
+    renderActions({
+      documents: [
+        { id: 'd1', filename: 'a.pdf', status: 'approved', redactions: [{ id: 'r1', status: 'approved' }, { id: 'r2', status: 'proposed' }] },
+        { id: 'd5', filename: 'broken.docx', status: 'approved', conversion_failed: true },
+      ],
+    });
+    await user.click(await screen.findByRole('button', { name: /generate package/i }));
+    await screen.findByRole('heading', { name: /generate release package/i });
+    expect(screen.getByText(/1 awaiting review/i)).toBeInTheDocument();
+    expect(screen.queryByText('broken.docx')).toBeNull();
+  });
+});

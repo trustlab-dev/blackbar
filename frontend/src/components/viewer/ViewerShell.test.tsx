@@ -716,15 +716,14 @@ describe('ViewerShell', () => {
     await waitFor(() => expect(deleted).toBe(true));
   });
 
-  it('redaction menu: delete without ID removes locally and shows error', async () => {
-    // Manually inject a redaction without an id via metadata returning an id of undefined
+  it('redaction menu: a legacy record without an ID is read-only with a hint', async () => {
     server.use(
       http.get(META_URL, () =>
         HttpResponse.json({
           ...metaResponse(),
           redactions: [{
             x: 10, y: 10, width: 50, height: 20, page: 1,
-            description: 'note', category: 'PII',
+            description: 'note', category: 'PII', status: 'approved',
           }],
         }),
       ),
@@ -734,11 +733,8 @@ describe('ViewerShell', () => {
     mockPdfViewerProps.current.onRedactionClick(0, {
       stopPropagation: vi.fn(), clientX: 0, clientY: 0,
     });
-    const delBtn = await screen.findByRole('button', { name: /Delete Redaction/i });
-    await userEvent.click(delBtn);
-    await waitFor(() =>
-      expect(screen.getByText(/Redaction removed locally/)).toBeInTheDocument(),
-    );
+    expect(await screen.findByText(/older redaction has no ID/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Delete Redaction/i })).toBeNull();
   });
 
   it('redaction menu: delete API failure shows error message', async () => {
@@ -901,5 +897,239 @@ describe('ViewerShell', () => {
       () => expect(screen.getByText('2 of 2')).toBeInTheDocument(),
       { timeout: 1000 },
     );
+  });
+});
+
+// Backend contract (commit 10b2d7e): redactions are addressed by stable id;
+// add returns {id, status}; only approved redactions are exported and
+// anything unresolved blocks export (409). See
+// backend/src/documents/redaction_routes.py and routes.py export handler.
+describe('ViewerShell — redaction review and export', () => {
+  const APPROVE_URL = 'https://localhost:3000/api/v1/documents/:id/redactions/:rid/approve';
+  const EXPORT_URL = 'https://localhost:3000/api/v1/documents/:id/export';
+
+  const proposed = {
+    id: 'r-prop', x: 10, y: 10, width: 50, height: 20, page: 1,
+    description: 'proposal', category: 'S22', type: 'proposed', status: 'proposed',
+    created_by_role: 'user',
+  };
+  const approved = {
+    id: 'r-ok', x: 100, y: 100, width: 50, height: 20, page: 1,
+    description: 'done', category: 'S19', type: 'professional', status: 'approved',
+  };
+
+  function withRedactions(redactions: any[]) {
+    server.use(http.get(META_URL, () => HttpResponse.json({ ...metaResponse(), redactions })));
+  }
+
+  it('renders the status the add response returns (proposed) instead of assuming', async () => {
+    server.use(
+      http.post(REDACT_URL, () =>
+        HttpResponse.json({ message: 'Redaction proposed for review', id: 'r-new', status: 'proposed' }),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    await userEvent.click(screen.getByText('tool-draw'));
+    await userEvent.click(screen.getByText('fire-draw'));
+    await userEvent.click(screen.getByText('save-reason'));
+    await waitFor(() =>
+      expect(mockPdfViewerProps.current.redactions).toEqual([
+        expect.objectContaining({ id: 'r-new', status: 'proposed' }),
+      ]),
+    );
+    expect(await screen.findByText(/proposed for review/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 redaction awaiting review/i)).toBeInTheDocument();
+  });
+
+  it('an approved add response does not block export', async () => {
+    server.use(
+      http.post(REDACT_URL, () =>
+        HttpResponse.json({ message: 'Redaction added', id: 'r-new', status: 'approved' }),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    await userEvent.click(screen.getByText('tool-draw'));
+    await userEvent.click(screen.getByText('fire-draw'));
+    await userEvent.click(screen.getByText('save-reason'));
+    await waitFor(() =>
+      expect(mockPdfViewerProps.current.redactions).toEqual([
+        expect.objectContaining({ id: 'r-new', status: 'approved' }),
+      ]),
+    );
+    expect(screen.queryByText(/awaiting review/i)).toBeNull();
+  });
+
+  it('422 on add: shows the reason, keeps the draw tool on, and adds nothing', async () => {
+    server.use(
+      http.post(REDACT_URL, () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_422', message: 'Invalid redaction: box (1.0, 2.0, 3.0 x 4.0) is outside page 1 (612.0 x 792.0)' } },
+          { status: 422 },
+        ),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    await userEvent.click(screen.getByText('tool-draw'));
+    await userEvent.click(screen.getByText('fire-draw'));
+    await userEvent.click(screen.getByText('save-reason'));
+    expect(await screen.findByText(/is outside page 1/i)).toBeInTheDocument();
+    expect(screen.getByTestId('draw-tool-mock')).toBeInTheDocument();
+    expect(mockPdfViewerProps.current.redactions).toEqual([]);
+  });
+
+  it('409 on add (document without content / failed conversion) shows the backend message', async () => {
+    server.use(
+      http.post(REDACT_URL, () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_409', message: 'Document failed conversion to PDF; it cannot be redacted or released.' } },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    await userEvent.click(screen.getByText('tool-draw'));
+    await userEvent.click(screen.getByText('fire-draw'));
+    await userEvent.click(screen.getByText('save-reason'));
+    expect(await screen.findByText(/failed conversion to PDF/i)).toBeInTheDocument();
+  });
+
+  it('counts blocking redactions and approves a proposal by id', async () => {
+    let putUrl = '';
+    let putBody: any = null;
+    withRedactions([proposed, approved]);
+    server.use(
+      http.put(APPROVE_URL, async ({ request }) => {
+        putUrl = request.url;
+        putBody = await request.json();
+        return HttpResponse.json({ success: true, message: 'Proposed redaction approved', redaction_id: 'r-prop' });
+      }),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    expect(await screen.findByText(/1 redaction awaiting review/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^review$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^approve$/i }));
+    await waitFor(() => expect(putBody).toEqual({ action: 'approve' }));
+    expect(putUrl).toMatch(/\/documents\/doc-1\/redactions\/r-prop\/approve$/);
+    await waitFor(() => expect(screen.queryByText(/awaiting review/i)).toBeNull());
+    expect(
+      mockPdfViewerProps.current.redactions.find((r: any) => r.id === 'r-prop').status,
+    ).toBe('approved');
+  });
+
+  it('rejects a proposal by id', async () => {
+    let putBody: any = null;
+    withRedactions([proposed]);
+    server.use(
+      http.put(APPROVE_URL, async ({ request }) => {
+        putBody = await request.json();
+        return HttpResponse.json({ success: true, message: 'Proposed redaction rejected', redaction_id: 'r-prop' });
+      }),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await userEvent.click(await screen.findByRole('button', { name: /^review$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    await waitFor(() => expect(putBody).toEqual({ action: 'reject' }));
+    await waitFor(() => expect(screen.queryByText(/awaiting review/i)).toBeNull());
+  });
+
+  it('409 on approve (changed concurrently) reloads the redactions and says so', async () => {
+    let metaCalls = 0;
+    server.use(
+      http.get(META_URL, () => {
+        metaCalls += 1;
+        return HttpResponse.json({ ...metaResponse(), redactions: [proposed] });
+      }),
+      http.put(APPROVE_URL, () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_409', message: 'Redaction changed concurrently; reload and retry' } },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await userEvent.click(await screen.findByRole('button', { name: /^review$/i }));
+    const before = metaCalls;
+    await userEvent.click(screen.getByRole('button', { name: /^approve$/i }));
+    expect(await screen.findByText(/changed concurrently/i)).toBeInTheDocument();
+    await waitFor(() => expect(metaCalls).toBeGreaterThan(before));
+  });
+
+  it('shows legacy records without an id as read-only in the review list', async () => {
+    const { id: _omit, ...legacy } = proposed;
+    void _omit;
+    withRedactions([legacy]);
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await userEvent.click(await screen.findByRole('button', { name: /^review$/i }));
+    expect(screen.getByText(/older redaction has no ID/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^approve$/i })).toBeNull();
+  });
+
+  it('explains contested redactions instead of offering approve', async () => {
+    withRedactions([{ ...approved, id: 'r-con', status: 'contested', is_contested: true }]);
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await userEvent.click(await screen.findByRole('button', { name: /^review$/i }));
+    expect(screen.getByText(/resolve the contest/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^approve$/i })).toBeNull();
+  });
+
+  it('export 409 shows the backend message', async () => {
+    withRedactions([approved]);
+    server.use(
+      http.get(EXPORT_URL, () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_409', message: '1 redaction(s) are awaiting review (proposed, contested or pending). Approve or reject them before exporting.' } },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: /export redacted pdf/i }));
+    expect(await screen.findByText(/Approve or reject them before exporting/i)).toBeInTheDocument();
+  });
+
+  it('export downloads the redacted PDF', async () => {
+    withRedactions([approved]);
+    let exported = false;
+    server.use(
+      http.get(EXPORT_URL, () => {
+        exported = true;
+        return HttpResponse.arrayBuffer(new ArrayBuffer(4), {
+          headers: {
+            'Content-Type': 'application/pdf',
+            'Content-Disposition': 'attachment; filename="sample_REDACTED_doc-1_x.pdf"',
+          },
+        });
+      }),
+    );
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: /export redacted pdf/i }));
+    await waitFor(() => expect(click).toHaveBeenCalled());
+    expect(exported).toBe(true);
+  });
+
+  it('selecting a redaction on page 2 opens that record, not page 1\'s', async () => {
+    withRedactions([
+      { ...approved, id: 'r-p1', page: 1, category: 'PAGE-ONE' },
+      { ...approved, id: 'r-p2', page: 2, category: 'PAGE-TWO' },
+    ]);
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(mockPdfViewerProps.current?.redactions?.length).toBe(1));
+    const nextBtn = screen.getAllByRole('button').find(b =>
+      b.querySelector('[data-testid="ChevronRightIcon"]'),
+    )!;
+    await userEvent.click(nextBtn);
+    await waitFor(() => expect(mockPdfViewerProps.current.redactions[0].id).toBe('r-p2'));
+    mockPdfViewerProps.current.onRedactionClick(0, {
+      stopPropagation: vi.fn(), clientX: 0, clientY: 0,
+    });
+    expect(await screen.findByText('PAGE-TWO')).toBeInTheDocument();
+    await waitFor(() => expect(mockPdfViewerProps.current.selectedRedactionIndex).toBe(0));
   });
 });

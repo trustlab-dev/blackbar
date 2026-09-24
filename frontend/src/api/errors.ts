@@ -80,9 +80,33 @@ export function getApiErrorMessage(
     if (message) return message;
   }
 
-  // FastAPI default: {detail: '...'} or {detail: [{msg}]}
-  const detail = text(data.detail) ?? firstValidationMessage(data.detail);
+  // FastAPI default: {detail: '...'} or {detail: [{msg}]}, or a dict
+  // detail such as {detail: {message, errors}}.
+  const detail =
+    text(data.detail) ??
+    firstValidationMessage(data.detail) ??
+    (isObject(data.detail) ? text(data.detail.message) : null);
   if (detail) return detail;
 
   return text(data.message) ?? fallback;
+}
+
+/**
+ * A request made with `responseType: 'blob'` (file downloads) gets its error
+ * body as a Blob too, which getApiErrorMessage cannot read. Returns the error
+ * with a JSON error body parsed in place, so the backend's message (e.g. the
+ * export 409 "redactions are awaiting review") reaches the user. Anything
+ * that is not a JSON blob is returned unchanged.
+ */
+export async function withParsedBlobErrorBody<T>(err: T): Promise<T> {
+  if (!isObject(err) || !isObject(err.response)) return err;
+  const data = err.response.data;
+  if (typeof Blob === 'undefined' || !(data instanceof Blob)) return err;
+  if (!/json/i.test(data.type)) return err;
+  try {
+    const parsed: unknown = JSON.parse(await data.text());
+    return { ...err, response: { ...err.response, data: parsed } } as T;
+  } catch {
+    return err;
+  }
 }

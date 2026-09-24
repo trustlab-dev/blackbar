@@ -82,3 +82,22 @@ export function partitionUploadFiles(files: File[]): { valid: File[]; errors: st
   }
   return { valid, errors };
 }
+
+/**
+ * Non-fatal problems reported by a successful upload (POST /documents/):
+ * `warnings` (email thread consolidation failures, dropped attachments;
+ * backend/src/documents/routes.py upload_document) and the single `warning`
+ * sent when conversion to PDF failed. Shown to the user after upload.
+ */
+export function getUploadWarnings(data: unknown): string[] {
+  if (typeof data !== 'object' || data === null) return [];
+  const record = data as { warnings?: unknown; warning?: unknown };
+  const raw: unknown[] = [
+    ...(Array.isArray(record.warnings) ? record.warnings : []),
+    record.warning,
+  ];
+  return raw
+    .filter((w): w is string => typeof w === 'string')
+    .map((w) => w.trim())
+    .filter((w) => w !== '');
+}

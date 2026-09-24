@@ -20,7 +20,8 @@ import SlideshowIcon from '@mui/icons-material/Slideshow';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import './CaseDocuments.css';
 import { getApiErrorMessage } from '../api/errors';
-import { partitionUploadFiles, UPLOAD_ACCEPT } from '../utils/uploadValidation';
+import { getUploadWarnings, partitionUploadFiles, UPLOAD_ACCEPT } from '../utils/uploadValidation';
+import { getBlockingRedactions, isConversionFailed, RedactionStatusFields } from '../utils/redactionStatus';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -48,6 +49,9 @@ interface Document {
   message_id?: string;
   has_attachments?: boolean;
   total_attachments?: number;
+  conversion_failed?: boolean;
+  conversion_error?: string;
+  redactions?: RedactionStatusFields[];
 }
 
 interface Attachment {
@@ -69,7 +73,22 @@ const DOCUMENT_STATUSES = [
   { value: 'withheld', label: 'Withheld', color: 'var(--color-danger)' }
 ];
 
+// Statuses the backend refuses (409) for a document whose conversion to PDF
+// failed (backend/src/documents/document_status_routes.py).
+const RELEASE_STATUSES = new Set(['approved', 'released']);
+
+// Not a settable workflow status: set by ingest when conversion to PDF fails.
+const CONVERSION_FAILED_STATUS = {
+  value: 'conversion_failed',
+  label: 'Conversion Failed',
+  color: 'var(--color-danger)',
+};
+
+const CONVERSION_FAILED_RELEASE_MESSAGE =
+  'Documents that failed conversion to PDF cannot be approved or released.';
+
 const getStatusInfo = (status: string) => {
+  if (status === CONVERSION_FAILED_STATUS.value) return CONVERSION_FAILED_STATUS;
   return DOCUMENT_STATUSES.find(s => s.value === status) || DOCUMENT_STATUSES[0];
 };
 
@@ -95,6 +114,7 @@ const CaseDocuments: React.FC = () => {
   const [duplicateFiles, setDuplicateFiles] = useState<Array<{filename: string, duplicateOf: string}>>([]);
   const [threadConsolidations, setThreadConsolidations] = useState<string[]>([]);
   const [failedUploads, setFailedUploads] = useState<Array<{filename: string, error: string}>>([]);
+  const [uploadWarnings, setUploadWarnings] = useState<Array<{filename: string, warnings: string[]}>>([]);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [documentToDelete, setDocumentToDelete] = useState<{id: string, filename: string} | null>(null);
@@ -267,12 +287,24 @@ const CaseDocuments: React.FC = () => {
       ));
     } catch (error) {
       console.error('Error updating document status:', error);
-      alert('Failed to update document status');
+      alert(getApiErrorMessage(error, 'Failed to update document status'));
     }
   };
 
   const bulkUpdateStatus = async () => {
     if (!bulkStatus || selectedDocs.size === 0) return;
+
+    // The backend refuses the whole batch (409) if any selected document
+    // failed conversion; say which ones up front.
+    if (RELEASE_STATUSES.has(bulkStatus)) {
+      const blocked = documents.filter(doc => selectedDocs.has(doc.id) && isConversionFailed(doc));
+      if (blocked.length > 0) {
+        alert(
+          `${CONVERSION_FAILED_RELEASE_MESSAGE} Deselect: ${blocked.map(d => d.filename).join(', ')}`
+        );
+        return;
+      }
+    }
 
     try {
       const token = localStorage.getItem('token');
@@ -296,9 +328,14 @@ const CaseDocuments: React.FC = () => {
       setSelectedDocs(new Set());
       setBulkStatus('');
       alert(`Updated ${selectedDocs.size} documents`);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error bulk updating status:', error);
-      alert('Failed to bulk update statuses');
+      // The bulk 409 carries a dict detail; keep the message readable.
+      alert(
+        error?.response?.status === 409
+          ? CONVERSION_FAILED_RELEASE_MESSAGE
+          : getApiErrorMessage(error, 'Failed to bulk update statuses')
+      );
     }
   };
 
@@ -516,6 +553,7 @@ const CaseDocuments: React.FC = () => {
     const duplicates: Array<{filename: string, duplicateOf: string}> = [];
     const threadConsolidations: string[] = [];
     const failures: Array<{filename: string, error: string}> = [];
+    const warnings: Array<{filename: string, warnings: string[]}> = [];
     
     // Initialize progress for all files
     const initialProgress: {[key: string]: {status: string, progress: number}} = {};
@@ -570,6 +608,13 @@ const CaseDocuments: React.FC = () => {
             }));
           }
           
+          // Non-fatal ingest problems (thread consolidation failed,
+          // attachments dropped, conversion failed)
+          const fileWarnings = getUploadWarnings(response.data);
+          if (fileWarnings.length > 0) {
+            warnings.push({ filename: file.name, warnings: fileWarnings });
+          }
+
           // Track thread consolidations
           if (response.data.thread_consolidation) {
             const consolidation = response.data.thread_consolidation;
@@ -603,10 +648,11 @@ const CaseDocuments: React.FC = () => {
       await fetchDocuments();
       
       // Show upload results modal if duplicates, thread consolidations, or failures found
-      if (duplicates.length > 0 || threadConsolidations.length > 0 || failures.length > 0) {
+      if (duplicates.length > 0 || threadConsolidations.length > 0 || failures.length > 0 || warnings.length > 0) {
         setDuplicateFiles(duplicates);
         setThreadConsolidations(threadConsolidations);
         setFailedUploads(failures);
+        setUploadWarnings(warnings);
         setUploadResultsModalOpen(true);
       }
     } catch (error) {
@@ -698,6 +744,7 @@ const CaseDocuments: React.FC = () => {
             {DOCUMENT_STATUSES.map(status => (
               <option key={status.value} value={status.value}>{status.label}</option>
             ))}
+            <option value={CONVERSION_FAILED_STATUS.value}>{CONVERSION_FAILED_STATUS.label}</option>
           </select>
         </div>
 
@@ -872,6 +919,32 @@ const CaseDocuments: React.FC = () => {
                             </span>
                           </div>
                         )}
+                        {(() => {
+                          const conversionFailed = isConversionFailed(doc);
+                          const blocking = conversionFailed ? 0 : getBlockingRedactions(doc.redactions).length;
+                          if (!conversionFailed && blocking === 0) return null;
+                          return (
+                            <div className="doc-badges">
+                              {conversionFailed && (
+                                <span
+                                  className="doc-badge doc-badge-danger"
+                                  title={`${doc.conversion_error ? `${doc.conversion_error}. ` : ''}This document cannot be redacted, approved or released.`}
+                                >
+                                  Conversion failed
+                                </span>
+                              )}
+                              {blocking > 0 && (
+                                <span
+                                  className="doc-badge doc-badge-warning"
+                                  title="Only approved redactions are applied. Open the document and approve or reject these before export or release."
+                                  onClick={() => navigate(`/documents/${doc.id}`)}
+                                >
+                                  {blocking} redaction{blocking !== 1 ? 's' : ''} awaiting review
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
                     </td>
                     <td className="col-status">
@@ -884,8 +957,17 @@ const CaseDocuments: React.FC = () => {
                           color: 'white'
                         }}
                       >
+                        {doc.status === CONVERSION_FAILED_STATUS.value && (
+                          <option value={CONVERSION_FAILED_STATUS.value} disabled>
+                            {CONVERSION_FAILED_STATUS.label}
+                          </option>
+                        )}
                         {DOCUMENT_STATUSES.map(status => (
-                          <option key={status.value} value={status.value}>
+                          <option
+                            key={status.value}
+                            value={status.value}
+                            disabled={isConversionFailed(doc) && RELEASE_STATUSES.has(status.value)}
+                          >
                             {status.label}
                           </option>
                         ))}
@@ -1066,6 +1148,28 @@ const CaseDocuments: React.FC = () => {
               </div>
             )}
 
+            {/* Uploaded, but with ingest warnings */}
+            {uploadWarnings.length > 0 && (
+              <div className="upload-results-section">
+                <h3>⚠️ Uploaded with warnings</h3>
+                <p className="section-description">
+                  These documents were uploaded, but part of the processing did not complete:
+                </p>
+                <div className="failed-list">
+                  {uploadWarnings.map((item, index) => (
+                    <div key={index} className="failed-item">
+                      <div className="failed-filename">
+                        <strong>{item.filename}</strong>
+                      </div>
+                      {item.warnings.map((warning, wi) => (
+                        <div key={wi} className="failed-error">{warning}</div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Failed Uploads */}
             {failedUploads.length > 0 && (
               <div className="upload-results-section">
@@ -1095,6 +1199,7 @@ const CaseDocuments: React.FC = () => {
                   setThreadConsolidations([]);
                   setDuplicateFiles([]);
                   setFailedUploads([]);
+                  setUploadWarnings([]);
                 }}
                 className="btn-primary"
               >

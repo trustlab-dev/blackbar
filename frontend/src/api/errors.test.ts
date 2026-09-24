@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
 import {
   getApiErrorMessage,
+  withParsedBlobErrorBody,
   DEFAULT_ERROR_MESSAGE,
   PUBLIC_TOKEN_FORBIDDEN_MESSAGE,
 } from './errors';
@@ -117,5 +118,33 @@ describe('getApiErrorMessage', () => {
     expect(getApiErrorMessage(new Error('boom'), 'fb')).toBe('fb');
     expect(getApiErrorMessage(undefined, 'fb')).toBe('fb');
     expect(getApiErrorMessage('oops')).toBe(DEFAULT_ERROR_MESSAGE);
+  });
+});
+
+describe('getApiErrorMessage — dict detail', () => {
+  it('reads {detail: {message}} (HTTPException raised with a dict detail)', () => {
+    const err = axiosError(409, {
+      detail: { message: 'Documents that failed conversion cannot be approved.', document_ids: ['d1'] },
+    });
+    expect(getApiErrorMessage(err, 'fb')).toBe('Documents that failed conversion cannot be approved.');
+  });
+});
+
+describe('withParsedBlobErrorBody', () => {
+  it('parses a JSON error body returned for a blob request so the message is readable', async () => {
+    const body = new Blob(
+      [JSON.stringify({ error: { code: 'HTTP_409', message: '2 redaction(s) are awaiting review' } })],
+      { type: 'application/json' },
+    );
+    const err = await withParsedBlobErrorBody(axiosError(409, body));
+    expect(getApiErrorMessage(err, 'fb')).toBe('2 redaction(s) are awaiting review');
+  });
+
+  it('leaves non-JSON blobs and non-axios values alone', async () => {
+    const raw = axiosError(409, new Blob(['%PDF'], { type: 'application/pdf' }));
+    expect(getApiErrorMessage(await withParsedBlobErrorBody(raw), 'fb')).toBe('fb');
+    const bad = axiosError(409, new Blob(['not json'], { type: 'application/json' }));
+    expect(getApiErrorMessage(await withParsedBlobErrorBody(bad), 'fb')).toBe('fb');
+    expect(await withParsedBlobErrorBody(undefined)).toBeUndefined();
   });
 });

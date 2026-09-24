@@ -4,6 +4,7 @@ import {
   UPLOAD_ACCEPT,
   validateUploadFile,
   partitionUploadFiles,
+  getUploadWarnings,
 } from './uploadValidation';
 
 function fakeFile(name: string, size: number, type = ''): File {
@@ -61,5 +62,28 @@ describe('upload validation (mirrors backend processing_service limits)', () => 
     expect(valid).toEqual([ok]);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain('b.exe');
+  });
+});
+
+describe('getUploadWarnings (POST /documents/ response)', () => {
+  it('collects the warnings list (thread consolidation failures, dropped attachments)', () => {
+    expect(
+      getUploadWarnings({
+        id: 'd1',
+        warnings: ['Email thread consolidation failed: boom', 'Attachment x.exe was not saved'],
+      }),
+    ).toEqual(['Email thread consolidation failed: boom', 'Attachment x.exe was not saved']);
+  });
+
+  it('includes the single conversion warning', () => {
+    expect(getUploadWarnings({ message: 'Uploaded with conversion warning', warning: 'LibreOffice failed' }))
+      .toEqual(['LibreOffice failed']);
+  });
+
+  it('ignores blanks, non-strings and missing fields', () => {
+    expect(getUploadWarnings({ warnings: ['', 3, null, ' ok '] })).toEqual(['ok']);
+    expect(getUploadWarnings({ id: 'd1' })).toEqual([]);
+    expect(getUploadWarnings(undefined)).toEqual([]);
+    expect(getUploadWarnings('nope')).toEqual([]);
   });
 });

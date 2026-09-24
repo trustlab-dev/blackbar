@@ -687,3 +687,123 @@ describe('CaseDocuments — error & notification paths', () => {
     );
   });
 });
+
+// Backend contract: conversion_failed documents cannot be approved or
+// released (409, backend/src/documents/document_status_routes.py); only
+// approved redactions are burned in and anything unresolved blocks export and
+// release (backend/src/utils/redaction_records.py); uploads may carry
+// `warnings` (backend/src/documents/routes.py upload_document).
+describe('CaseDocuments — redaction/release readiness', () => {
+  const failedDoc = {
+    ...baseDoc,
+    id: 'd-fail',
+    filename: 'broken.docx',
+    status: 'conversion_failed',
+    conversion_failed: true,
+    conversion_error: 'LibreOffice could not convert the file',
+  };
+
+  function listDocs(documents: any[]) {
+    server.use(
+      http.get('/api/v1/cases/case-1/documents', () => HttpResponse.json({ documents })),
+      http.get('/api/v1/auth/users/guests', () => HttpResponse.json([])),
+    );
+  }
+
+  it('badges conversion-failed documents and disables Approved/Released for them', async () => {
+    listDocs([failedDoc]);
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('broken.docx');
+    const badge = screen.getByText(/conversion failed/i, { selector: '.doc-badge' });
+    expect(badge).toHaveAttribute('title', expect.stringMatching(/LibreOffice/));
+    const rowSelect = screen.getByDisplayValue(/conversion failed/i) as HTMLSelectElement;
+    const option = (value: string) =>
+      Array.from(rowSelect.options).find((o) => o.value === value)!;
+    expect(option('approved').disabled).toBe(true);
+    expect(option('released').disabled).toBe(true);
+    expect(option('withheld').disabled).toBe(false);
+  });
+
+  it('counts redactions that block export/release', async () => {
+    listDocs([
+      {
+        ...baseDoc,
+        redactions: [
+          { id: 'r1', status: 'approved' },
+          { id: 'r2', status: 'proposed' },
+          { id: 'r3', status: 'contested' },
+          { id: 'r4', status: 'rejected' },
+          { id: 'r5', status: 'pending', created_by_role: 'admin' },
+        ],
+      },
+    ]);
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('report.pdf');
+    expect(screen.getByText(/2 redactions awaiting review/i)).toBeInTheDocument();
+  });
+
+  it('refuses a bulk approve that includes a conversion-failed document without calling the API', async () => {
+    let called = false;
+    listDocs([{ ...baseDoc, id: 'd1', filename: 'a.pdf' }, failedDoc]);
+    server.use(
+      http.put('/api/v1/documents/bulk/status', () => {
+        called = true;
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('a.pdf');
+    await user.click(screen.getAllByRole('checkbox')[0]);
+    await user.selectOptions(screen.getByDisplayValue('Change Status...'), 'approved');
+    await user.click(screen.getByRole('button', { name: /update status/i }));
+    await waitFor(() =>
+      expect(window.alert).toHaveBeenCalledWith(expect.stringMatching(/broken\.docx/)),
+    );
+    expect(called).toBe(false);
+  });
+
+  it('explains a 409 from the per-row status update', async () => {
+    listDocs([baseDoc]);
+    server.use(
+      http.put('/api/v1/documents/doc-1/status', () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_409', message: 'Documents that failed conversion to PDF cannot be approved or released.' } },
+          { status: 409 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('report.pdf');
+    await user.selectOptions(screen.getByDisplayValue('New'), 'approved');
+    await waitFor(() =>
+      expect(window.alert).toHaveBeenCalledWith(
+        'Documents that failed conversion to PDF cannot be approved or released.',
+      ),
+    );
+  });
+
+  it('shows upload warnings in the results modal', async () => {
+    listDocs([]);
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: {
+        id: 'd',
+        filename: 'mail.eml',
+        message: 'Uploaded successfully',
+        warnings: ['Email thread consolidation failed: timeout'],
+      },
+    } as never);
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText(/no documents uploaded yet/i);
+    await user.click(screen.getByRole('button', { name: /upload documents/i }));
+    await screen.findByText(/add documents/i);
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, new File(['a'], 'mail.eml', { type: 'message/rfc822' }));
+    await screen.findByText(/1 file selected/i);
+    await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
+    expect(await screen.findByText(/uploaded with warnings/i)).toBeInTheDocument();
+    expect(screen.getByText(/thread consolidation failed: timeout/i)).toBeInTheDocument();
+  });
+});

@@ -1310,3 +1310,34 @@
     justify-content: space-between;
   }
 }
+
+/* Redaction/release readiness badges under the filename */
+.doc-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  padding-left: 24px;
+}
+
+.doc-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.doc-badge-danger {
+  background: var(--color-danger);
+  color: #fff;
+}
+
+.doc-badge-warning {
+  background: #fff3cd;
+  color: #664d03;
+  border: 1px solid #ffc107;
+  cursor: pointer;
+}

@@ -291,14 +291,13 @@ const HelpGuide: React.FC = () => {
           question: 'Approval workflow on redactions',
           answer: (
             <div>
-              <p>By default, redactions move through:</p>
-              <ol style={{marginLeft: '20px', marginTop: '10px'}}>
-                <li><strong>pending</strong> — drafted by an analyst</li>
-                <li><strong>proposed</strong> — submitted for review</li>
-                <li><strong>approved</strong> — signed off by a reviewer/approver</li>
-                <li><strong>applied</strong> — burned into the final PDF at release</li>
-              </ol>
-              <p style={{marginTop: '15px'}}>Reviewers and approvers can also <strong>contest</strong> a redaction or <strong>reject</strong> it with a reason. The contest history is preserved on the document.</p>
+              <p>Redactions drawn by staff or case analysts are <strong>approved</strong> straight away. Anyone else creates a <strong>proposed</strong> redaction that a case analyst or manager must approve or reject.</p>
+              <ul style={{marginLeft: '20px', marginTop: '10px'}}>
+                <li><strong>approved</strong>: burned into the PDF on export and release</li>
+                <li><strong>rejected</strong>: ignored</li>
+                <li><strong>proposed</strong>, <strong>contested</strong> or anything else still awaiting review: <em>blocks</em> the document. Export is refused and the release package marks the document failed until every such redaction is approved or rejected.</li>
+              </ul>
+              <p style={{marginTop: '15px'}}>The document viewer lists redactions awaiting review, with Approve and Reject buttons for proposals. Reviewers can also <strong>contest</strong> a redaction with a reason; the contest history is preserved on the document.</p>
             </div>
           ),
           tags: ['approval', 'review', 'workflow', 'contest', 'reject']
@@ -547,6 +546,7 @@ const HelpGuide: React.FC = () => {
                 <li>Open the case.</li>
                 <li>Click <strong>Generate Release Package</strong> in the case actions.</li>
                 <li>The system applies all approved redactions permanently to copies of the PDFs, optionally generates a cover letter from the pack's template, and bundles everything into a ZIP.</li>
+                <li>If any document still has redactions awaiting review, or cannot be safely redacted, the package is marked <strong>failed</strong> and lists those documents with the reason. Documents that failed conversion to PDF are left out and listed too.</li>
                 <li>The package is recorded with a unique access token, an expiry date, and an optional download limit.</li>
               </ol>
             </div>
