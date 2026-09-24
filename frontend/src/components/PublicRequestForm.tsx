@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import api from '../api/client';
+import { publicApi as api } from '../api/client';
 import './PublicRequestForm.css';
 import { getApiErrorMessage } from '../api/errors';
 

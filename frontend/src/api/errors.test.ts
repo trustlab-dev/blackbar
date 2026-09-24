@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
-import { getApiErrorMessage, DEFAULT_ERROR_MESSAGE } from './errors';
+import {
+  getApiErrorMessage,
+  DEFAULT_ERROR_MESSAGE,
+  PUBLIC_TOKEN_FORBIDDEN_MESSAGE,
+} from './errors';
 
 function axiosError(status: number, data: unknown): AxiosError {
   const config = { headers: new AxiosHeaders() };
@@ -51,6 +55,39 @@ describe('getApiErrorMessage', () => {
     expect(getApiErrorMessage(err, 'fb')).toBe(
       'Invalid request data: password: String too short',
     );
+  });
+
+  it('drops the Pydantic "Value error, " prefix from custom validator messages', () => {
+    // Shape of the backend 422 for a short password (auth/security.py
+    // password_policy_error via a field_validator).
+    const err = axiosError(422, {
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid request data',
+        details: {
+          errors: [
+            {
+              loc: ['body', 'password'],
+              msg: 'Value error, Password must be at least 12 characters',
+            },
+          ],
+        },
+      },
+    });
+    expect(getApiErrorMessage(err, 'fb')).toBe(
+      'Invalid request data: password: Password must be at least 12 characters',
+    );
+  });
+
+  it('explains PUBLIC_TOKEN_FORBIDDEN in requester terms', () => {
+    const err = axiosError(403, {
+      error: {
+        code: 'PUBLIC_TOKEN_FORBIDDEN',
+        message: 'Public accounts cannot access this endpoint',
+        correlation_id: 'x',
+      },
+    });
+    expect(getApiErrorMessage(err, 'fb')).toBe(PUBLIC_TOKEN_FORBIDDEN_MESSAGE);
   });
 
   it('never returns a non-string (objects would crash React rendering)', () => {

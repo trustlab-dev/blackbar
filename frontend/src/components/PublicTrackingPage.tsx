@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import api from '../api/client';
+import { publicApi as api } from '../api/client';
 import './PublicTrackingPage.css';
 import { getApiErrorMessage } from '../api/errors';
 
@@ -50,7 +50,7 @@ const PublicTrackingPage: React.FC = () => {
 
   const fetchTrackingData = async (number: string) => {
     try {
-      const response = await api.get(`/cases/public/track/${number}`);
+      const response = await api.get(`/cases/public/track/${encodeURIComponent(number)}`);
       setData(response.data);
       setError('');
     } catch (err: any) {

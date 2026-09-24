@@ -13,6 +13,11 @@ export const handlers = [
   http.get('*/api/v1/admin/config/public', () =>
     HttpResponse.json({ demo_mode: false }),
   ),
+  // Logout revokes the session server-side (fire-and-forget from
+  // AuthContext.logout / revokeSessionOnServer).
+  http.post('*/api/v1/auth/logout', () =>
+    HttpResponse.json({ message: 'Logged out successfully' }),
+  ),
 ];
 
 export const server = setupServer(...handlers);

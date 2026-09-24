@@ -40,8 +40,10 @@ export const FILTERED = '[FILTERED]';
 // Path segments that carry a capability token: magic-link verify
 // (/public/verify/<token>), public collection links (/collect/<token>,
 // /api/v1/cases/collect/<token>/upload), contributor portal
-// (/contribute/<id>) and release downloads (/cases/public/release/<token>).
-const TOKEN_PATH_SEGMENT = /(\/(?:verify|collect|contribute|release)\/)[^/?#\s"']+/gi;
+// (/contribute/<id>), release downloads (/cases/public/release/<token>) and
+// public tracking (/track/<number>, /cases/public/track/<number>): the
+// tracking number's random suffix is the only credential for that lookup.
+const TOKEN_PATH_SEGMENT = /(\/(?:verify|collect|contribute|release|track)\/)[^/?#\s"']+/gi;
 // Query/fragment parameters whose values must never be sent.
 const SENSITIVE_PARAM_NAME = /token|key|secret|passw|code|sig|auth|email|session/i;
 const QUERY_PAIR = /([?&#;])([^=&#?\s"']+)=([^&#\s"']*)/g;

@@ -27,7 +27,6 @@ import Login from './components/Login';
 import SharedDocuments from './components/SharedDocuments';
 import ProtectedRoute from './components/ProtectedRoute';
 import ContributorPortal from './components/public/ContributorPortal';
-import { clearUser as clearTelemetryUser } from './utils/telemetry';
 import { publicApi } from './api/client';
 
 const DocumentViewerWrapper: React.FC = () => {
@@ -38,7 +37,7 @@ const DocumentViewerWrapper: React.FC = () => {
 
 const Header: React.FC = () => {
   const { currentRole } = useUser();
-  const { user, roles } = useAuth();
+  const { user, roles, logout } = useAuth();
   const [orgName, setOrgName] = useState('BlackBar');
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const open = Boolean(anchorEl);
@@ -56,7 +55,9 @@ const Header: React.FC = () => {
   };
 
   const handleLogout = () => {
-    clearTelemetryUser();
+    // Revokes the token server-side (fire-and-forget) and clears auth state
+    // and the telemetry user.
+    logout();
     localStorage.clear();
     window.location.href = '/login';
   };
@@ -240,10 +241,20 @@ const AppContent = () => {
     fetchPublicConfig();
   }, []);
 
-  // Check if user is authenticated
+  // A magic-link (public portal) session also keeps its JWT under `token`,
+  // but the backend refuses it on every staff endpoint (403
+  // PUBLIC_TOKEN_FORBIDDEN). Staff routes must not render for it, or every
+  // page would load into a wall of 403s.
+  const isPublicSession = () => localStorage.getItem('user_type') === 'public';
+
+  // Check if a staff user is authenticated
   const isAuthenticated = () => {
-    return localStorage.getItem('token') !== null;
+    return localStorage.getItem('token') !== null && !isPublicSession();
   };
+
+  // Where an unauthenticated visitor to a staff route goes: requesters back
+  // to their own dashboard, everyone else to the staff login.
+  const staffLoginPath = isPublicSession() ? '/public/dashboard' : '/login';
 
   // Handler for successful login
   const handleLoginSuccess = () => {
@@ -325,7 +336,7 @@ const AppContent = () => {
               <SharedDocuments />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         {/* Protected Routes - require authentication */}
@@ -336,7 +347,7 @@ const AppContent = () => {
               <CaseQueue />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         {/* Priority Queue Route */}
@@ -347,7 +358,7 @@ const AppContent = () => {
               <PriorityQueue currentUserId={localStorage.getItem('userId') || undefined} />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/cases/new" element={
@@ -357,7 +368,7 @@ const AppContent = () => {
               <CaseForm />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/cases/:caseId" element={
@@ -367,7 +378,7 @@ const AppContent = () => {
               <CaseDetailView />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/cases/:caseId/documents" element={
@@ -377,23 +388,27 @@ const AppContent = () => {
               <CaseDocuments />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/documents/:documentId" element={
           isAuthenticated() ? (
             <DocumentViewerWrapper />
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
 
         {/* Admin Routes - Protected with role checks */}
         <Route path="/admin" element={
-          <ProtectedRoute isAuthenticated={isAuthenticated()} requiredRoles={['owner', 'admin']}>
-            <Header />
-            <AdminConsole />
-          </ProtectedRoute>
+          isPublicSession() ? (
+            <Navigate to={staffLoginPath} replace />
+          ) : (
+            <ProtectedRoute isAuthenticated={isAuthenticated()} requiredRoles={['owner', 'admin']}>
+              <Header />
+              <AdminConsole />
+            </ProtectedRoute>
+          )
         } />
 
         {/* Help Route */}
@@ -404,7 +419,7 @@ const AppContent = () => {
               <HelpGuide />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
       </Routes>

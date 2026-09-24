@@ -1,13 +1,23 @@
 // frontend/src/components/DocumentUpload.tsx
 import React, { useState } from 'react';
-import api from '../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 interface Props {
   onUpload?: (files: File[]) => Promise<void>;
   onUploadSuccess?: (documentId: string) => void;
+  /**
+   * Case the upload belongs to. Required for the built-in API upload: the
+   * backend answers 400 "case_id is required" for team-scoped (`user`) callers
+   * that omit it (backend/src/documents/routes.py upload_document).
+   */
+  caseId?: string;
 }
 
-export const DocumentUpload: React.FC<Props> = ({ onUpload, onUploadSuccess }) => {
+export const NO_CASE_UPLOAD_MESSAGE =
+  'Open a case before uploading: documents must be uploaded to a case.';
+
+export const DocumentUpload: React.FC<Props> = ({ onUpload, onUploadSuccess, caseId }) => {
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState<string>('');
 
@@ -29,7 +39,15 @@ export const DocumentUpload: React.FC<Props> = ({ onUpload, onUploadSuccess }) =
       } 
       // Otherwise use the default API upload
       else if (onUploadSuccess) {
-        const response = await api.post('/documents/', formData);
+        if (!caseId) {
+          // Fail here with a clear message instead of a silent 400.
+          setMessage(NO_CASE_UPLOAD_MESSAGE);
+          return;
+        }
+        formData.append('case_id', caseId);
+        const response = await api.post('/documents/', formData, {
+          timeout: TRANSFER_TIMEOUT_MS,
+        });
         
         if (response.data.existing) {
           setMessage('This document was already uploaded. Loading existing version...');
@@ -41,7 +59,7 @@ export const DocumentUpload: React.FC<Props> = ({ onUpload, onUploadSuccess }) =
       }
     } catch (error) {
       console.error('Upload failed:', error);
-      setMessage('Failed to upload document. Please try again.');
+      setMessage(getApiErrorMessage(error, 'Failed to upload document. Please try again.'));
     } finally {
       setUploading(false);
     }

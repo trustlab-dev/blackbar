@@ -31,7 +31,7 @@ const SharedDocuments: React.FC = () => {
       setLoading(true);
       setError(null);
       const response = await api.get('/documents/shared-with-me');
-      setDocuments(response.data.documents);
+      setDocuments(response.data?.documents ?? []);
     } catch (err: any) {
       console.error('Error fetching shared documents:', err);
       // Handle authentication errors explicitly

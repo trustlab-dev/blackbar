@@ -83,6 +83,9 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
   const [teamMembers, setTeamMembers] = useState<CaseTeamMember[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Add-member failures (400 role/system-role mismatch or duplicate, 403,
+  // 422) render inside the dialog: the panel alert is behind the backdrop.
+  const [addError, setAddError] = useState<string | null>(null);
   const [openAddDialog, setOpenAddDialog] = useState(false);
   
   // Add member form state
@@ -111,12 +114,13 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
 
   const handleAddMember = async () => {
     if (!newMemberUserId) {
-      setError('User ID is required');
+      setAddError('User ID is required');
       return;
     }
 
     try {
       setLoading(true);
+      setAddError(null);
       await api.post(`/cases/${caseId}/team/members`, {
         user_id: newMemberUserId,
         role: newMemberRole,
@@ -133,7 +137,7 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
       await fetchTeamMembers();
     } catch (err: any) {
       console.error('Error adding team member:', err);
-      setError(getApiErrorMessage(err, 'Failed to add team member'));
+      setAddError(getApiErrorMessage(err, 'Failed to add team member'));
     } finally {
       setLoading(false);
     }
@@ -150,6 +154,7 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
       await fetchTeamMembers();
     } catch (err: any) {
       console.error('Error removing team member:', err);
+      // Includes 409 "Team member could not be removed; retry".
       setError(getApiErrorMessage(err, 'Failed to remove team member'));
     } finally {
       setLoading(false);
@@ -207,7 +212,10 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
           <Button
             size="small"
             startIcon={<PersonAddIcon />}
-            onClick={() => setOpenAddDialog(true)}
+            onClick={() => {
+              setAddError(null);
+              setOpenAddDialog(true);
+            }}
             sx={{
               borderColor: '#d0d0d0',
               color: 'var(--text-primary)',
@@ -292,6 +300,11 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
       <Dialog open={openAddDialog} onClose={() => setOpenAddDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Add Team Member</DialogTitle>
         <DialogContent>
+          {addError && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              {addError}
+            </Alert>
+          )}
           <Box sx={{ pt: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
             <UserPicker
               value={newMemberUserId}

@@ -440,6 +440,11 @@ describe('scrubbing helpers', () => {
         '/activate?email=[FILTERED]&token=[FILTERED]',
       ],
       ['/cb#access_token=jwt.abc.def&state=1', '/cb#access_token=[FILTERED]&state=1'],
+      ['/track/FOI-2026-007-K7QX2M9A', '/track/[FILTERED]'],
+      [
+        '/api/v1/cases/public/track/FOI-2026-007-K7QX2M9A',
+        '/api/v1/cases/public/track/[FILTERED]',
+      ],
       ['/cases?status=open&page=2', '/cases?status=open&page=2'],
       ['/cases/123/documents', '/cases/123/documents'],
     ])('%s', async (input, expected) => {

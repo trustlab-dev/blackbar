@@ -301,6 +301,137 @@ describe('client.ts — response interceptor (401 redirect)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Response interceptor — revoked / inactive sessions and public tokens
+// ---------------------------------------------------------------------------
+describe('client.ts — session-ended 401s and public-token 403s', () => {
+  const envelope = (code: string, message: string) => ({
+    error: { code, message, details: {}, correlation_id: 'c' },
+  });
+
+  it.each([
+    ['Session has been revoked', 'revoked'],
+    ['Account is not active', 'inactive'],
+    ['Invalid or expired token', 'expired'],
+  ])('401 "%s" clears auth and redirects to login with reason=%s', async (message, reason) => {
+    localStorage.setItem('token', 'tok');
+    localStorage.setItem('userRoles', '["analyst"]');
+    localStorage.setItem('userId', 'u1');
+    const restore = stubLocation({ pathname: '/cases/7', search: '' });
+    try {
+      const { default: api } = await import('./client');
+      let calls = 0;
+      server.use(
+        http.get('/api/v1/cases', () => {
+          calls += 1;
+          return HttpResponse.json(envelope('HTTP_401', message), { status: 401 });
+        }),
+      );
+      await expect(api.get('/cases')).rejects.toThrow();
+
+      expect(window.location.href).toBe(
+        `/login?redirect=${encodeURIComponent('/cases/7')}&reason=${reason}`,
+      );
+      expect(localStorage.getItem('token')).toBeNull();
+      expect(localStorage.getItem('userRoles')).toBeNull();
+      expect(localStorage.getItem('userId')).toBeNull();
+      // No retry of the failed request.
+      expect(calls).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('redirects only once when several requests come back 401 together', async () => {
+    localStorage.setItem('token', 'tok');
+    const restore = stubLocation({ pathname: '/cases' });
+    try {
+      const { default: api } = await import('./client');
+      server.use(
+        http.get('/api/v1/a', () =>
+          HttpResponse.json(envelope('HTTP_401', 'Session has been revoked'), { status: 401 }),
+        ),
+        http.get('/api/v1/b', () =>
+          HttpResponse.json(envelope('HTTP_401', 'Session has been revoked'), { status: 401 }),
+        ),
+      );
+      const hrefSet = vi.fn();
+      let href = 'http://localhost/';
+      Object.defineProperty(window.location, 'href', {
+        configurable: true,
+        get: () => href,
+        set: (v: string) => {
+          hrefSet(v);
+          href = v;
+        },
+      });
+      await Promise.allSettled([api.get('/a'), api.get('/b')]);
+      expect(hrefSet).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('403 PUBLIC_TOKEN_FORBIDDEN neither redirects nor clears the public session', async () => {
+    localStorage.setItem('token', 'public-tok');
+    localStorage.setItem('user_type', 'public');
+    const restore = stubLocation({ pathname: '/public/dashboard' });
+    try {
+      const { default: api } = await import('./client');
+      server.use(
+        http.get('/api/v1/cases', () =>
+          HttpResponse.json(
+            envelope('PUBLIC_TOKEN_FORBIDDEN', 'Public accounts cannot access this endpoint'),
+            { status: 403 },
+          ),
+        ),
+      );
+      await expect(api.get('/cases')).rejects.toMatchObject({ response: { status: 403 } });
+      expect(window.location.href).toBe('http://localhost/');
+      expect(localStorage.getItem('token')).toBe('public-tok');
+      expect(localStorage.getItem('user_type')).toBe('public');
+    } finally {
+      restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// revokeSessionOnServer (POST /auth/logout)
+// ---------------------------------------------------------------------------
+describe('client.ts — revokeSessionOnServer', () => {
+  it('POSTs /auth/logout with the given bearer token and keepalive', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    const { revokeSessionOnServer } = await import('./client');
+    revokeSessionOnServer('tok-123');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toMatch(/\/api\/v1\/auth\/logout$/);
+    expect(init).toMatchObject({
+      method: 'POST',
+      keepalive: true,
+      headers: { Authorization: 'Bearer tok-123' },
+    });
+  });
+
+  it('does nothing without a token', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const { revokeSessionOnServer } = await import('./client');
+    revokeSessionOnServer(null);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('swallows network failures (fire-and-forget)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'));
+    const { revokeSessionOnServer } = await import('./client');
+    expect(() => revokeSessionOnServer('tok')).not.toThrow();
+    // Let the rejected promise settle; an unhandled rejection would fail the run.
+    await new Promise((r) => setTimeout(r, 0));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Response interceptor — correlation-ID logging
 // ---------------------------------------------------------------------------
 describe('client.ts — correlation-ID logging', () => {

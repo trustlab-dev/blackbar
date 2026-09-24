@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders, screen, waitFor } from '../test-utils/render';
-import { DocumentUpload } from './DocumentUpload';
+import { DocumentUpload, NO_CASE_UPLOAD_MESSAGE } from './DocumentUpload';
 import api from '../api/client';
 
 // We mock api.post directly rather than letting MSW intercept the
@@ -71,13 +71,19 @@ describe('DocumentUpload — onUploadSuccess (API) branch', () => {
       .spyOn(api, 'post')
       .mockResolvedValue({ data: { id: 'doc-1', existing: false } } as never);
     const onUploadSuccess = vi.fn();
-    renderWithProviders(<DocumentUpload onUploadSuccess={onUploadSuccess} />);
+    renderWithProviders(<DocumentUpload onUploadSuccess={onUploadSuccess} caseId="case-1" />);
     const user = userEvent.setup();
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File(['hi'], 'a.pdf', { type: 'application/pdf' });
     await user.upload(input, file);
     await waitFor(() => expect(onUploadSuccess).toHaveBeenCalledWith('doc-1'));
-    expect(postSpy).toHaveBeenCalledWith('/documents/', expect.any(FormData));
+    expect(postSpy).toHaveBeenCalledWith(
+      '/documents/',
+      expect.any(FormData),
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
+    const sent = postSpy.mock.calls[0][1] as FormData;
+    expect(sent.get('case_id')).toBe('case-1');
     expect(
       await screen.findByText(/document uploaded successfully/i),
     ).toBeInTheDocument();
@@ -88,7 +94,7 @@ describe('DocumentUpload — onUploadSuccess (API) branch', () => {
       data: { id: 'doc-1', existing: true },
     } as never);
     const onUploadSuccess = vi.fn();
-    renderWithProviders(<DocumentUpload onUploadSuccess={onUploadSuccess} />);
+    renderWithProviders(<DocumentUpload onUploadSuccess={onUploadSuccess} caseId="case-1" />);
     const user = userEvent.setup();
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File(['hi'], 'a.pdf', { type: 'application/pdf' });
@@ -103,7 +109,7 @@ describe('DocumentUpload — onUploadSuccess (API) branch', () => {
     vi.spyOn(api, 'post').mockRejectedValue(new Error('500'));
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const onUploadSuccess = vi.fn();
-    renderWithProviders(<DocumentUpload onUploadSuccess={onUploadSuccess} />);
+    renderWithProviders(<DocumentUpload onUploadSuccess={onUploadSuccess} caseId="case-1" />);
     const user = userEvent.setup();
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = new File(['hi'], 'a.pdf', { type: 'application/pdf' });
@@ -112,6 +118,35 @@ describe('DocumentUpload — onUploadSuccess (API) branch', () => {
       await screen.findByText(/failed to upload document/i),
     ).toBeInTheDocument();
     expect(onUploadSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe('DocumentUpload — case_id is required', () => {
+  it('refuses the API upload with a clear message when there is no case', async () => {
+    const postSpy = vi.spyOn(api, 'post');
+    const onUploadSuccess = vi.fn();
+    renderWithProviders(<DocumentUpload onUploadSuccess={onUploadSuccess} />);
+    const user = userEvent.setup();
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(input, new File(['hi'], 'a.pdf', { type: 'application/pdf' }));
+    expect(await screen.findByText(NO_CASE_UPLOAD_MESSAGE)).toBeInTheDocument();
+    expect(postSpy).not.toHaveBeenCalled();
+    expect(onUploadSuccess).not.toHaveBeenCalled();
+  });
+
+  it("shows the backend's message when the upload is refused", async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(api, 'post').mockRejectedValue({
+      response: {
+        status: 400,
+        data: { error: { code: 'HTTP_400', message: 'case_id is required' } },
+      },
+    });
+    renderWithProviders(<DocumentUpload onUploadSuccess={vi.fn()} caseId="case-1" />);
+    const user = userEvent.setup();
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(input, new File(['hi'], 'a.pdf', { type: 'application/pdf' }));
+    expect(await screen.findByText('case_id is required')).toBeInTheDocument();
   });
 });
 

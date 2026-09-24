@@ -129,7 +129,7 @@ const HelpGuide: React.FC = () => {
               <ol style={{marginLeft: '20px', marginTop: '10px'}}>
                 <li>Click <strong>New Request</strong> in the top nav.</li>
                 <li>Fill in: title (required), category, description, requester details (name, email, phone, organization).</li>
-                <li>Submit. A tracking number like <code>FOI-2026-007-DJH</code> is generated and the case lands in the queue with status <strong>New</strong>.</li>
+                <li>Submit. A tracking number like <code>FOI-2026-007-K7QX2M9A</code> is generated and the case lands in the queue with status <strong>New</strong>.</li>
               </ol>
               <p style={{marginTop: '15px'}}>Cases submitted via the public portal at <code>/request</code> end up in the same queue.</p>
               {tipBox(<>The default due date is set by the active jurisdiction pack (BC FIPPA defaults to 30 calendar days under s.7(1)). You can override per case.</>)}
@@ -465,7 +465,7 @@ const HelpGuide: React.FC = () => {
                 <li>Request title + description + category</li>
                 <li>Requester contact details (name, email, phone, organization)</li>
               </ul>
-              <p style={{marginTop: '10px'}}>On submission they get a tracking number (e.g. <code>FOI-2026-007-DJH</code>) and an email confirmation (when SendGrid is configured).</p>
+              <p style={{marginTop: '10px'}}>On submission they get a tracking number (e.g. <code>FOI-2026-007-K7QX2M9A</code>) and an email confirmation (when SendGrid is configured).</p>
             </div>
           ),
           tags: ['public', 'request', 'intake', 'submit']

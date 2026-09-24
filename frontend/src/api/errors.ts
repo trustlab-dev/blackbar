@@ -12,6 +12,14 @@
 
 export const DEFAULT_ERROR_MESSAGE = 'Something went wrong. Please try again.';
 export const TIMEOUT_ERROR_MESSAGE = 'The request timed out. Please try again.';
+/**
+ * A magic-link (public portal) token used on a staff endpoint gets
+ * 403 `{error: {code: 'PUBLIC_TOKEN_FORBIDDEN'}}` from the auth middleware
+ * (backend/src/core/auth_middleware.py). Explain it in requester terms.
+ */
+export const PUBLIC_TOKEN_FORBIDDEN_MESSAGE =
+  'This page is for staff accounts. You are signed in to the public request portal, ' +
+  'so please use My Requests to see your requests.';
 
 type Json = Record<string, unknown>;
 
@@ -26,8 +34,10 @@ function text(value: unknown): string | null {
 /** First Pydantic/FastAPI validation error as "field: msg" (or just "msg"). */
 function firstValidationMessage(errors: unknown): string | null {
   if (!Array.isArray(errors) || !isObject(errors[0])) return null;
-  const msg = text(errors[0].msg);
-  if (!msg) return null;
+  const raw = text(errors[0].msg);
+  if (!raw) return null;
+  // Pydantic prefixes custom validator errors with "Value error, ".
+  const msg = raw.replace(/^Value error,\s*/, '');
   const loc = errors[0].loc;
   const field = Array.isArray(loc)
     ? loc.filter((p, i) => !(i === 0 && ['body', 'query', 'path'].includes(String(p)))).join('.')
@@ -55,6 +65,7 @@ export function getApiErrorMessage(
 
   // Standard envelope: {error: {message, details: {errors: [...]}}}
   if (isObject(data.error)) {
+    if (data.error.code === 'PUBLIC_TOKEN_FORBIDDEN') return PUBLIC_TOKEN_FORBIDDEN_MESSAGE;
     const message = text(data.error.message);
     if (message) {
       const details = data.error.details;

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
+  Alert,
   Box,
   Button,
   Dialog,
@@ -32,6 +33,39 @@ import {
 } from '@mui/icons-material';
 import { getUsers, createUser, updateUser, deleteUser } from '../services/userService';
 import { getApiErrorMessage } from '../api/errors';
+import { useOptionalAuth } from '../contexts/AuthContext';
+import { passwordPolicyError, PASSWORD_REQUIREMENTS_TEXT } from '../utils/passwordPolicy';
+
+/**
+ * The caller's system roles: AuthContext when mounted inside the provider,
+ * otherwise what login persisted to localStorage.
+ */
+function useCallerRoles(): string[] {
+  const auth = useOptionalAuth();
+  if (auth?.roles?.length) return auth.roles.map((r) => r.toLowerCase());
+  try {
+    const stored = JSON.parse(localStorage.getItem('userRoles') || '[]');
+    if (Array.isArray(stored) && stored.length) return stored.map((r) => String(r).toLowerCase());
+  } catch {
+    // fall through
+  }
+  const single = localStorage.getItem('userRole');
+  return single ? [single.toLowerCase()] : [];
+}
+
+/**
+ * Roles this caller may grant. Mirrors the backend rule in
+ * backend/src/auth/routes.py `_ensure_may_assign` (and auth/roles.py
+ * SYSTEM_ROLES): only an owner may hand out `owner`; anything else in the
+ * role list is grantable by an owner or admin. `/auth/roles` omits `owner`,
+ * so it is added back for owners.
+ */
+export function grantableRoles(available: string[], callerIsOwner: boolean): string[] {
+  const roles = available.filter((r) => r !== 'owner');
+  return callerIsOwner ? ['owner', ...roles] : roles;
+}
+
+const OWNER_ONLY_MESSAGE = 'Only an owner can modify an owner account';
 
 // Define User interface
 interface User {
@@ -67,6 +101,9 @@ const UserManagement: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  // Errors from the add/edit and password dialogs render inside the dialog;
+  // the page-level alert sits behind the modal backdrop.
+  const [dialogError, setDialogError] = useState<string | null>(null);
   const [openDialog, setOpenDialog] = useState<boolean>(false);
   const [openPasswordDialog, setOpenPasswordDialog] = useState<boolean>(false);
   const [dialogMode, setDialogMode] = useState<'add' | 'edit'>('add');
@@ -89,6 +126,10 @@ const UserManagement: React.FC = () => {
 
   // Available org roles
   const [userRoles, setUserRoles] = useState<string[]>(['owner', 'admin', 'analyst', 'user', 'guest']);
+  const callerIsOwner = useCallerRoles().includes('owner');
+  const assignableRoles = grantableRoles(userRoles, callerIsOwner);
+  // An admin cannot change an owner account at all (403 from the backend).
+  const isLockedOwner = (user: User) => user.role === 'owner' && !callerIsOwner;
 
   // Load users and roles on component mount
   useEffect(() => {
@@ -119,7 +160,7 @@ const UserManagement: React.FC = () => {
       const data = await getUsers();
       setUsers(data);
     } catch (err: any) {
-      setError(err.message || 'An error occurred while fetching users');
+      setError(getApiErrorMessage(err, 'An error occurred while fetching users'));
     } finally {
       setIsLoading(false);
     }
@@ -151,6 +192,7 @@ const UserManagement: React.FC = () => {
       role: 'analyst'
     });
     setInvitationSent(null);
+    setDialogError(null);
     setOpenDialog(true);
   };
 
@@ -164,6 +206,7 @@ const UserManagement: React.FC = () => {
       role: user.role
     });
     setInvitationSent(null);
+    setDialogError(null);
     setOpenDialog(true);
   };
 
@@ -174,6 +217,7 @@ const UserManagement: React.FC = () => {
       password: '',
       confirmPassword: ''
     });
+    setDialogError(null);
     setOpenPasswordDialog(true);
   };
 
@@ -182,6 +226,7 @@ const UserManagement: React.FC = () => {
     setOpenDialog(false);
     setOpenPasswordDialog(false);
     setSelectedUser(null);
+    setDialogError(null);
   };
 
   // Toggle a user's disabled status
@@ -191,7 +236,7 @@ const UserManagement: React.FC = () => {
       // Update the local state
       setUsers(users.map(u => u.id === user.id ? { ...u, disabled: !u.disabled } : u));
     } catch (err: any) {
-      setError(err.message || `Failed to ${user.disabled ? 'enable' : 'disable'} user`);
+      setError(getApiErrorMessage(err, `Failed to ${user.disabled ? 'enable' : 'disable'} user`));
     }
   };
 
@@ -201,7 +246,7 @@ const UserManagement: React.FC = () => {
       if (dialogMode === 'add') {
         // Validate required fields (no password needed - magic link flow)
         if (!newUser.email || !newUser.role) {
-          setError('Email and role are required');
+          setDialogError('Email and role are required');
           return;
         }
 
@@ -225,7 +270,8 @@ const UserManagement: React.FC = () => {
         handleCloseDialogs();
       }
     } catch (err: any) {
-      setError(getApiErrorMessage(err, 'Failed to save user'));
+      // 403 "Only an owner can assign the owner role", 422 invalid role, ...
+      setDialogError(getApiErrorMessage(err, 'Failed to save user'));
     }
   };
 
@@ -235,7 +281,12 @@ const UserManagement: React.FC = () => {
 
     // Validate passwords match
     if (passwordData.password !== passwordData.confirmPassword) {
-      setError('Passwords do not match');
+      setDialogError('Passwords do not match');
+      return;
+    }
+    const policyError = passwordPolicyError(passwordData.password);
+    if (policyError) {
+      setDialogError(policyError);
       return;
     }
 
@@ -243,7 +294,8 @@ const UserManagement: React.FC = () => {
       await updateUser(selectedUser.id, { password: passwordData.password });
       handleCloseDialogs();
     } catch (err: any) {
-      setError(err.message || 'Failed to update password');
+      // The backend's 422 policy message or 403 owner-account refusal.
+      setDialogError(getApiErrorMessage(err, 'Failed to update password'));
     }
   };
 
@@ -305,6 +357,7 @@ const UserManagement: React.FC = () => {
                       <Switch
                         checked={!user.disabled}
                         onChange={() => handleToggleDisable(user)}
+                        disabled={isLockedOwner(user)}
                         inputProps={{ 'aria-label': 'toggle user status' }}
                       />
                       <Typography variant="body2">
@@ -313,15 +366,27 @@ const UserManagement: React.FC = () => {
                     </Box>
                   </TableCell>
                   <TableCell align="right">
-                    <Tooltip title="Change Password">
-                      <IconButton onClick={() => handleOpenPasswordDialog(user)}>
-                        <Lock />
-                      </IconButton>
+                    <Tooltip title={isLockedOwner(user) ? OWNER_ONLY_MESSAGE : 'Change Password'}>
+                      <span>
+                        <IconButton
+                          aria-label="Change Password"
+                          onClick={() => handleOpenPasswordDialog(user)}
+                          disabled={isLockedOwner(user)}
+                        >
+                          <Lock />
+                        </IconButton>
+                      </span>
                     </Tooltip>
-                    <Tooltip title="Edit User">
-                      <IconButton onClick={() => handleOpenEditDialog(user)}>
-                        <Edit />
-                      </IconButton>
+                    <Tooltip title={isLockedOwner(user) ? OWNER_ONLY_MESSAGE : 'Edit User'}>
+                      <span>
+                        <IconButton
+                          aria-label="Edit User"
+                          onClick={() => handleOpenEditDialog(user)}
+                          disabled={isLockedOwner(user)}
+                        >
+                          <Edit />
+                        </IconButton>
+                      </span>
                     </Tooltip>
                   </TableCell>
                 </TableRow>
@@ -352,6 +417,11 @@ const UserManagement: React.FC = () => {
             </Box>
           ) : (
             <>
+              {dialogError && (
+                <Alert severity="error" sx={{ mb: 1 }}>
+                  {dialogError}
+                </Alert>
+              )}
               <TextField
                 margin="dense"
                 name="email"
@@ -379,7 +449,7 @@ const UserManagement: React.FC = () => {
                   onChange={handleRoleChange}
                   label="Role"
                 >
-                  {userRoles.map((role) => (
+                  {assignableRoles.map((role) => (
                     <MenuItem key={role} value={role}>
                       {role.charAt(0).toUpperCase() + role.slice(1)}
                     </MenuItem>
@@ -403,6 +473,11 @@ const UserManagement: React.FC = () => {
       <Dialog open={openPasswordDialog} onClose={handleCloseDialogs} maxWidth="sm" fullWidth>
         <DialogTitle>Change Password</DialogTitle>
         <DialogContent>
+          {dialogError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {dialogError}
+            </Alert>
+          )}
           <TextField
             margin="dense"
             name="password"
@@ -411,6 +486,7 @@ const UserManagement: React.FC = () => {
             fullWidth
             value={passwordData.password}
             onChange={handlePasswordChange}
+            helperText={PASSWORD_REQUIREMENTS_TEXT}
           />
           <TextField
             margin="dense"

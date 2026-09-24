@@ -244,3 +244,23 @@ describe('PublicTrackingPage — missing tracking number', () => {
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
   });
 });
+
+describe('PublicTrackingPage — current tracking format', () => {
+  it('looks up and shows an 8-character-suffix tracking number without the bearer token', async () => {
+    const tracking = 'FOI-2026-007-K7QX2M9A';
+    localStorage.setItem('token', 'staff-or-public-token');
+    let auth: string | null = 'unset';
+    server.use(
+      http.get(`/api/v1/cases/public/track/${tracking}`, ({ request }) => {
+        auth = request.headers.get('authorization');
+        return HttpResponse.json(makeTrackingData({ tracking_number: tracking }));
+      }),
+      http.get('/api/v1/admin/config/public', () => HttpResponse.json({})),
+    );
+    renderWithProviders(<Harness />, { route: `/track/${tracking}` });
+    expect(await screen.findByText(tracking)).toBeInTheDocument();
+    // Anonymous lookup: the tracking number is the credential, no JWT sent.
+    expect(auth).toBeNull();
+    localStorage.clear();
+  });
+});

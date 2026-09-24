@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 import './CaseDetailView.css';
 import ReleasePackageActions from './ReleasePackageActions';
 import CaseTeamPanel from './CaseTeamPanel';
@@ -164,7 +165,7 @@ const CaseDetailView: React.FC = () => {
       }
     } catch (error) {
       console.error('Error uploading documents:', error);
-      alert('Failed to upload documents. Please try again.');
+      alert(getApiErrorMessage(error, 'Failed to upload documents. Please try again.'));
     } finally {
       setUploading(false);
       // Reset file input
@@ -249,8 +250,18 @@ const CaseDetailView: React.FC = () => {
       const response = await api.get(`/cases/${caseId}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      setCaseData(response.data);
-      
+      // Guests no longer receive the audit log or internal comments, and
+      // team-scoped callers lose capability-token fields (backend
+      // cases/listing.py); default every list the view iterates.
+      const data = response.data || {};
+      setCaseData({
+        ...data,
+        comments: Array.isArray(data.comments) ? data.comments : [],
+        audit_log: Array.isArray(data.audit_log) ? data.audit_log : [],
+        tags: Array.isArray(data.tags) ? data.tags : [],
+        document_ids: Array.isArray(data.document_ids) ? data.document_ids : [],
+      });
+
       // Get current user's role from case team
       const devUserId = localStorage.getItem('dev_current_user') || localStorage.getItem('userId') || '';
       const caseTeam = response.data.case_team || [];

@@ -12,6 +12,7 @@ import {
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import { publicApi } from '../api/client';
 import { getApiErrorMessage } from '../api/errors';
+import { passwordPolicyError, PASSWORD_REQUIREMENTS_TEXT } from '../utils/passwordPolicy';
 
 // Phase 4 Batch 4.4 (audit F2): use the shared `publicApi` from
 // `src/api/client.ts` instead of a local axios + duplicated
@@ -46,14 +47,6 @@ const ActivateAccount: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
 
-  const validatePassword = (pwd: string): string | null => {
-    if (pwd.length < 8) {
-      return 'Password must be at least 8 characters long';
-    }
-    // Add more validation as needed
-    return null;
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -65,7 +58,7 @@ const ActivateAccount: React.FC = () => {
     }
 
     // Validate password strength
-    const passwordError = validatePassword(password);
+    const passwordError = passwordPolicyError(password);
     if (passwordError) {
       setError(passwordError);
       return;
@@ -150,7 +143,7 @@ const ActivateAccount: React.FC = () => {
               onChange={(e) => setPassword(e.target.value)}
               fullWidth
               required
-              helperText="Minimum 8 characters"
+              helperText={PASSWORD_REQUIREMENTS_TEXT}
               sx={{ mb: 2 }}
               autoFocus
             />

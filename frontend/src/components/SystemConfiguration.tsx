@@ -198,12 +198,12 @@ const SystemConfiguration: React.FC = () => {
                 id="password_min_length"
                 value={config.password_min_length}
                 onChange={(e) => handleChange('password_min_length', parseInt(e.target.value))}
-                min={8}
+                min={12}
                 max={32}
               />
               <span className="suffix">characters</span>
             </div>
-            <small>Required for new passwords (8-32 characters)</small>
+            <small>Required for new passwords (12-32 characters; the server always requires at least 12)</small>
           </div>
         </section>
 

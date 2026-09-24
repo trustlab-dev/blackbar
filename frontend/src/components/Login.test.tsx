@@ -396,3 +396,25 @@ describe('Login — post-login redirect target', () => {
     expect(await loginWithRedirect(query)).toBe('/');
   });
 });
+
+describe('Login — session-ended notice (?reason=)', () => {
+  it.each([
+    ['revoked', /session was signed out/i],
+    ['inactive', /account is not active/i],
+    ['expired', /session has expired/i],
+  ])('shows the %s message', async (reason, text) => {
+    renderWithProviders(<Login onLoginSuccess={vi.fn()} />, {
+      withAuth: true,
+      route: `/login?redirect=%2Fcases&reason=${reason}`,
+    });
+    expect(await screen.findByRole('status')).toHaveTextContent(text);
+  });
+
+  it('shows nothing for an unknown or missing reason', () => {
+    renderWithProviders(<Login onLoginSuccess={vi.fn()} />, {
+      withAuth: true,
+      route: '/login?reason=<script>',
+    });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+});
