@@ -24,7 +24,7 @@ import DescriptionIcon from '@mui/icons-material/Description';
 import TimelineIcon from '@mui/icons-material/Timeline';
 import DownloadIcon from '@mui/icons-material/Download';
 import { useNavigate, useParams } from 'react-router-dom';
-import axios from 'axios';
+import { publicApi } from '../../api/client';
 
 interface ReleasePackage {
   id: string;
@@ -91,7 +91,7 @@ export const RequestDetailsPage: React.FC = () => {
         return;
       }
 
-      const response = await axios.get(`/api/v1/cases/public/${requestId}`, {
+      const response = await publicApi.get(`/cases/public/${requestId}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
 

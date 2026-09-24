@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, render, renderHook, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { UserProvider, useUser } from './UserContext';
+import { UserProvider, useUser, getStoredRoles } from './UserContext';
 
 const wrapper = ({ children }: { children: ReactNode }) => (
   <UserProvider>{children}</UserProvider>
@@ -19,11 +19,11 @@ afterEach(() => {
 // useUser outside of provider (defaults from defaultUserContext)
 // ---------------------------------------------------------------------------
 describe('useUser (outside provider)', () => {
-  it('returns the default context shape (currentRole=admin, currentUser=null)', () => {
+  it('returns the default context shape (currentRole=null, currentUser=null)', () => {
     // No wrapper — useContext returns the default value (the context was
     // created with defaultUserContext, not `undefined`, so this is safe).
     const { result } = renderHook(() => useUser());
-    expect(result.current.currentRole).toBe('admin');
+    expect(result.current.currentRole).toBeNull();
     expect(result.current.currentUser).toBeNull();
     // The default no-op setters should not throw.
     expect(() => result.current.setCurrentRole('analyst')).not.toThrow();
@@ -35,10 +35,16 @@ describe('useUser (outside provider)', () => {
 // UserProvider initial role
 // ---------------------------------------------------------------------------
 describe('UserProvider — initial state', () => {
-  it('defaults currentRole to "admin" when localStorage is empty', () => {
+  it('defaults currentRole to null (never a privileged role) when localStorage is empty', () => {
     const { result } = renderHook(() => useUser(), { wrapper });
-    expect(result.current.currentRole).toBe('admin');
+    expect(result.current.currentRole).toBeNull();
     expect(result.current.currentUser).toBeNull();
+  });
+
+  it('ignores an unknown role value in localStorage', () => {
+    localStorage.setItem('userRole', 'superuser');
+    const { result } = renderHook(() => useUser(), { wrapper });
+    expect(result.current.currentRole).toBeNull();
   });
 
   it('seeds currentRole from localStorage on mount', () => {
@@ -99,7 +105,7 @@ describe('UserProvider — localStorage sync effect', () => {
   });
 
   it('syncs currentRole when storedRole differs from the lazy-init value', () => {
-    // Lazy init reads null (empty storage) → currentRole defaults to 'admin'.
+    // Lazy init reads null (empty storage) → currentRole defaults to null.
     // The useEffect re-reads and now sees 'analyst' (set between init + effect),
     // so it MUST call setCurrentRole('analyst').
     const getItemSpy = vi.spyOn(Storage.prototype, 'getItem');
@@ -122,5 +128,22 @@ describe('UserProvider — children rendering', () => {
       </UserProvider>,
     );
     expect(screen.getByTestId('kid')).toHaveTextContent('hello');
+  });
+});
+
+describe('getStoredRoles', () => {
+  it('returns lower-cased roles saved at login', () => {
+    localStorage.setItem('userRoles', JSON.stringify(['Admin', 'analyst']));
+    expect(getStoredRoles()).toEqual(['admin', 'analyst']);
+  });
+
+  it('returns [] for missing, malformed or non-array values', () => {
+    expect(getStoredRoles()).toEqual([]);
+    localStorage.setItem('userRoles', '{not json');
+    expect(getStoredRoles()).toEqual([]);
+    localStorage.setItem('userRoles', JSON.stringify({ admin: true }));
+    expect(getStoredRoles()).toEqual([]);
+    localStorage.setItem('userRoles', JSON.stringify(['user', 42]));
+    expect(getStoredRoles()).toEqual(['user']);
   });
 });

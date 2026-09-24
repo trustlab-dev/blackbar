@@ -15,6 +15,9 @@ const sentryMock = vi.hoisted(() => ({
     cb({ setExtras: vi.fn() }),
   ),
   startInactiveSpan: vi.fn(() => ({ end: vi.fn() })),
+  addEventProcessor: vi.fn(),
+  getReplay: vi.fn(() => undefined as undefined | { stop: () => Promise<void> }),
+  breadcrumbsIntegration: vi.fn(() => 'breadcrumbs'),
   browserTracingIntegration: vi.fn(() => 'browser-tracing'),
   replayIntegration: vi.fn(() => 'replay'),
   ErrorBoundary: 'ErrorBoundary',
@@ -37,8 +40,9 @@ vi.mock('web-vitals', () => vitalsMock);
  * Re-import telemetry.ts with a given env so the module-level SENTRY_DSN /
  * ENVIRONMENT constants are recomputed. Returns the fresh module namespace.
  */
-async function loadTelemetry(env: Record<string, string>) {
+async function loadTelemetry(env: Record<string, string>, prodBuild = false) {
   vi.resetModules();
+  vi.stubEnv('PROD', prodBuild);
   vi.stubEnv('VITE_SENTRY_DSN', env.VITE_SENTRY_DSN ?? '');
   vi.stubEnv('VITE_ENVIRONMENT', env.VITE_ENVIRONMENT ?? 'development');
   vi.stubEnv('VITE_VERSION', env.VITE_VERSION ?? '1.0.0');
@@ -115,12 +119,131 @@ describe('initTelemetry — DSN configured', () => {
     expect(result.breadcrumbs[1].data.email).toBeUndefined();
   });
 
+  it('wires the scrubbing hooks, disables default PII and console breadcrumbs', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+    const cfg = sentryMock.init.mock.calls[0][0];
+    expect(cfg.sendDefaultPii).toBe(false);
+    expect(cfg.beforeBreadcrumb).toBe(t.scrubBreadcrumb);
+    expect(cfg.beforeSend).toBe(t.scrubEvent);
+    expect(cfg.beforeSendTransaction).toBe(t.scrubEvent);
+    expect(sentryMock.breadcrumbsIntegration).toHaveBeenCalledWith({ console: false });
+    expect(sentryMock.replayIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maskAllText: true,
+        blockAllMedia: true,
+        beforeAddRecordingEvent: t.scrubRecordingEvent,
+      }),
+    );
+    expect(sentryMock.addEventProcessor).toHaveBeenCalledWith(t.scrubEvent);
+  });
+
+  it('uses low sample rates for a production build even when VITE_ENVIRONMENT is unset', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.resetModules();
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_SENTRY_DSN', 'https://key@sentry.io/1');
+    vi.stubEnv('VITE_ENVIRONMENT', '');
+    const t = await import('./telemetry');
+    t.initTelemetry();
+    const cfg = sentryMock.init.mock.calls[0][0];
+    expect(cfg.environment).toBe('production');
+    expect(cfg.tracesSampleRate).toBe(0.1);
+    expect(cfg.replaysSessionSampleRate).toBe(0);
+    expect(cfg.replaysOnErrorSampleRate).toBe(0.1);
+  });
+
+  it('uses full sample rates in a development build', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+    const cfg = sentryMock.init.mock.calls[0][0];
+    expect(cfg.tracesSampleRate).toBe(1.0);
+    expect(cfg.replaysSessionSampleRate).toBe(0.1);
+    expect(cfg.replaysOnErrorSampleRate).toBe(1.0);
+  });
+
   it('beforeSend handles events without request headers or breadcrumbs', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
     t.initTelemetry();
     const { beforeSend } = sentryMock.init.mock.calls[0][0];
     expect(beforeSend({})).toEqual({});
+  });
+});
+
+describe('replay gating on public and capability-token routes', () => {
+  // rrweb's Meta event records window.location.href and never reaches
+  // beforeAddRecordingEvent, so replay must not run on these routes at all.
+  const setPath = (path: string) => window.history.replaceState(null, '', path);
+  afterEach(() => setPath('/'));
+
+  it.each([
+    '/public/verify/tok-123',
+    '/public/verify',
+    '/public/dashboard',
+    '/activate',
+    '/collect/tok-1',
+    '/contribute/c-1',
+    '/track/FOI-2026-ABCD',
+    '/request',
+  ])('treats %s as replay-excluded', async (path) => {
+    const t = await loadTelemetry({});
+    expect(t.isReplayExcludedPath(path)).toBe(true);
+  });
+
+  it.each(['/', '/cases', '/cases/abc', '/documents/d1', '/login', '/admin', '/publications', '/tracker'])(
+    'records replay on staff route %s',
+    async (path) => {
+      const t = await loadTelemetry({});
+      expect(t.isReplayExcludedPath(path)).toBe(false);
+    },
+  );
+
+  it('leaves the replay integration out when the page loads on a token route', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    setPath('/public/verify/secret-token');
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+    const cfg = sentryMock.init.mock.calls[0][0];
+    expect(sentryMock.replayIntegration).not.toHaveBeenCalled();
+    expect(cfg.integrations).not.toContain('replay');
+    // Tracing and scrubbing are unaffected.
+    expect(cfg.integrations).toContain('browser-tracing');
+    expect(cfg.beforeSend).toBe(t.scrubEvent);
+  });
+
+  it('includes a masked replay integration when the page loads on a staff route', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    setPath('/cases');
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+    expect(sentryMock.init.mock.calls[0][0].integrations).toContain('replay');
+    expect(sentryMock.replayIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ maskAllText: true, blockAllMedia: true }),
+    );
+  });
+
+  it('stops a running replay (session or error buffer) on navigating to a public route', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stop = vi.fn(() => Promise.resolve());
+    sentryMock.getReplay.mockReturnValue({ stop });
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+
+    t.syncReplayWithRoute('/cases');
+    expect(stop).not.toHaveBeenCalled();
+
+    t.syncReplayWithRoute('/collect/tok-1');
+    expect(stop).toHaveBeenCalledTimes(1);
+    sentryMock.getReplay.mockReturnValue(undefined);
+  });
+
+  it('does nothing on route changes when Sentry is not configured', async () => {
+    const t = await loadTelemetry({});
+    t.syncReplayWithRoute('/collect/tok-1');
+    expect(sentryMock.getReplay).not.toHaveBeenCalled();
   });
 });
 
@@ -360,5 +483,181 @@ describe('re-exported Sentry helpers', () => {
     expect(t.ErrorBoundary).toBe(sentryMock.ErrorBoundary);
     expect(t.Profiler).toBe(sentryMock.withProfiler);
     expect(t.withErrorBoundary).toBe(sentryMock.withErrorBoundary);
+  });
+});
+
+describe('scrubbing helpers', () => {
+  async function load() {
+    return loadTelemetry({ VITE_SENTRY_DSN: '' });
+  }
+
+  describe('scrubUrl', () => {
+    it.each([
+      [
+        'https://app.example/public/verify/magic-abc123',
+        'https://app.example/public/verify/[FILTERED]',
+      ],
+      ['/collect/col-tok-9', '/collect/[FILTERED]'],
+      [
+        '/api/v1/cases/collect/col-tok-9/upload',
+        '/api/v1/cases/collect/[FILTERED]/upload',
+      ],
+      [
+        '/contribute/c-1?token=contrib-secret',
+        '/contribute/[FILTERED]?token=[FILTERED]',
+      ],
+      [
+        '/api/v1/cases/public/release/rel-tok',
+        '/api/v1/cases/public/release/[FILTERED]',
+      ],
+      [
+        '/activate?email=a%40b.com&token=act-tok',
+        '/activate?email=[FILTERED]&token=[FILTERED]',
+      ],
+      ['/cb#access_token=jwt.abc.def&state=1', '/cb#access_token=[FILTERED]&state=1'],
+      ['/track/FOI-2026-007-K7QX2M9A', '/track/[FILTERED]'],
+      [
+        '/api/v1/cases/public/track/FOI-2026-007-K7QX2M9A',
+        '/api/v1/cases/public/track/[FILTERED]',
+      ],
+      ['/cases?status=open&page=2', '/cases?status=open&page=2'],
+      ['/cases/123/documents', '/cases/123/documents'],
+    ])('%s', async (input, expected) => {
+      const t = await load();
+      expect(t.scrubUrl(input)).toBe(expected);
+    });
+  });
+
+  describe('scrubBreadcrumb', () => {
+    it('drops console breadcrumbs', async () => {
+      const t = await load();
+      expect(
+        t.scrubBreadcrumb({
+          category: 'console',
+          message: 'Selected text: Jane Doe, DOB 1970-01-01',
+          data: { arguments: ['Selected text:', 'Jane Doe'] },
+        }),
+      ).toBeNull();
+    });
+
+    it('redacts tokens in navigation and XHR breadcrumbs', async () => {
+      const t = await load();
+      expect(
+        t.scrubBreadcrumb({
+          category: 'navigation',
+          data: { from: '/public/verify/magic-1', to: '/public/dashboard' },
+        }),
+      ).toEqual({
+        category: 'navigation',
+        data: { from: '/public/verify/[FILTERED]', to: '/public/dashboard' },
+      });
+      expect(
+        t.scrubBreadcrumb({
+          category: 'xhr',
+          data: {
+            method: 'GET',
+            url: '/api/v1/contribute/c-1?token=abc',
+            status_code: 200,
+          },
+        })?.data,
+      ).toEqual({
+        method: 'GET',
+        url: '/api/v1/contribute/[FILTERED]?token=[FILTERED]',
+        status_code: 200,
+      });
+    });
+
+    it('masks emails and scrubs URLs inside messages', async () => {
+      const t = await load();
+      const out = t.scrubBreadcrumb({
+        category: 'event',
+        message: 'opened /collect/abc',
+        data: { email: 'a@b.com' },
+      });
+      expect(out?.message).toBe('opened /collect/[FILTERED]');
+      expect(out?.data?.email).toBe('[FILTERED]');
+    });
+  });
+
+  describe('scrubEvent', () => {
+    it('scrubs request URL, headers, transaction name, breadcrumbs and spans', async () => {
+      const t = await load();
+      const event: any = {
+        transaction: '/public/verify/magic-xyz',
+        message: 'failed at /collect/tok-1',
+        request: {
+          url: 'https://app.example/contribute/c-1?token=abc',
+          query_string: 'token=abc&x=1',
+          headers: { authorization: 'Bearer x', 'User-Agent': 'ua' },
+          cookies: { s: '1' },
+        },
+        exception: { values: [{ value: 'GET /api/v1/cases/public/release/rel-1 failed' }] },
+        breadcrumbs: [
+          { category: 'console', message: 'Redacting matches: Jane' },
+          { category: 'navigation', data: { to: '/collect/tok-2' } },
+        ],
+        spans: [
+          { description: 'GET /api/v1/cases/collect/tok-3', data: { url: '/collect/tok-3' } },
+        ],
+      };
+      const out = t.scrubEvent(event);
+      expect(out.transaction).toBe('/public/verify/[FILTERED]');
+      expect(out.message).toBe('failed at /collect/[FILTERED]');
+      expect(out.request.url).toBe(
+        'https://app.example/contribute/[FILTERED]?token=[FILTERED]',
+      );
+      expect(out.request.query_string).toBe('token=[FILTERED]&x=1');
+      expect(out.request.headers).toEqual({ 'User-Agent': 'ua' });
+      expect(out.request.cookies).toBeUndefined();
+      expect(out.exception.values[0].value).toBe(
+        'GET /api/v1/cases/public/release/[FILTERED] failed',
+      );
+      expect(out.breadcrumbs).toEqual([
+        { category: 'navigation', data: { to: '/collect/[FILTERED]' } },
+      ]);
+      expect(out.spans[0].description).toBe('GET /api/v1/cases/collect/[FILTERED]');
+      expect(out.spans[0].data.url).toBe('/collect/[FILTERED]');
+    });
+
+    it('drops a non-string query_string and scrubs replay URLs', async () => {
+      const t = await load();
+      const out: any = t.scrubEvent({
+        request: { query_string: [['token', 'abc']] },
+        urls: ['https://app.example/public/verify/magic-1'],
+      } as any);
+      expect(out.request.query_string).toBeUndefined();
+      expect(out.urls).toEqual(['https://app.example/public/verify/[FILTERED]']);
+    });
+  });
+
+  describe('scrubRecordingEvent', () => {
+    it('scrubs URLs in replay performance spans and breadcrumbs', async () => {
+      const t = await load();
+      const out: any = t.scrubRecordingEvent({
+        type: 5,
+        data: {
+          tag: 'performanceSpan',
+          payload: {
+            op: 'navigation.push',
+            description: 'https://app.example/collect/tok-1',
+            data: { url: '/contribute/c-1?token=abc' },
+          },
+        },
+      });
+      expect(out.data.payload.description).toBe('https://app.example/collect/[FILTERED]');
+      expect(out.data.payload.data.url).toBe('/contribute/[FILTERED]?token=[FILTERED]');
+    });
+
+    it('drops console breadcrumbs and passes non-custom events through', async () => {
+      const t = await load();
+      expect(
+        t.scrubRecordingEvent({
+          type: 5,
+          data: { tag: 'breadcrumb', payload: { category: 'console', message: 'x' } },
+        }),
+      ).toBeNull();
+      const snapshot = { type: 2, data: { node: {} } };
+      expect(t.scrubRecordingEvent(snapshot)).toBe(snapshot);
+    });
   });
 });

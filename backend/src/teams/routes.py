@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ..core.database import get_database_from_request
 from ..database import users
 from ..dependencies import check_role, get_current_user
+from ..users.serializers import SAFE_USER_PROJECTION, serialize_user
 from .models import TeamCreate, TeamUpdate
 
 
@@ -102,9 +103,11 @@ async def get_team(
     member_ids = team.get("member_ids", [])
     members = []
     for member_id in member_ids:
-        user = await users.find_one({"id": member_id}, {"password": 0})
+        # Allowlist projection: the user document also holds password_hash
+        # and the activation-token hash (AUTH-04).
+        user = await users.find_one({"id": member_id}, SAFE_USER_PROJECTION)
         if user:
-            members.append(convert_mongo_doc_to_json(user))
+            members.append(serialize_user(user))
 
     team_dict = convert_mongo_doc_to_json(team)
     team_dict["members"] = members

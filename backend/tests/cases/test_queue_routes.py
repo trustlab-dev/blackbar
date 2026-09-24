@@ -694,3 +694,40 @@ class TestSearchAndDeadlineDashboardBranches:
         body = r.json()
         assert "cases" in body
         assert "documents" not in body
+
+
+# ---------------------------------------------------------------------------
+# AUTH-11 / AUTH-12: /queue/my-cases
+# ---------------------------------------------------------------------------
+
+
+class TestMyCasesSecurity:
+    async def test_removed_member_no_longer_sees_case(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user", email="removed@example.test")
+        me = await db.users.find_one({"email": "removed@example.test"})
+        await db.cases.insert_one(
+            make_case(case_team=[{"user_id": me["id"], "role": "reviewer", "status": "removed"}])
+        )
+        r = await client.get("/api/v1/cases/queue/my-cases")
+        assert r.status_code == 200, r.text
+        assert r.json()["total"] == 0
+
+    async def test_user_does_not_receive_capability_tokens(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user", email="mine@example.test")
+        me = await db.users.find_one({"email": "mine@example.test"})
+        await db.cases.insert_one(
+            make_case(
+                case_team=[{"user_id": me["id"], "role": "reviewer", "status": "active"}],
+                collection_links=[{"token": "LIVE-COLLECTION-TOKEN"}],
+                release_packages=[{"access_token": "LIVE-RELEASE-TOKEN"}],
+            )
+        )
+        r = await client.get("/api/v1/cases/queue/my-cases")
+        assert r.status_code == 200, r.text
+        assert r.json()["total"] == 1
+        assert "LIVE-COLLECTION-TOKEN" not in r.text
+        assert "LIVE-RELEASE-TOKEN" not in r.text

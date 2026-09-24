@@ -62,8 +62,11 @@ def patch_routes_db(monkeypatch: pytest.MonkeyPatch, db: AsyncIOMotorDatabase):
     Without this rebind, route handlers operate on a different (stale)
     motor client/loop than the test fixtures."""
     import src.auth.routes as _routes_mod
+    import src.dependencies as _deps_mod
 
     monkeypatch.setattr(_routes_mod, "db", db)
+    # Every auth gate re-reads the caller from the DB (AUTH-14).
+    monkeypatch.setattr(_deps_mod, "users", db.users)
     return db
 
 
@@ -396,7 +399,7 @@ class TestCreateUser:
                 json={
                     "email": "new@example.com",
                     "full_name": "New User",
-                    "password": "validpwd123",
+                    "password": "validpwd123456",
                     "role": "analyst",
                 },
             )
@@ -421,7 +424,7 @@ class TestCreateUser:
                 json={
                     "email": "dup@example.com",
                     "full_name": "Dup",
-                    "password": "newpwd1234",
+                    "password": "newpwd1234567",
                     "role": "user",
                 },
             )

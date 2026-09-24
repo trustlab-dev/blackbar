@@ -6,6 +6,125 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **Breaking:** JWT secrets that are placeholders, short or low-entropy are
+  rejected; production refuses to start without a strong `JWT_SECRET`.
+- **Breaking:** public-portal (magic-link) tokens get 403
+  `PUBLIC_TOKEN_FORBIDDEN` on staff routes.
+- **Breaking:** passwords must be 12 to 72 bytes. Logout, password change,
+  disable and role change revoke existing tokens.
+- **Breaking:** LLM endpoints must use https. Loopback, private-range
+  (RFC 1918, ULA), single-label (`ollama`) and `*.docker.internal` hosts need
+  `LLM_ALLOW_PRIVATE_ENDPOINTS=true`, and may then use plain http.
+  Link-local and cloud metadata addresses are always refused.
+- **Breaking:** production refuses to start without a valid
+  `LLM_API_KEY_ENCRYPTION_KEY`, even when no LLM is configured; the
+  `/app/.env` fallback is gone. `.env.example` ships it empty and `setup.sh`
+  generates one (it also replaces the old placeholder).
+- LLM custom header values are encrypted at rest like the API key, and are
+  cleared with the key when the endpoint or provider changes.
+- Rate limits on login, magic link, reset, activation and public tracking
+  lookup; `X-Forwarded-For` trusted only from `TRUSTED_PROXIES`; no response
+  carries password hashes.
+- Email attachment names can no longer write outside the work directory; uploads
+  are size-capped while streaming (413) and must match their file type (415).
+- Released and exported PDFs are sanitised (metadata, attachments, annotations,
+  links, JavaScript) and re-checked for text left under redaction boxes.
+- LLM provider keys no longer leak through URLs, errors or logs; disabled
+  configs are never used; model output is schema-validated.
+- Frontend: same-origin login redirects, Sentry scrubbing, CSP and security
+  headers, pdf.js eval disabled.
+
+### Fixed
+
+- AI bulk apply stored zero-area redactions, so released PDFs kept the text.
+  Redactions now carry validated geometry (422 on invalid boxes).
+- Rotated pages: AI suggestion boxes and native-text word boxes were in
+  unrotated page space, so a redaction placed from them on a /Rotate 90/270
+  page was burned in the wrong place. Every coordinate the API returns is now
+  in the viewer's (rotated) space, redactions and suggestions record
+  `coord_space` and `page_rotation`. Before burning, every redaction that
+  carries text must sit on that text, so a misplaced box fails the export
+  or release. After burning, nothing may remain under any box, and bulk
+  text and AI bulk apply redactions (which cover every occurrence) must
+  leave no occurrence on the page. A manual box covers one occurrence, so
+  the same text may stay elsewhere on the page.
+- Resolving a contest as kept only approves a proposed or contested
+  redaction, and a contest can be resolved once (409 otherwise). Rejected
+  redactions cannot be contested.
+- Legacy `pending`, role-less and coordinate-less redactions can be approved
+  or rejected through the approve route; ones without a usable box return
+  422 and must be deleted and re-added. Export 409s and failed release
+  packages list every blocking redaction with its reason.
+- Office conversion, first-pass OCR and the summary's text extraction run off
+  the event loop, within the page, pixel and per-page timeout limits.
+- Attachments of forwarded or embedded emails become records (up to 5 levels
+  deep); deeper ones are listed in `attachment_errors`.
+- Email threading reads Message-ID, In-Reply-To, References, Date, Subject,
+  From and To from the message itself, so long To lists and quoted replies
+  no longer break it.
+- Failed conversions are never released; email threading (#71-#75) and
+  attachment dedup (#70) repaired.
+- Failed and expired release packages stay visible after a reload.
+- Dict error details (`{message, errors}`) reach clients as `error.message` plus
+  `error.details`, not a Python repr.
+- PDFs over `BLACKBAR_MAX_PDF_PAGES` are rejected at upload (413) instead of
+  being stored without text.
+- Attachment downloads read GridFS content and use RFC 6266 filenames.
+
+### Changed
+
+- **Breaking:** approve and contest address redactions by stable id, not array
+  index. Document metadata backfills missing ids and returns `status` and
+  `conversion_failed`.
+- **Breaking:** only approved redactions are burned in on export and release;
+  proposed or contested ones block the document (409).
+- Long documents are analysed by the LLM in overlapping chunks; per-user rate
+  limit, per-document cooldown and timeouts are configurable.
+- Upload limit read from `MAX_UPLOAD_SIZE_MB` (default 100); `.env.example`
+  drops `OPENAI_API_KEY` and documents the new settings.
+
+### Upgrade notes
+
+Operator actions for this release:
+
+1. Set `LLM_API_KEY_ENCRYPTION_KEY` and `JWT_SECRET` to real values. The
+   `.env.example` placeholders now refuse to start in production (run
+   `./setup.sh` to generate both). Keep the existing LLM key if configs are
+   stored: they cannot be decrypted with a new one.
+2. Run `python -m src.migrations.rehash_attachment_content_hash` (attachment
+   dedup, #70).
+3. Run `python -m src.migrations.tag_redaction_coordinate_space`. It tags
+   legacy redactions on unrotated pages, rebuilds stored word boxes of rotated
+   pages, and lists legacy redactions on rotated pages. Those block export and
+   release (`legacy_rotated_coordinates`) until a reviewer checks them in the
+   viewer and approves them, or deletes and re-adds them.
+4. Legacy `pending` redactions drawn by non-analysts, role-less ones and
+   coordinate-less bulk/AI ones block export and release (409) until they are
+   approved or rejected. Ones with no usable box must be deleted and re-added
+   (re-run bulk apply).
+5. Behind a reverse proxy, set `TRUSTED_PROXIES` or every client shares one
+   rate-limit bucket. The shipped compose files now set it to the compose
+   network, which gets a fixed subnet (`BLACKBAR_NETWORK_SUBNET`, default
+   `172.30.87.0/24`): run `docker compose down` once so the network is
+   recreated, and change the subnet if it overlaps one on your host.
+6. Documents over `BLACKBAR_MAX_PDF_PAGES` (default 2000) are rejected at
+   upload, and stored ones can no longer be redacted, exported or released.
+7. Passwords over 72 bytes are rejected; existing ones need an admin reset.
+8. Tracking numbers issued before this release (3-letter suffix) still work
+   for public lookup; new ones have an 8-character suffix.
+9. LLM endpoints on plain http (for example `http://ollama:11434`) need
+   `LLM_ALLOW_PRIVATE_ENDPOINTS=true`; public endpoints need https.
+
+### Dependencies
+
+- Backend: CVE floors raised (pillow, jinja2, pymongo, python-multipart,
+  sentry-sdk, cryptography, anyio, protobuf); unused openai, anthropic, cohere
+  and python-dotenv removed; passlib replaced by bcrypt.
+- Frontend and e2e: react-router-dom 7.18.4, vite 8.3.0, axios 1.20.0, react
+  19.3.0, @playwright/test 1.63.0; npm audit clean.
+
 ## [0.1.0] - 2026-07-24
 
 First tagged release. Everything below shipped in `v0.1.0`, on top of the

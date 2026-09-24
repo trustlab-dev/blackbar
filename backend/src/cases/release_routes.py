@@ -54,6 +54,8 @@ def _build_package_response(package, case_id: str) -> ReleasePackageResponse:
         document_count=package.document_count,
         total_redactions=package.total_redactions,
         included_documents=package.included_documents,
+        failed_documents=package.failed_documents,
+        skipped_documents=package.skipped_documents,
         generation_progress=package.generation_progress,
         generation_message=package.generation_message,
         download_url=download_url,

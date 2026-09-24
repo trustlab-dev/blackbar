@@ -40,7 +40,28 @@ import Delete from '@mui/icons-material/Delete';
 import Edit from '@mui/icons-material/Edit';
 import Save from '@mui/icons-material/Save';
 import Close from '@mui/icons-material/Close';
-import api from '../../api/client';
+import FileDownload from '@mui/icons-material/FileDownload';
+import api, { TRANSFER_TIMEOUT_MS } from '../../api/client';
+import { useUser } from '../../contexts/UserContext';
+import {
+  addRedaction,
+  exportRedactedDocument,
+  reviewProposedRedaction,
+  RedactionReviewAction,
+} from '../../api/redactionApi';
+import {
+  describeUnresolved,
+  EffectiveRedactionStatus,
+  formatUnresolvedList,
+  statusFromServerReview,
+  unresolvedReasonLabel,
+  UnresolvedRedaction,
+  unresolvedRedactionsFromError,
+} from '../../utils/redactionStatus';
+import BlockingRedactionsBanner, {
+  BlockingRedaction,
+  LEGACY_NO_ID_HINT,
+} from './BlockingRedactionsBanner';
 import PDFViewerWithSelection from './PDFViewerWithSelection';
 import LeftToolRail from './LeftToolRail';
 import RightUtilityBar from './RightUtilityBar';
@@ -54,6 +75,8 @@ import HistoryDrawer from './HistoryDrawer';
 import ReasonPickerModal, { RedactionReason } from './ReasonPickerModal';
 import SuggestedRedactionOverlay from './SuggestedRedactionOverlay';
 import './ViewerShell.css';
+import { getApiErrorMessage } from '../../api/errors';
+import { postAiFeedback } from '../../api/aiFeedback';
 
 interface Props {
   documentId: string;
@@ -89,7 +112,42 @@ interface Redaction {
   createdAt?: string;
   type?: string;
   status?: string;
+  // Export/release rule applied to the stored record: only 'approved' is
+  // burned in; 'unresolved' blocks export (see utils/redactionStatus.ts).
+  effectiveStatus?: EffectiveRedactionStatus;
+  // Why an unresolved record blocks, from the metadata `review_required`
+  // (or the client rule when the response has no server list).
+  review?: UnresolvedRedaction;
 }
+
+/**
+ * Status of a record the add endpoint just stored: the response gives its
+ * status; the box is the one we sent, in the viewer's displayed space (the
+ * server stamps coord_space/page_rotation itself).
+ */
+function statusOfNewRecord(
+  record: { id?: string; page: number; x: number; y: number; width: number; height: number },
+  status: string | undefined,
+): Pick<Redaction, 'effectiveStatus' | 'review'> {
+  const type = status === 'proposed' ? 'proposed' : 'professional';
+  return statusFromServerReview({ ...record, status, type }, false);
+}
+
+/** Last resort for an unresolved record without a review reason. */
+function reviewOf(r: Redaction): UnresolvedRedaction {
+  return (
+    r.review ??
+    describeUnresolved(r) ?? {
+      id: r.id ?? null,
+      page: r.page,
+      status: r.status ?? null,
+      reason: 'unknown_status',
+      approvable: true,
+    }
+  );
+}
+
+type SnackSeverity = 'error' | 'warning' | 'info' | 'success';
 
 interface Suggestion {
   text: string;
@@ -131,8 +189,17 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   const [reasonPickerOpen, setReasonPickerOpen] = useState<boolean>(false);
   const [redactionColor, setRedactionColor] = useState<string>('blue'); // Light blue for all redactions, green for AI suggestions later
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  // The viewer waits while pdfUrl is null; after a failed download it gets
+  // undefined and makes (and reports) its own attempt.
+  const [pdfLoadFailed, setPdfLoadFailed] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [showError, setShowError] = useState<boolean>(false);
+  const [snackSeverity, setSnackSeverity] = useState<SnackSeverity>('error');
+  const [reviewListOpen, setReviewListOpen] = useState<boolean>(false);
+  const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<boolean>(false);
+  // UI hint only: the backend role gate refuses export to guests (403).
+  const canExport = useUser().currentRole !== 'guest';
   const [isScrolling, setIsScrolling] = useState<boolean>(false);
   const [pageTransitioning, setPageTransitioning] = useState<boolean>(false);
   const [selectedRedactionIndex, setSelectedRedactionIndex] = useState<number | null>(null);
@@ -153,6 +220,24 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
     fetchRedactions();
     fetchSuggestions();
   }, [documentId]);
+
+  const notify = (message: string, severity: SnackSeverity = 'error') => {
+    setErrorMessage(message);
+    setSnackSeverity(severity);
+    setShowError(true);
+  };
+
+  // The PDF viewer gets only the current page's redactions and reports clicks
+  // by index into that list; selection is kept as an index into the full list.
+  const pageRedactions = redactions.filter(r => r.page === currentPage);
+  const selectedPageIndex =
+    selectedRedactionIndex === null
+      ? null
+      : (() => {
+          const idx = pageRedactions.indexOf(redactions[selectedRedactionIndex]);
+          return idx >= 0 ? idx : null;
+        })();
+  const blockingRedactions = redactions.filter(r => r.effectiveStatus === 'unresolved');
 
   const fetchDocumentMeta = async () => {
     try {
@@ -181,6 +266,9 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       // Redactions are stored in the document metadata
       const response = await api.get(`/documents/${documentId}/metadata`);
       if (response.data.redactions) {
+        // The server lists every blocking record (unresolved_redactions) and
+        // tags each with review_required; prefer that to the client rule.
+        const hasServerList = Array.isArray(response.data.unresolved_redactions);
         // Map backend format to frontend format, keeping all metadata including ID
         const mappedRedactions = response.data.redactions.map((r: any) => ({
           id: r.id, // Important: keep the ID for deletion
@@ -200,7 +288,8 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           createdByRole: r.created_by_role,
           createdAt: r.created_at,
           type: r.type,
-          status: r.status
+          status: r.status,
+          ...statusFromServerReview(r, hasServerList),
         }));
         setRedactions(mappedRedactions);
       }
@@ -209,10 +298,16 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
     }
   };
 
+  // Reads cached AI suggestions for the page overlay. It never sends
+  // generate=true: opening a document must not send it to the LLM (the
+  // backend answers `not_generated`); generation is an explicit action in
+  // the Auto Suggest drawer.
   const fetchSuggestions = async () => {
     setLoadingSuggestions(true);
     try {
-      const response = await api.get(`/documents/${documentId}/redaction-suggestions?quick=false`);
+      const response = await api.get(`/documents/${documentId}/redaction-suggestions?quick=false`, {
+        timeout: TRANSFER_TIMEOUT_MS,
+      });
       const allSuggestions = response.data.suggestions || [];
 
       // Filter out already-applied suggestions
@@ -233,20 +328,36 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
     );
   };
 
-  const fetchPDF = async () => {
-    try {
-      const response = await api.get(`/documents/${documentId}`, {
-        responseType: 'blob'
-      });
-      const url = URL.createObjectURL(response.data);
-      setPdfUrl(url);
-    } catch (error) {
-      console.error('Error fetching PDF:', error);
-    }
-  };
-
   useEffect(() => {
+    // Object URL for the original (unredacted) PDF. Revoke it when the
+    // document changes or the viewer unmounts so it doesn't stay reachable
+    // for the rest of the SPA session.
+    let objectUrl: string | null = null;
+    let cancelled = false;
+
+    const fetchPDF = async () => {
+      try {
+        const response = await api.get(`/documents/${documentId}`, {
+          responseType: 'blob',
+          timeout: TRANSFER_TIMEOUT_MS,
+        });
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(response.data);
+        setPdfUrl(objectUrl);
+      } catch (error) {
+        console.error('Error fetching PDF:', error);
+        if (!cancelled) setPdfLoadFailed(true);
+      }
+    };
+
+    setPdfLoadFailed(false);
     fetchPDF();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setPdfUrl(null);
+    };
   }, [documentId]);
 
   // Escape key closes the redaction menu first, then deselects the
@@ -397,45 +508,74 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   const handleReasonSave = async (reason: RedactionReason) => {
     if (pendingRedactions.length === 0) return;
 
-    // Create redactions for all pending rectangles
-    const newRedactions: Redaction[] = pendingRedactions.map(data => ({
-      x: data.x,
-      y: data.y,
-      width: data.width,
-      height: data.height,
-      page: data.page || currentPage, // Use page from data if available, otherwise current page
-      text: data.text,
-      reason: reason,
-      color: redactionColor
-    }));
-
-    // Add to undo stack
-    setUndoStack([...undoStack, { type: 'add', redactions: newRedactions }]);
-    setRedoStack([]); // Clear redo stack
-
-    // Add to redactions list
-    setRedactions([...redactions, ...newRedactions]);
-
-    // Save to backend - save all redactions
-    try {
-      for (const redaction of newRedactions) {
-        await api.post(`/documents/${documentId}/redactions`, {
-          x: redaction.x,
-          y: redaction.y,
-          width: redaction.width,
-          height: redaction.height,
-          page: redaction.page,
+    // Only boxes the server accepted are shown, with the id and status it
+    // assigned: staff and case analysts get `approved`, everyone else a
+    // `proposed` record that must be approved before export.
+    const saved: Redaction[] = [];
+    const failures: unknown[] = [];
+    for (const data of pendingRedactions) {
+      const local: Redaction = {
+        x: data.x,
+        y: data.y,
+        width: data.width,
+        height: data.height,
+        page: data.page || currentPage, // Use page from data if available, otherwise current page
+        text: data.text,
+        reason: reason,
+        color: redactionColor
+      };
+      try {
+        const result = await addRedaction(documentId, {
+          x: local.x,
+          y: local.y,
+          width: local.width,
+          height: local.height,
+          page: local.page,
           category: reason.categoryCode || reason.categoryName || 'redacted',
           description: reason.notes || `${reason.categoryName} - ${reason.section}`
         });
+        saved.push({
+          ...local,
+          id: result.id,
+          status: result.status,
+          ...statusOfNewRecord({ ...local, id: result.id }, result.status),
+          // The add response is {message, id, status}; the server records a
+          // proposed box as type "proposed" and an approved one as professional.
+          type: result.status === 'proposed' ? 'proposed' : 'professional',
+        });
+      } catch (error) {
+        console.error('Error saving redaction:', error);
+        failures.push(error);
       }
-    } catch (error: any) {
-      console.error('Error saving redaction:', error);
-      const message = error.response?.status === 401
+    }
+
+    if (saved.length > 0) {
+      setUndoStack(prev => [...prev, { type: 'add', redactions: saved }]);
+      setRedoStack([]);
+      setRedactions(prev => [...prev, ...saved]);
+    }
+
+    if (failures.length > 0) {
+      // 422 invalid box, 409 no content / failed conversion, 413 page limit:
+      // the server's reason is shown and the drawing tool stays as it was.
+      const first: any = failures[0];
+      const reasonText = first?.response?.status === 401
         ? 'Authentication required. Please log in to save redactions.'
-        : error.response?.data?.detail || 'Failed to save redaction. Please try again.';
-      setErrorMessage(message);
-      setShowError(true);
+        : getApiErrorMessage(first, 'Failed to save redaction. Please try again.');
+      notify(
+        failures.length > 1 && saved.length > 0
+          ? `${failures.length} of ${pendingRedactions.length} redactions were not saved: ${reasonText}`
+          : reasonText,
+        'error',
+      );
+    } else {
+      const proposedCount = saved.filter(r => r.effectiveStatus === 'unresolved').length;
+      if (proposedCount > 0) {
+        notify(
+          `${proposedCount} redaction${proposedCount !== 1 ? 's' : ''} proposed for review. An analyst must approve before export or release.`,
+          'info',
+        );
+      }
     }
 
     // Clear pending
@@ -453,7 +593,6 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   };
 
   const handleRedactMatches = async (matches: any[], searchTerm: string) => {
-    console.log('Redacting matches:', matches, 'for term:', searchTerm);
 
     // Convert search matches to pending redactions format
     // Include page number for each match
@@ -483,7 +622,10 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
         height: suggestion.coordinates.height,
         page: suggestion.page,
         category: suggestion.category || suggestion.section || 'S22',
-        description: suggestion.reason || ''
+        description: suggestion.reason || '',
+        // The backend checks that the burned box removes this text
+        // (backend/src/utils/pdf_redaction.py verification).
+        ...(suggestion.text ? { text: suggestion.text } : {}),
       };
 
       const response = await api.post(`/documents/${documentId}/redactions`, redactionData);
@@ -506,32 +648,28 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
         createdBy: backendRedaction.created_by || currentUser?.username || 'Unknown',
         createdByRole: backendRedaction.created_by_role || 'admin',
         createdAt: backendRedaction.created_at || new Date().toISOString(),
-        status: 'pending',
-        type: backendRedaction.type || 'professional'
+        // Rendered from the response: approved for analysts, proposed otherwise.
+        status: backendRedaction.status,
+        ...statusOfNewRecord({ ...redactionData, id: backendRedaction.id }, backendRedaction.status),
+        type: backendRedaction.status === 'proposed' ? 'proposed' : 'professional'
       };
 
       setRedactions(prev => [...prev, mappedRedaction]);
       setSuggestions(prev => prev.filter(s => s !== suggestion));
     } catch (error) {
       console.error('Error accepting suggestion:', error);
-      setErrorMessage('Failed to accept suggestion');
-      setShowError(true);
+      notify(getApiErrorMessage(error, 'Failed to accept suggestion'));
     }
   };
 
   const handleRejectSuggestion = async (suggestion: Suggestion) => {
     try {
-      await api.post(`/documents/${documentId}/ai-feedback`, {
-        suggestion_text: suggestion.text,
-        suggestion_category: suggestion.category,
-        suggestion_reason: suggestion.reason,
-        feedback: 'rejected',
-        context: 'user_rejected_overlay'
-      });
+      await postAiFeedback(documentId, suggestion, 'rejected', 'user_rejected_overlay');
 
       setSuggestions(prev => prev.filter(s => s !== suggestion));
     } catch (error) {
       console.error('Error rejecting suggestion:', error);
+      notify(`Rejection not recorded: ${getApiErrorMessage(error, 'the server could not save it.')}`);
     }
   };
 
@@ -598,8 +736,10 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
   };
 
   const handleApplySuggestions = async (suggestions: any[]) => {
-    console.log('Applying suggestions:', suggestions);
-
+    // A suggestion that cannot be placed on the page is skipped: the backend
+    // rejects zero-area boxes (422) rather than storing a redaction that
+    // would redact nothing.
+    let skippedWithoutCoordinates = 0;
     // Apply each suggestion directly with its category/reason
     for (const suggestion of suggestions) {
       // Use provided coordinates, or look up from OCR data
@@ -617,16 +757,22 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           y = ocrCoords.y;
           width = ocrCoords.width;
           height = ocrCoords.height;
-          console.log(`Found OCR coordinates for "${suggestion.text}":`, ocrCoords);
         } else {
-          console.warn(`Could not find OCR coordinates for "${suggestion.text}" on page ${page}`);
+          console.warn(`Could not find OCR coordinates for a suggestion on page ${page}`);
         }
+      }
+
+      if (!(width > 0) || !(height > 0)) {
+        skippedWithoutCoordinates += 1;
+        continue;
       }
 
       const redactionData = {
         x, y, width, height, page,
         category: suggestion.category || 'S22',
-        description: suggestion.reason || ''
+        description: suggestion.reason || '',
+        // Checked against the page after burning (see handleAcceptSuggestion).
+        ...(suggestion.text ? { text: suggestion.text } : {}),
       };
 
       try {
@@ -653,23 +799,143 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           createdBy: username,
           createdByRole: backendRedaction.created_by_role || 'admin',
           createdAt: backendRedaction.created_at || new Date().toISOString(),
-          status: 'pending',  // Always pending when created from suggestions
-          type: backendRedaction.type || 'professional'
+          status: backendRedaction.status,
+          ...statusOfNewRecord({ ...redactionData, id: backendRedaction.id }, backendRedaction.status),
+          type: backendRedaction.status === 'proposed' ? 'proposed' : 'professional'
         };
 
         setRedactions(prev => [...prev, mappedRedaction]);
       } catch (error) {
         console.error('Failed to create redaction:', error);
-        setErrorMessage('Failed to apply some suggestions');
-        setShowError(true);
+        notify(getApiErrorMessage(error, 'Failed to apply some suggestions'));
       }
+    }
+    if (skippedWithoutCoordinates > 0) {
+      notify(
+        `${skippedWithoutCoordinates} suggestion${skippedWithoutCoordinates !== 1 ? 's' : ''} skipped: no position on the page was found. Redact ${skippedWithoutCoordinates !== 1 ? 'them' : 'it'} manually.`,
+        'warning',
+      );
     }
   };
 
   const handleRedactionClick = (index: number, event: React.MouseEvent) => {
     event.stopPropagation();
-    setSelectedRedactionIndex(index);
+    // `index` is into the current page's list; map it to the full list.
+    const globalIndex = redactions.indexOf(pageRedactions[index]);
+    if (globalIndex < 0) return;
+    setSelectedRedactionIndex(globalIndex);
     setRedactionMenuAnchor({ x: event.clientX, y: event.clientY });
+  };
+
+  // Approve or reject a proposed redaction, addressed by its stable id.
+  const handleReviewRedaction = async (
+    redaction: { id?: string },
+    action: RedactionReviewAction,
+  ) => {
+    if (!redaction.id) {
+      notify(LEGACY_NO_ID_HINT, 'warning');
+      return;
+    }
+    const redactionId = redaction.id;
+    setReviewBusyId(redactionId);
+    try {
+      const result = await reviewProposedRedaction(documentId, redactionId, action);
+      const status = action === 'approve' ? 'approved' : 'rejected';
+      setRedactions(prev => prev.map(r =>
+        r.id === redactionId
+          ? {
+              ...r,
+              status,
+              type: action === 'approve' ? 'professional' : r.type,
+              effectiveStatus: status,
+              review: undefined,
+            }
+          : r
+      ));
+      notify(result.message || `Redaction ${status}`, 'success');
+    } catch (error: any) {
+      console.error('Failed to review redaction:', error);
+      if (error?.response?.status === 409) {
+        // Someone else changed it: reload so the list shows the truth.
+        await fetchRedactions();
+        notify(
+          `${getApiErrorMessage(error, 'This redaction was changed by someone else.')} The redactions have been reloaded.`,
+          'warning',
+        );
+      } else {
+        notify(getApiErrorMessage(error, `Failed to ${action} the redaction.`));
+      }
+    } finally {
+      setReviewBusyId(null);
+    }
+  };
+
+  // Delete a blocking redaction whose fix is to delete and re-add it (no
+  // usable geometry, legacy coordinates on a rotated page).
+  const handleDeleteBlockingRedaction = async (target: BlockingRedaction) => {
+    if (!target.id) {
+      notify(LEGACY_NO_ID_HINT, 'warning');
+      return;
+    }
+    const redactionId = target.id;
+    setReviewBusyId(redactionId);
+    try {
+      await api.delete(`/documents/${documentId}/redactions/${redactionId}`);
+      // Selection is an index into the list: keep it on the same record.
+      const deletedIndex = redactions.findIndex(r => r.id === redactionId);
+      if (selectedRedactionIndex !== null && deletedIndex >= 0) {
+        if (selectedRedactionIndex === deletedIndex) handleDeselectRedaction();
+        else if (selectedRedactionIndex > deletedIndex) setSelectedRedactionIndex(selectedRedactionIndex - 1);
+      }
+      setRedactions(prev => prev.filter(r => r.id !== redactionId));
+      notify('Redaction deleted. Add it again if the text still needs redacting.', 'success');
+    } catch (error) {
+      console.error('Failed to delete redaction:', error);
+      notify(getApiErrorMessage(error, 'Failed to delete redaction.'));
+    } finally {
+      setReviewBusyId(null);
+    }
+  };
+
+  const handleGoToRedaction = (target: BlockingRedaction) => {
+    const globalIndex = target.id ? redactions.findIndex(r => r.id === target.id) : -1;
+    if (target.page) setCurrentPage(target.page);
+    if (globalIndex >= 0) setSelectedRedactionIndex(globalIndex);
+  };
+
+  // Download the PDF with approved redactions burned in. The server refuses
+  // (409) while any redaction is awaiting review; its reason is shown.
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const base = (documentMeta?.filename || 'document').replace(/\.[^.]+$/, '');
+      const { blob, filename } = await exportRedactedDocument(documentId, `${base}_REDACTED.pdf`);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error: any) {
+      console.error('Export failed:', error);
+      const blocking = unresolvedRedactionsFromError(error);
+      if (error?.response?.status === 409) setReviewListOpen(true);
+      if (blocking.length > 0) {
+        // The 409 lists each blocking redaction (routes.py export handler):
+        // show them, and reload so the review list matches the server.
+        notify(
+          `Export blocked by ${blocking.length} redaction${blocking.length !== 1 ? 's' : ''} awaiting review. ` +
+            `${formatUnresolvedList(blocking).join('; ')}.`,
+        );
+        void fetchRedactions();
+      } else {
+        notify(getApiErrorMessage(error, 'Export failed. Please try again.'));
+      }
+    } finally {
+      setExporting(false);
+    }
   };
 
   // Operator drag-resized a redaction. Update local state immediately for
@@ -686,8 +952,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       await api.put(`/documents/${documentId}/redactions/${redactionId}/edit`, rect);
     } catch (err) {
       console.error('Failed to persist redaction resize', err);
-      setErrorMessage('Could not save the new redaction size. Reloading to recover.');
-      setShowError(true);
+      notify(`${getApiErrorMessage(err, 'Could not save the new redaction size.')} Reloading to recover.`);
       // Re-fetch the doc's redactions to get back to a consistent state.
       try {
         const r = await api.get(`/documents/${documentId}/metadata`);
@@ -741,13 +1006,10 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       description: editedDescription
     };
 
-    console.log('Updating redaction:', redaction.id);
-    console.log('Update data:', updateData);
 
     try {
       // Update backend using the /edit endpoint
       const response = await api.put(`/documents/${documentId}/redactions/${redaction.id}/edit`, updateData);
-      console.log('Update response:', response.data);
 
       // Update local state
       const updatedRedactions = [...redactions];
@@ -763,8 +1025,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       setIsEditingRedaction(false);
     } catch (error) {
       console.error('Failed to update redaction:', error);
-      setErrorMessage('Failed to update redaction');
-      setShowError(true);
+      notify(getApiErrorMessage(error, 'Failed to update redaction'));
     }
   };
 
@@ -773,13 +1034,9 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
 
     const redactionToDelete = redactions[selectedRedactionIndex];
 
-    // Need the redaction ID to delete from backend
+    // Legacy records without an id are read-only (the menu hides Delete).
     if (!redactionToDelete.id) {
-      // If no ID, just remove locally
-      setRedactions(redactions.filter((_, idx) => idx !== selectedRedactionIndex));
-      handleDeselectRedaction();
-      setErrorMessage('Redaction removed locally (no ID found).');
-      setShowError(true);
+      notify(LEGACY_NO_ID_HINT, 'warning');
       return;
     }
 
@@ -793,9 +1050,8 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       handleDeselectRedaction();
     } catch (error: any) {
       console.error('Error deleting redaction:', error);
-      const message = error.response?.data?.detail || 'Failed to delete redaction.';
-      setErrorMessage(message);
-      setShowError(true);
+      const message = getApiErrorMessage(error, 'Failed to delete redaction.');
+      notify(message);
     }
   };
 
@@ -954,6 +1210,22 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
 
           {/* Right Section */}
           <Box sx={{ display: 'flex', gap: 1 }}>
+            {canExport && (
+              <Tooltip title="Export redacted PDF (approved redactions only)">
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label="Export redacted PDF"
+                    onClick={handleExport}
+                    disabled={exporting}
+                    sx={{ color: 'var(--text-secondary)' }}
+                  >
+                    <FileDownload sx={{ fontSize: 20 }} />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+
             <Tooltip title="Share Document">
               <IconButton size="small" sx={{ color: 'var(--text-secondary)' }}>
                 <Share sx={{ fontSize: 20 }} />
@@ -974,6 +1246,26 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           </Box>
         </Toolbar>
       </AppBar>
+
+      {/* Redactions that block export/release, with approve/reject */}
+      <BlockingRedactionsBanner
+        redactions={blockingRedactions.map(r => ({
+          id: r.id,
+          page: r.page,
+          status: r.status,
+          type: r.type,
+          categoryName: r.reason?.categoryName,
+          notes: r.reason?.notes,
+          review: reviewOf(r),
+        }))}
+        expanded={reviewListOpen}
+        onToggle={() => setReviewListOpen(open => !open)}
+        onApprove={(r) => handleReviewRedaction(r, 'approve')}
+        onReject={(r) => handleReviewRedaction(r, 'reject')}
+        onDelete={handleDeleteBlockingRedaction}
+        onGoTo={handleGoToRedaction}
+        busyId={reviewBusyId}
+      />
 
       {/* Main Content Area */}
       <Box className="viewer-content" sx={{ display: 'flex', flexDirection: 'row', flex: 1, overflow: 'hidden' }}>
@@ -1016,15 +1308,15 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
               currentPage={currentPage}
               zoom={zoom}
               onNumPagesChange={setNumPages}
-              pdfUrl={pdfUrl}
-              redactions={redactions.filter(r => r.page === currentPage)}
+              pdfUrl={pdfLoadFailed ? undefined : pdfUrl}
+              redactions={pageRedactions}
               suggestions={suggestions.filter(s => s.page === currentPage)}
               onSuggestionAccept={handleAcceptSuggestion}
               onSuggestionReject={handleRejectSuggestion}
               onTextSelected={activeTool === 'select' ? handleMultipleRedactionsCreated : undefined}
               onRedactionClick={handleRedactionClick}
               onRedactionResize={handleRedactionResize}
-              selectedRedactionIndex={selectedRedactionIndex}
+              selectedRedactionIndex={selectedPageIndex}
               highlightedMatchBbox={highlightedMatchBbox}
               showRedactionPreview={showRedactionPreview}
             />
@@ -1120,7 +1412,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
                 <Typography variant="subtitle1" sx={{ fontWeight: 600, color: 'var(--text-primary)' }}>
                   Redaction Details
                 </Typography>
-                {!isEditingRedaction && (
+                {!isEditingRedaction && redactions[selectedRedactionIndex]?.id && (
                   <IconButton size="small" onClick={handleStartEditRedaction}>
                     <Edit fontSize="small" />
                   </IconButton>
@@ -1207,17 +1499,64 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
                         <Typography
                           variant="body2"
                           sx={{
-                            color: redaction.status === 'approved' ? '#10b981' : '#f59e0b',
+                            color: redaction.effectiveStatus === 'approved'
+                              ? '#10b981'
+                              : redaction.effectiveStatus === 'rejected' ? '#6b7280' : '#f59e0b',
                             textTransform: 'capitalize'
                           }}
                         >
                           {redaction.status}
                         </Typography>
+                        {redaction.effectiveStatus === 'unresolved' && (
+                          <Typography variant="caption" sx={{ color: 'var(--text-secondary)' }}>
+                            Awaiting review: blocks export and release.
+                            {' '}{unresolvedReasonLabel(String(reviewOf(redaction).reason))}.
+                          </Typography>
+                        )}
+                        {redaction.effectiveStatus === 'rejected' && (
+                          <Typography variant="caption" sx={{ color: 'var(--text-secondary)' }}>
+                            Rejected: not applied on export.
+                          </Typography>
+                        )}
                       </Box>
                     )}
 
+                    {/* Approve/reject a proposal */}
+                    {redaction?.id && redaction.effectiveStatus === 'unresolved' && !isEditingRedaction &&
+                      reviewOf(redaction).approvable && (
+                      <Box sx={{ display: 'flex', gap: 1 }}>
+                        <Button
+                          fullWidth
+                          variant="contained"
+                          color="success"
+                          disabled={reviewBusyId === redaction.id}
+                          onClick={() => handleReviewRedaction(redaction, 'approve')}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          fullWidth
+                          variant="outlined"
+                          color="error"
+                          disabled={reviewBusyId === redaction.id}
+                          onClick={() => handleReviewRedaction(redaction, 'reject')}
+                          sx={{ textTransform: 'none' }}
+                        >
+                          Reject
+                        </Button>
+                      </Box>
+                    )}
+
+                    {/* Legacy record without an id: read-only */}
+                    {redaction && !redaction.id && (
+                      <Alert severity="info" sx={{ py: 0 }}>
+                        {LEGACY_NO_ID_HINT}
+                      </Alert>
+                    )}
+
                     {/* Action Buttons */}
-                    {isEditingRedaction ? (
+                    {!redaction?.id ? null : isEditingRedaction ? (
                       <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
                         <Button
                           fullWidth
@@ -1276,7 +1615,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       >
         <Alert
           onClose={() => setShowError(false)}
-          severity="error"
+          severity={snackSeverity}
           sx={{ width: '100%' }}
         >
           {errorMessage}

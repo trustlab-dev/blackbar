@@ -733,3 +733,56 @@ def test_real_libreoffice_docx_roundtrip(tmp_path: Path, fixtures_dir: Path) -> 
         pytest.skip("FOIPPA_Test_Document.docx fixture not available")
     pdf = convert_office_to_pdf(str(sample), str(tmp_path))
     assert Path(pdf).exists()
+
+
+class TestFirstPassOcrBudget:
+    """I3/DOC-09: extract_text_from_pdf's OCR fallback stays in budget."""
+
+    @staticmethod
+    def _blank_pdf(pages: int, size: float = 200) -> bytes:
+        import fitz
+
+        doc = fitz.open()
+        for _ in range(pages):
+            doc.new_page(width=size, height=size)
+        out = doc.tobytes()
+        doc.close()
+        return out
+
+    def test_page_limit_raises(self, monkeypatch) -> None:
+        import pytest
+
+        from src.utils import pdf_limits
+        from src.utils.conversion import extract_text_from_pdf
+
+        monkeypatch.setattr(pdf_limits, "MAX_PDF_PAGES", 2)
+        with pytest.raises(pdf_limits.PdfLimitExceeded):
+            extract_text_from_pdf(self._blank_pdf(3))
+
+    def test_ocr_uses_timeout_and_skips_failed_pages(self, monkeypatch) -> None:
+        from src.utils import conversion, pdf_limits
+
+        calls = []
+
+        def fake_ocr(img, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("Tesseract process timeout")
+            return "second page words " * 10
+
+        monkeypatch.setattr(conversion.pytesseract, "image_to_string", fake_ocr)
+        text = conversion.extract_text_from_pdf(self._blank_pdf(2))
+        assert [c["timeout"] for c in calls] == [pdf_limits.OCR_PAGE_TIMEOUT_SECONDS] * 2
+        assert "--- Page 2 ---" in text and "--- Page 1 ---" not in text
+
+    def test_page_too_large_to_render_is_skipped(self, monkeypatch) -> None:
+        from src.utils import conversion, pdf_limits
+
+        monkeypatch.setattr(pdf_limits, "MAX_RENDER_PIXELS", 10)
+        monkeypatch.setattr(
+            conversion.pytesseract,
+            "image_to_string",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not render")),
+        )
+        text = conversion.extract_text_from_pdf(self._blank_pdf(1, size=2000))
+        assert text == "No text could be extracted from this document."

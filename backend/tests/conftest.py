@@ -18,10 +18,11 @@ import httpx
 import pytest
 import pytest_asyncio
 import respx
+from docker.types import Ulimit
 from fastapi.testclient import TestClient
 from httpx import ASGITransport
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from testcontainers.mongodb import MongoDbContainer
+from testcontainers.community.mongodb import MongoDbContainer
 
 # Sample fixtures directory (populated in Phase 1 Task 1.16)
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "redaction-samples"
@@ -47,10 +48,15 @@ def pytest_configure(config: pytest.Config) -> None:
     blow up. The real MONGODB_URI is patched in by `mongo_uri` before
     `src.main` is imported via the `app` fixture.
     """
-    os.environ.setdefault("JWT_SECRET", "test-secret-" + secrets.token_hex(16))
+    # A random, full-strength secret: src.config rejects placeholders and
+    # low-entropy values (AUTH-02), and under filterwarnings=error the dev
+    # fallback warning would abort collection.
+    os.environ.setdefault("JWT_SECRET", secrets.token_urlsafe(48))
     os.environ.setdefault("JWT_EXPIRATION", "60")
     os.environ.setdefault("LLM_API_KEY_ENCRYPTION_KEY", _stable_fernet_key())
     os.environ.setdefault("ENVIRONMENT", "test")
+    # No real backoff sleeps when LLM retries are exercised against mocks.
+    os.environ.setdefault("LLM_RETRY_BASE_DELAY", "0")
     os.environ.setdefault("MONGODB_DB_NAME", "blackbar_test")
     os.environ.setdefault("ALLOWED_ORIGINS", "http://testserver")
     # MONGODB_URI gets overwritten by `mongo_uri` fixture once the
@@ -71,7 +77,12 @@ def _mongo_container() -> Iterator[MongoDbContainer]:
     (see `db` fixture below), not by spinning up a fresh container each
     time — that would add ~5s per test.
     """
-    with MongoDbContainer("mongo:7.0") as mongo:
+    # mongod's open-file count climbs with every per-test database until a
+    # checkpoint clears them. Under the container default (nofile=1024) the
+    # full suite crashes ~35-40% through with a WiredTiger "Too many open
+    # files" panic that surfaces as a burst of connection errors.
+    nofile = Ulimit(name="nofile", soft=65536, hard=65536)
+    with MongoDbContainer("mongo:7.0").with_kwargs(ulimits=[nofile]) as mongo:
         yield mongo
 
 
@@ -229,6 +240,42 @@ async def authed_client_factory(
 
 
 # ---------------------------------------------------------------------------
+# Rate limiter isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits() -> Iterator[None]:
+    """slowapi keeps counters in process memory; without a reset, tests that
+    exercise rate-limited routes (login, magic link, tracking) would trip
+    each other's limits depending on run order."""
+    from src.core.rate_limit import limiter
+
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
+# ---------------------------------------------------------------------------
+# LLM endpoint DNS isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_llm_endpoint_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM endpoint validation resolves hostnames to reject private ranges.
+    Tests must not depend on real DNS: by default every name is treated as
+    unresolvable (accepted); tests that need an answer patch
+    ``src.llm.safety._resolve`` themselves."""
+    import src.llm.safety as llm_safety
+
+    async def _unresolvable(host: str) -> list[str]:
+        raise OSError(f"DNS disabled in tests ({host})")
+
+    monkeypatch.setattr(llm_safety, "_resolve", _unresolvable)
+
+
+# ---------------------------------------------------------------------------
 # External service mocks
 # ---------------------------------------------------------------------------
 
@@ -263,7 +310,7 @@ def mock_anthropic(respx_mock: respx.MockRouter) -> respx.MockRouter:
             "type": "message",
             "role": "assistant",
             "content": [{"type": "text", "text": "ok"}],
-            "model": "claude-3-5-sonnet-20241022",
+            "model": "claude-sonnet-5",
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 1, "output_tokens": 1},
         }

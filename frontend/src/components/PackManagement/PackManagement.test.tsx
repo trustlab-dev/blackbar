@@ -80,7 +80,7 @@ describe('PackManagement', () => {
   it('shows an error alert when the fetch fails', async () => {
     server.use(
       http.get('/api/v1/packs/', () =>
-        HttpResponse.json({ detail: 'fetch boom' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'fetch boom' } }, { status: 400 }),
       ),
     );
     renderWithProviders(<PackManagement />);
@@ -163,7 +163,7 @@ describe('PackManagement', () => {
         HttpResponse.json({ packs: [usPack] }),
       ),
       http.post('/api/v1/packs/activate', () =>
-        HttpResponse.json({ detail: 'activate boom' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'activate boom' } }, { status: 400 }),
       ),
     );
     const user = userEvent.setup();
@@ -200,7 +200,7 @@ describe('PackManagement', () => {
         HttpResponse.json({ packs: [caPack] }),
       ),
       http.post('/api/v1/packs/reload', () =>
-        HttpResponse.json({ detail: 'reload boom' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'reload boom' } }, { status: 400 }),
       ),
     );
     const user = userEvent.setup();

@@ -10,6 +10,7 @@ import {
 } from '@mui/material';
 import SaveIcon from '@mui/icons-material/Save';
 import api from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 
 interface BrandingData {
   org_name: string;
@@ -62,7 +63,7 @@ const OrganizationBranding: React.FC = () => {
       setTimeout(() => setSuccess(false), 3000);
     } catch (error: any) {
       console.error('Error saving branding:', error);
-      setError(error.response?.data?.detail || 'Failed to save branding');
+      setError(getApiErrorMessage(error, 'Failed to save branding'));
     } finally {
       setSaving(false);
     }

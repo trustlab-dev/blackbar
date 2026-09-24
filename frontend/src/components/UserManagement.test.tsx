@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import userEvent from '@testing-library/user-event';
 import { server } from '../test-utils/msw-handlers';
-import { renderWithProviders, screen, waitFor } from '../test-utils/render';
+import { renderWithProviders, screen, waitFor, within } from '../test-utils/render';
 import UserManagement from './UserManagement';
 
 beforeEach(() => {
@@ -206,7 +206,7 @@ describe('UserManagement — add user', () => {
       screen.getByRole('button', { name: /send invitation/i }),
     );
     expect(
-      await screen.findByText(/body\.email: invalid email/i),
+      await screen.findByText(/^email: invalid email$/i),
     ).toBeInTheDocument();
   });
 
@@ -310,10 +310,10 @@ describe('UserManagement — toggle disable', () => {
     await user.click(
       screen.getByRole('checkbox', { name: /toggle user status/i }),
     );
-    // The axios error carries a `message`, so the component surfaces that
-    // (the `Failed to disable user` literal is only the `|| ` fallback).
+    // No response body: getApiErrorMessage falls back to the contextual
+    // message instead of axios's raw "Network Error".
     await waitFor(() =>
-      expect(screen.getByText(/network error/i)).toBeInTheDocument(),
+      expect(screen.getByText(/failed to disable user/i)).toBeInTheDocument(),
     );
   });
 });
@@ -336,15 +336,15 @@ describe('UserManagement — change password', () => {
       screen.getByRole('button', { name: /change password/i }),
     );
     await screen.findByRole('heading', { name: /change password/i });
-    await user.type(screen.getByLabelText(/^new password$/i), 'secret123');
+    await user.type(screen.getByLabelText(/^new password$/i), 'secret-pass-123');
     await user.type(
       screen.getByLabelText(/confirm new password/i),
-      'secret123',
+      'secret-pass-123',
     );
     await user.click(
       screen.getByRole('button', { name: /update password/i }),
     );
-    await waitFor(() => expect(putBody?.password).toBe('secret123'));
+    await waitFor(() => expect(putBody?.password).toBe('secret-pass-123'));
   });
 
   it('blocks the update when the passwords do not match', async () => {
@@ -359,7 +359,7 @@ describe('UserManagement — change password', () => {
       screen.getByRole('button', { name: /change password/i }),
     );
     await screen.findByRole('heading', { name: /change password/i });
-    await user.type(screen.getByLabelText(/^new password$/i), 'secret123');
+    await user.type(screen.getByLabelText(/^new password$/i), 'secret-pass-123');
     await user.type(
       screen.getByLabelText(/confirm new password/i),
       'different',
@@ -370,5 +370,143 @@ describe('UserManagement — change password', () => {
     expect(
       await screen.findByText(/passwords do not match/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe('UserManagement — backend password policy (12+ chars, <= 72 bytes)', () => {
+  const openPasswordDialog = async () => {
+    server.use(
+      http.get('/api/v1/auth/users', () => HttpResponse.json([baseUser])),
+      http.get('/api/v1/auth/roles', () => HttpResponse.json(rolesResponse)),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<UserManagement />);
+    await screen.findByText('Alice Admin');
+    await user.click(screen.getByRole('button', { name: /change password/i }));
+    await screen.findByRole('heading', { name: /change password/i });
+    return user;
+  };
+
+  it('blocks a password shorter than 12 characters without calling the API', async () => {
+    let called = false;
+    server.use(
+      http.put('/api/v1/auth/users/u1', () => {
+        called = true;
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    const user = await openPasswordDialog();
+    expect(screen.getByText(/^At least 12 characters/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^new password$/i), 'secret12345');
+    await user.type(screen.getByLabelText(/confirm new password/i), 'secret12345');
+    await user.click(screen.getByRole('button', { name: /update password/i }));
+    expect(
+      await screen.findByText(/password must be at least 12 characters/i),
+    ).toBeInTheDocument();
+    expect(called).toBe(false);
+  });
+
+  it("shows the backend's 422 message inside the dialog", async () => {
+    server.use(
+      http.put('/api/v1/auth/users/u1', () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: 'Invalid request data',
+              details: {
+                errors: [
+                  {
+                    loc: ['body', 'password'],
+                    msg: 'Value error, Password must be at most 72 bytes when UTF-8 encoded',
+                  },
+                ],
+              },
+            },
+          },
+          { status: 422 },
+        ),
+      ),
+    );
+    const user = await openPasswordDialog();
+    await user.type(screen.getByLabelText(/^new password$/i), 'long-enough-pass');
+    await user.type(screen.getByLabelText(/confirm new password/i), 'long-enough-pass');
+    await user.click(screen.getByRole('button', { name: /update password/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(
+      await within(dialog).findByText(/password must be at most 72 bytes when UTF-8 encoded/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('UserManagement — grantable roles', () => {
+  const openRoleMenu = async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<UserManagement />);
+    await screen.findByText('Alice Admin');
+    await user.click(screen.getByRole('button', { name: /add user/i }));
+    await screen.findByRole('heading', { name: /invite new user/i });
+    await user.click(screen.getByRole('combobox'));
+    return user;
+  };
+
+  beforeEach(() => {
+    server.use(
+      http.get('/api/v1/auth/users', () => HttpResponse.json([baseUser])),
+      // The real /auth/roles omits owner (backend auth/roles.py AVAILABLE_ROLES).
+      http.get('/api/v1/auth/roles', () =>
+        HttpResponse.json({
+          roles: [{ id: 'admin' }, { id: 'analyst' }, { id: 'user' }, { id: 'guest' }],
+        }),
+      ),
+    );
+  });
+
+  it('does not offer owner to an admin', async () => {
+    localStorage.setItem('userRoles', JSON.stringify(['admin']));
+    await openRoleMenu();
+    const options = (await screen.findAllByRole('option')).map((o) => o.textContent);
+    expect(options).toEqual(['Admin', 'Analyst', 'User', 'Guest']);
+  });
+
+  it('offers owner to an owner', async () => {
+    localStorage.setItem('userRoles', JSON.stringify(['owner']));
+    await openRoleMenu();
+    const options = (await screen.findAllByRole('option')).map((o) => o.textContent);
+    expect(options).toEqual(['Owner', 'Admin', 'Analyst', 'User', 'Guest']);
+  });
+
+  it('shows the 403 message when the backend refuses the grant', async () => {
+    localStorage.setItem('userRoles', JSON.stringify(['owner']));
+    server.use(
+      http.post('/api/v1/auth/users', () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_403', message: 'Only an owner can assign the owner role' } },
+          { status: 403 },
+        ),
+      ),
+    );
+    const user = await openRoleMenu();
+    await user.click(await screen.findByRole('option', { name: 'Owner' }));
+    await user.type(screen.getByLabelText(/email address/i), 'new@example.com');
+    await user.click(screen.getByRole('button', { name: /send invitation/i }));
+    const dialog = screen.getByRole('dialog');
+    expect(
+      await within(dialog).findByText('Only an owner can assign the owner role'),
+    ).toBeInTheDocument();
+  });
+
+  it('locks owner rows for an admin caller', async () => {
+    localStorage.setItem('userRoles', JSON.stringify(['admin']));
+    server.use(
+      http.get('/api/v1/auth/users', () =>
+        HttpResponse.json([{ ...baseUser, id: 'o1', role: 'owner', full_name: 'Olive Owner' }]),
+      ),
+    );
+    renderWithProviders(<UserManagement />);
+    await screen.findByText('Olive Owner');
+    expect(screen.getByRole('button', { name: /edit user/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /change password/i })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: /toggle user status/i })).toBeDisabled();
   });
 });

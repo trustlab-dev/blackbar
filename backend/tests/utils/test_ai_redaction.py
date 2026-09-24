@@ -31,6 +31,12 @@ from src.utils.ai_redaction import (
 )
 
 
+def _completion(text: str, finish_reason: str | None = "stop"):
+    from src.llm.service import LLMCompletion
+
+    return LLMCompletion(text=text, finish_reason=finish_reason, provider="openai", model="m")
+
+
 @pytest.fixture(autouse=True)
 def _reset_prompt_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each test gets a fresh global-prompts cache."""
@@ -111,19 +117,21 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "suggestions": [
-                        {
-                            "text": "John Doe",
-                            "category": "personal_info",
-                            "reason": "name",
-                            "confidence": "high",
-                        }
-                    ],
-                    "summary": "1 finding",
-                }
+        client.complete = AsyncMock(
+            return_value=_completion(
+                json.dumps(
+                    {
+                        "suggestions": [
+                            {
+                                "text": "John Doe",
+                                "category": "personal_info",
+                                "reason": "name",
+                                "confidence": "high",
+                            }
+                        ],
+                        "summary": "1 finding",
+                    }
+                )
             )
         )
         with (
@@ -147,11 +155,13 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(
-            return_value=json.dumps(
-                [
-                    {"text": "alice", "category": "personal_info", "reason": "n"},
-                ]
+        client.complete = AsyncMock(
+            return_value=_completion(
+                json.dumps(
+                    [
+                        {"text": "alice", "category": "personal_info", "reason": "n"},
+                    ]
+                )
             )
         )
         with (
@@ -176,8 +186,10 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(
-            return_value=json.dumps({"text": "alice", "category": "personal_info", "reason": "n"})
+        client.complete = AsyncMock(
+            return_value=_completion(
+                json.dumps({"text": "alice", "category": "personal_info", "reason": "n"})
+            )
         )
         with (
             patch(
@@ -197,8 +209,8 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(
-            return_value=(
+        client.complete = AsyncMock(
+            return_value=_completion(
                 "Here is my analysis:\n```json\n"
                 + json.dumps({"suggestions": [], "summary": "none"})
                 + "\n```\nThat's all."
@@ -222,8 +234,8 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(
-            return_value='```\n[{"text":"a","category":"personal_info"}]\n```'
+        client.complete = AsyncMock(
+            return_value=_completion('```\n[{"text":"alice","category":"personal_info"}]\n```')
         )
         with (
             patch(
@@ -243,7 +255,9 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(return_value='Prefix: {"suggestions":[],"summary":"x"}')
+        client.complete = AsyncMock(
+            return_value=_completion('Prefix: {"suggestions":[],"summary":"x"}')
+        )
         with (
             patch(
                 "src.utils.ai_redaction.get_llm_client",
@@ -262,8 +276,8 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(
-            return_value=json.dumps({"suggestions": [], "summary": "ok"})
+        client.complete = AsyncMock(
+            return_value=_completion(json.dumps({"suggestions": [], "summary": "ok"}))
         )
         with (
             patch(
@@ -277,7 +291,7 @@ class TestGetRedactionSuggestions:
         ):
             await get_redaction_suggestions("doc text", context="extra context here")
         # Check that the user prompt includes the context
-        prompts = client.chat_completion.call_args.kwargs["messages"]
+        prompts = client.complete.call_args.kwargs["messages"]
         user_msg = prompts[1]["content"]
         assert "extra context here" in user_msg
 
@@ -286,7 +300,7 @@ class TestGetRedactionSuggestions:
         client = MagicMock()
         client.provider = "openai"
         client.model = "gpt-4o"
-        client.chat_completion = AsyncMock(side_effect=RuntimeError("boom"))
+        client.complete = AsyncMock(side_effect=RuntimeError("boom"))
         with (
             patch(
                 "src.utils.ai_redaction.get_llm_client",
@@ -299,8 +313,10 @@ class TestGetRedactionSuggestions:
         ):
             result = await get_redaction_suggestions("doc text")
         assert result["suggestions"] == []
-        assert "boom" in result["summary"]
-        assert "error" in result
+        # LLM-02: raw exception text is never returned or stored
+        assert "boom" not in result["summary"]
+        assert result["error"] == "analysis_failed"
+        assert result["reference"] in result["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -524,3 +540,344 @@ class TestFindTextInOcrData:
         result = find_text_in_ocr_data("alice", text_data)
         assert len(result) == 1
         assert result[0]["page"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Security-review 2026-09: LLM-03, LLM-06/07, LLM-08, LLM-11
+# ---------------------------------------------------------------------------
+
+
+def _client_returning(*texts, finish_reason: str | None = "stop") -> MagicMock:
+    client = MagicMock()
+    client.provider = "anthropic"
+    client.model = "claude-sonnet-5"
+    client.config_id = "cfg-9"
+    client.endpoint = "https://api.anthropic.com/v1/messages"
+    client.complete = AsyncMock(
+        side_effect=[_completion(t, finish_reason=finish_reason) for t in texts]
+    )
+    return client
+
+
+def _patched(client, prompts=None, categories=None):
+    return (
+        patch("src.utils.ai_redaction.get_llm_client", new=AsyncMock(return_value=client)),
+        patch(
+            "src.packs.loader.get_pack_ai_prompts",
+            return_value=prompts if prompts is not None else {"redaction_analysis": {}},
+        ),
+        patch(
+            "src.packs.loader.get_pack_categories",
+            return_value=categories if categories is not None else [],
+        ),
+    )
+
+
+BC_CATEGORIES = [
+    {"code": code, "name": f"Section {code}"}
+    for code in ("S13", "S14", "S15", "S17", "S21", "S22", "S22.1")
+]
+
+
+class TestSchemaValidation:
+    @pytest.mark.asyncio
+    async def test_injected_payload_geometry_and_bad_items_are_dropped(self) -> None:
+        """A document with injected instructions gets the model to emit
+        coordinates, bogus categories and junk items. Geometry is never
+        accepted and malformed items are dropped and counted (LLM-06)."""
+        payload = json.dumps(
+            [
+                {
+                    "text": "Alice Smith",
+                    "category": "S22",
+                    "confidence": "high",
+                    "coordinates": {"x": 0, "y": 0, "width": 1, "height": 1},
+                    "has_coordinates": True,
+                    "x": 0,
+                    "width": 1,
+                    "bbox": [0, 0, 1, 1],
+                },
+                {"text": "the", "category": "HACKED"},
+                {"text": "", "category": "S22"},
+                {"text": "Legal advice text", "category": "S14", "confidence": 1.7},
+                "not an object",
+                {"text": "Policy option B", "category": "S13", "confidence": 0.9, "page": 2},
+                {"text": "Public fact", "category": "DISCLOSE"},
+            ]
+        )
+        client = _client_returning(payload)
+        p1, p2, p3 = _patched(client, categories=BC_CATEGORIES)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("Alice Smith ... Policy option B")
+
+        texts = [s["text"] for s in result["suggestions"]]
+        assert texts == ["Alice Smith", "Policy option B"]
+        for s in result["suggestions"]:
+            for key in ("coordinates", "bbox", "x", "width", "has_coordinates"):
+                assert key not in s
+        assert result["invalid_suggestions"] == 4
+        assert result["disclosed_count"] == 1
+        assert "4 malformed" in result["summary"]
+        second = result["suggestions"][1]
+        assert second["confidence"] == "high"
+        assert second["confidence_score"] == 0.9
+
+    @pytest.mark.asyncio
+    async def test_truncated_output_is_salvaged_and_flagged(self) -> None:
+        """Cut-off output keeps every complete item and says so instead of
+        collapsing to the first object (LLM-07)."""
+        cut = (
+            '{"suggestions": [{"text": "Alice Smith", "category": "S22"}, '
+            '{"text": "Bob Jones", "category": "S22", "reasoning_chain": ["a", "b"]}, '
+            '{"text": "Carol Wh'
+        )
+        client = _client_returning(cut, finish_reason="max_tokens")
+        p1, p2, p3 = _patched(client, categories=BC_CATEGORIES)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("text")
+        assert [s["text"] for s in result["suggestions"]] == ["Alice Smith", "Bob Jones"]
+        assert result["output_truncated"] is True
+        assert "cut off" in result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_nested_list_is_not_mistaken_for_suggestions(self) -> None:
+        """The old regex fallback returned the first balanced [...], often a
+        reasoning_chain; unparseable output is now an explicit error."""
+        client = _client_returning('Here: {"x": ["just", "strings"] and then junk')
+        p1, p2, p3 = _patched(client)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("text")
+        assert result["suggestions"] == []
+        assert result["error"] == "unparseable_output"
+
+
+class TestSectionMapping:
+    @pytest.mark.asyncio
+    async def test_bc_exemptions_keep_their_own_code(self) -> None:
+        payload = json.dumps(
+            [
+                {"text": "Advice to minister", "category": "S13"},
+                {"text": "Privileged memo", "category": "S14"},
+                {"text": "Contract rates", "category": "S21"},
+                {"text": "Home address", "category": "S22.1"},
+            ]
+        )
+        client = _client_returning(payload)
+        p1, p2, p3 = _patched(client, categories=BC_CATEGORIES)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("text")
+        assert [s["section"] for s in result["suggestions"]] == ["S13", "S14", "S21", "S22.1"]
+        assert result["suggestions"][0]["category_label"] == "Section S13"
+
+    @pytest.mark.asyncio
+    async def test_ontario_lowercase_codes_normalised(self) -> None:
+        client = _client_returning(json.dumps([{"text": "Jane Roe", "category": "s14"}]))
+        p1, p2, p3 = _patched(client, categories=[{"code": "S14", "name": "Personal privacy"}])
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("text")
+        assert result["suggestions"][0]["section"] == "S14"
+        assert result["suggestions"][0]["category"] == "S14"
+
+    @pytest.mark.asyncio
+    async def test_legacy_categories_still_map(self) -> None:
+        client = _client_returning(json.dumps([{"text": "Privileged", "category": "legal"}]))
+        p1, p2, p3 = _patched(client, categories=BC_CATEGORIES)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("text")
+        assert result["suggestions"][0]["section"] == "S14"
+
+
+class TestChunkingAndTruncation:
+    @pytest.mark.asyncio
+    async def test_long_document_is_chunked_and_merged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_CHUNK_CHARS", "1000")
+        monkeypatch.setenv("LLM_CHUNK_OVERLAP", "100")
+        text = ("word " * 500).strip()  # ~2500 chars -> 3 chunks
+        replies = [
+            json.dumps([{"text": "Alice Smith", "category": "personal_info"}]),
+            json.dumps([{"text": "alice smith", "category": "personal_info"}]),  # duplicate
+            json.dumps([{"text": "Bob Jones", "category": "personal_info"}]),
+        ]
+        client = _client_returning(*replies)
+        p1, p2, p3 = _patched(client)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions(text)
+        assert client.complete.await_count == 3
+        assert [s["text"] for s in result["suggestions"]] == ["Alice Smith", "Bob Jones"]
+        assert result["chunks"] == 3
+        assert result["analysis_truncated"] is False
+        assert result["analysed_chars"] == result["total_chars"] == len(text)
+        # Each chunk is delimited as data
+        user_prompt = client.complete.call_args_list[0].kwargs["messages"][1]["content"]
+        assert "<document>" in user_prompt and "</document>" in user_prompt
+
+    @pytest.mark.asyncio
+    async def test_cap_reports_analysis_truncated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_MAX_ANALYSIS_CHARS", "600")
+        monkeypatch.setenv("LLM_CHUNK_CHARS", "1000")
+        text = "x" * 5000
+        client = _client_returning(json.dumps([]))
+        p1, p2, p3 = _patched(client)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions(text)
+        assert result["analysis_truncated"] is True
+        assert result["analysed_chars"] == 600
+        assert result["total_chars"] == 5000
+        assert "600 of 5,000" in result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_provenance_recorded(self) -> None:
+        client = _client_returning(json.dumps([]))
+        p1, p2, p3 = _patched(client)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("text")
+        assert result["provider"] == "anthropic"
+        assert result["model"] == "claude-sonnet-5"
+        assert result["config_id"] == "cfg-9"
+        assert result["endpoint_host"] == "api.anthropic.com"
+
+    @pytest.mark.asyncio
+    async def test_disabled_llm_returns_ai_disabled(self) -> None:
+        from src.llm.safety import LLMDisabledError
+
+        with patch(
+            "src.utils.ai_redaction.get_llm_client",
+            new=AsyncMock(side_effect=LLMDisabledError()),
+        ):
+            result = await get_redaction_suggestions("text")
+        assert result["suggestions"] == []
+        assert result["error"] == "ai_disabled"
+        assert "disabled" in result["summary"].lower()
+
+    @pytest.mark.asyncio
+    async def test_provider_error_is_generic_with_reference(self) -> None:
+        from src.llm.safety import LLMProviderError
+
+        client = MagicMock()
+        client.provider = "google"
+        client.model = "m"
+        client.complete = AsyncMock(
+            side_effect=LLMProviderError("google", 401, detail="key=AIzaSECRETSECRETSECRET123")
+        )
+        p1, p2, p3 = _patched(client)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("text")
+        assert "AIza" not in json.dumps(result, default=str)
+        assert result["error"] == "provider_error"
+        assert result["reference"] in result["summary"]
+
+
+class TestUnicodeSearch:
+    def test_accented_name_found_in_pdf(self) -> None:
+        pdf = _build_pdf_with_text("Contact José Côté today")
+        # Model quoted the NFD form of the name
+        import unicodedata
+
+        coords = find_text_coordinates_in_pdf(pdf, unicodedata.normalize("NFD", "José Côté"))
+        assert len(coords) == 1
+
+    @pytest.mark.asyncio
+    async def test_accented_name_survives_prompt_and_is_located(self) -> None:
+        """End to end: the prompt carries UTF-8 (not 'Jos? C?t?') and the
+        suggestion gets real coordinates."""
+        from src.llm.models import LLMConfig, LLMSettings, RequestFormat
+        from src.utils.llm_client import LLMClient
+
+        cfg = LLMConfig(
+            id="c",
+            name="n",
+            enabled=True,
+            api_endpoint="https://api.example.test/v1",
+            model_name="m",
+            request_format=RequestFormat.OPENAI,
+            default_settings=LLMSettings(),
+            api_key_encrypted="x",
+            created_at="2026-01-01T00:00:00",
+            updated_at="2026-01-01T00:00:00",
+            created_by="u",
+        )
+        svc = MagicMock()
+        svc.get_default_llm = AsyncMock(return_value=cfg)
+        svc.make_llm_call = AsyncMock(
+            return_value={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                [{"text": "José Côté", "category": "personal_info"}]
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+        client = LLMClient(svc)
+        p1, p2, p3 = _patched(client)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("Contact José Côté today")
+        sent = svc.make_llm_call.call_args.args[1][1]["content"]
+        assert "José Côté" in sent
+        assert "?" not in sent.split("<document>")[1].split("</document>")[0]
+
+        pdf = _build_pdf_with_text("Contact José Côté today")
+        enriched = enrich_suggestions_with_coordinates(result["suggestions"], pdf)
+        assert enriched[0]["has_coordinates"] is True
+
+    def test_ocr_search_is_nfc_and_case_insensitive(self) -> None:
+        import unicodedata
+
+        text_data = {
+            "pages": [
+                {
+                    "page_num": 1,
+                    "text": "Signed JOSÉ today",
+                    "words": [
+                        {"text": "Signed", "bbox": [0, 0, 10, 10]},
+                        {"text": "JOSÉ", "bbox": [12, 0, 30, 10]},
+                    ],
+                }
+            ]
+        }
+        hits = find_text_in_ocr_data(unicodedata.normalize("NFD", "josé"), text_data)
+        assert len(hits) == 1
+
+    def test_enrichment_discards_stale_model_geometry(self) -> None:
+        pdf = _build_pdf_with_text("nothing here")
+        enriched = enrich_suggestions_with_coordinates(
+            [{"text": "missing", "coordinates": {"x": 0, "y": 0, "width": 1, "height": 1}}],
+            pdf,
+        )
+        assert enriched[0]["has_coordinates"] is False
+        assert "coordinates" not in enriched[0]
+
+
+class TestRotatedPageCoordinates:
+    """C1: suggestion coordinates are in displayed (viewer) space."""
+
+    @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+    def test_hits_are_rotated_and_marked(self, rotation: int) -> None:
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 100), "Jane Doe SIN 123456789", fontsize=12)
+        unrotated = page.search_for("Jane Doe")[0]
+        page.set_rotation(rotation)
+        expected = fitz.Rect(unrotated * page.rotation_matrix)
+        pdf = doc.tobytes()
+        doc.close()
+
+        (hit,) = find_text_coordinates_in_pdf(pdf, "Jane Doe")
+        assert hit["page_rotation"] == rotation
+        assert (hit["x"], hit["y"]) == pytest.approx((expected.x0, expected.y0), abs=0.01)
+        assert (hit["width"], hit["height"]) == pytest.approx(
+            (expected.width, expected.height), abs=0.01
+        )
+
+        (suggestion,) = enrich_suggestions_with_coordinates(
+            [{"text": "Jane Doe", "category": "S22", "coord_space": "forged"}], pdf
+        )
+        assert suggestion["coord_space"] == "displayed"
+        assert suggestion["page_rotation"] == rotation
+        assert suggestion["coordinates"]["x"] == pytest.approx(expected.x0, abs=0.01)

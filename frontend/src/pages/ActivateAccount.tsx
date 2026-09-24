@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -11,6 +11,25 @@ import {
 } from '@mui/material';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import { publicApi } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
+import { passwordPolicyError, PASSWORD_REQUIREMENTS_TEXT } from '../utils/passwordPolicy';
+import { clearCapability, useCapabilityFromUrl } from '../utils/capabilityUrl';
+
+const ACTIVATION_STASH = 'activation';
+const INVALID_LINK = 'Invalid activation link. Please check your email and try again.';
+
+function parseActivation(raw: string | null): { email: string; token: string } | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as { email?: unknown; token?: unknown };
+    if (typeof value.email === 'string' && typeof value.token === 'string') {
+      return { email: value.email, token: value.token };
+    }
+  } catch {
+    // Corrupt stash: treat as no link.
+  }
+  return null;
+}
 
 // Phase 4 Batch 4.4 (audit F2): use the shared `publicApi` from
 // `src/api/client.ts` instead of a local axios + duplicated
@@ -22,36 +41,26 @@ const ActivateAccount: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
+  const emailParam = searchParams.get('email');
+  const tokenParam = searchParams.get('token');
 
-  const [email, setEmail] = useState('');
-  const [token, setToken] = useState('');
+  // The activation link carries the email and a token in its query string.
+  // Take both out of the address bar once read, and keep them in
+  // sessionStorage so a refresh before submitting still works.
+  const activation = parseActivation(
+    useCapabilityFromUrl(
+      emailParam && tokenParam ? JSON.stringify({ email: emailParam, token: tokenParam }) : null,
+      { cleanPath: '/activate', storageKey: ACTIVATION_STASH },
+    ),
+  );
+  const email = activation?.email ?? emailParam ?? '';
+  const token = activation?.token ?? '';
+
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(activation ? null : INVALID_LINK);
   const [success, setSuccess] = useState(false);
-
-  useEffect(() => {
-    // Get email and token from URL parameters
-    const emailParam = searchParams.get('email');
-    const tokenParam = searchParams.get('token');
-
-    if (emailParam) setEmail(emailParam);
-    if (tokenParam) setToken(tokenParam);
-
-    if (!emailParam || !tokenParam) {
-      setError('Invalid activation link. Please check your email and try again.');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.search]);
-
-  const validatePassword = (pwd: string): string | null => {
-    if (pwd.length < 8) {
-      return 'Password must be at least 8 characters long';
-    }
-    // Add more validation as needed
-    return null;
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,7 +73,7 @@ const ActivateAccount: React.FC = () => {
     }
 
     // Validate password strength
-    const passwordError = validatePassword(password);
+    const passwordError = passwordPolicyError(password);
     if (passwordError) {
       setError(passwordError);
       return;
@@ -79,6 +88,7 @@ const ActivateAccount: React.FC = () => {
         password,
       });
 
+      clearCapability(ACTIVATION_STASH);
       setSuccess(true);
 
       // Redirect to login after 3 seconds
@@ -86,11 +96,7 @@ const ActivateAccount: React.FC = () => {
         navigate('/login');
       }, 3000);
     } catch (err: any) {
-      if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
-      } else {
-        setError('Failed to activate account. The link may have expired.');
-      }
+      setError(getApiErrorMessage(err, 'Failed to activate account. The link may have expired.'));
     } finally {
       setLoading(false);
     }
@@ -139,7 +145,6 @@ const ActivateAccount: React.FC = () => {
               label="Email"
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
               fullWidth
               required
               disabled
@@ -153,7 +158,7 @@ const ActivateAccount: React.FC = () => {
               onChange={(e) => setPassword(e.target.value)}
               fullWidth
               required
-              helperText="Minimum 8 characters"
+              helperText={PASSWORD_REQUIREMENTS_TEXT}
               sx={{ mb: 2 }}
               autoFocus
             />

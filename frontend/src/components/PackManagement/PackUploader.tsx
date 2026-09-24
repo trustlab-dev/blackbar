@@ -16,7 +16,8 @@ import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import WarningIcon from '@mui/icons-material/Warning';
-import api from '../../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface PackUploaderProps {
   open: boolean;
@@ -56,7 +57,7 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
       if (err instanceof SyntaxError) {
         setError('Invalid JSON file');
       } else {
-        setError(err.response?.data?.detail || 'Validation failed');
+        setError(getApiErrorMessage(err, 'Validation failed'));
       }
     } finally {
       setValidating(false);
@@ -76,7 +77,9 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
       // Let axios derive the multipart Content-Type (with boundary) from the
       // FormData body. Setting the header by hand omits the boundary and
       // produces a malformed request (see audit Section 11 FE-F5).
-      const response = await api.post('/packs/upload', formData);
+      const response = await api.post('/packs/upload', formData, {
+        timeout: TRANSFER_TIMEOUT_MS,
+      });
 
       if (response.data.success) {
         onSuccess();
@@ -86,7 +89,7 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
       }
     } catch (err: any) {
       console.error('Error uploading pack:', err);
-      setError(err.response?.data?.detail || 'Failed to upload pack');
+      setError(getApiErrorMessage(err, 'Failed to upload pack'));
     } finally {
       setUploading(false);
     }

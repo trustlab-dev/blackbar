@@ -393,9 +393,23 @@ class TestGetDocumentMetadata:
             "text_summary",
             "mime_type",
             "size",
+            "status",
+            "conversion_failed",
+            "unresolved_redactions",
         }
         assert body["filename"] == "meta.pdf"
-        assert body["redactions"] == [{"x": 1, "y": 2}]
+        assert len(body["redactions"]) == 1
+        red = body["redactions"][0]
+        assert {k: v for k, v in red.items() if k not in ("id", "review_required")} == {
+            "x": 1,
+            "y": 2,
+        }
+        # No page/width/height: tagged as blocking, and not approvable (I1).
+        assert red["review_required"]["reason"] == "no_geometry"
+        assert red["review_required"]["approvable"] is False
+        assert [u["id"] for u in body["unresolved_redactions"]] == [red["id"]]
+        assert body["status"] == doc.get("status")
+        assert body["conversion_failed"] is False
         assert body["text_data"] == {
             "full_text": "Hello",
             "pages": [{"page": 1, "text": "Hello"}],
@@ -422,6 +436,54 @@ class TestGetDocumentMetadata:
             "full_text": "Plain text extraction",
             "pages": [],
         }
+
+    async def test_metadata_backfills_and_persists_redaction_ids(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Legacy redactions without an id get a stable uuid, saved to the
+        document, so approve/contest by id works for them."""
+        import uuid
+
+        client = await authed_client_factory(role="admin")
+        doc = make_document(
+            redactions=[
+                {"id": "keep-me", "x": 1},
+                {"x": 2},
+                {"id": None, "x": 3},
+            ]
+        )
+        await db.documents.insert_one(doc)
+
+        r = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        assert r.status_code == 200, r.text
+        ids = [red["id"] for red in r.json()["redactions"]]
+        assert ids[0] == "keep-me"
+        for new_id in ids[1:]:
+            uuid.UUID(new_id)
+
+        stored = await db.documents.find_one({"id": doc["id"]})
+        assert [red["id"] for red in stored["redactions"]] == ids
+
+        # Stable across reads
+        r2 = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        assert [red["id"] for red in r2.json()["redactions"]] == ids
+
+    async def test_metadata_reports_status_and_conversion_failure(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="admin")
+        doc = make_document(status="conversion_failed", conversion_failed=True)
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        body = r.json()
+        assert body["status"] == "conversion_failed"
+        assert body["conversion_failed"] is True
 
     async def test_metadata_not_found(
         self,
@@ -473,7 +535,7 @@ class TestGetDocumentMetadata:
 
 
 class TestExportDocumentWithRedactions:
-    async def test_export_no_redactions_returns_original(
+    async def test_export_no_redactions_returns_sanitised_copy(
         self,
         db: AsyncIOMotorDatabase,
         authed_client_factory,
@@ -486,7 +548,10 @@ class TestExportDocumentWithRedactions:
         r = await client.get(f"/api/v1/documents/{doc['id']}/export")
         assert r.status_code == 200, r.text
         assert r.headers["content-type"] == "application/pdf"
-        assert r.content == pdf
+        # Never the original bytes: the export is sanitised even with no
+        # redactions (DOC-05), but the page content is unchanged.
+        assert r.content.startswith(b"%PDF") and r.content != pdf
+        assert "no-store" in r.headers["cache-control"]
         # Filename contains NOREDACTIONS marker + first-8 of doc id
         cd = r.headers["content-disposition"]
         assert "NOREDACTIONS" in cd
@@ -526,15 +591,6 @@ class TestExportDocumentWithRedactions:
                     "height": 10,
                     "status": "rejected",
                 },
-                # Out-of-range page should be SKIPPED
-                {
-                    "page": 999,
-                    "x": 0,
-                    "y": 0,
-                    "width": 10,
-                    "height": 10,
-                    "status": "approved",
-                },
             ],
         )
         await db.documents.insert_one(doc)
@@ -547,6 +603,26 @@ class TestExportDocumentWithRedactions:
         assert doc["id"][:8] in cd
         # The export rewrote the PDF: different bytes from input
         assert r.content != pdf
+
+    async def test_export_out_of_range_page_is_rejected_not_skipped(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """DOC-07: a redaction on a page that does not exist fails the
+        export (422) instead of being silently skipped."""
+        client = await authed_client_factory(role="admin")
+        doc = make_document(
+            content=_make_minimal_pdf_bytes(),
+            redactions=[
+                {"page": 999, "x": 0, "y": 0, "width": 10, "height": 10, "status": "approved"}
+            ],
+        )
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/export")
+        assert r.status_code == 422, r.text
+        assert "page 999" in r.text
 
     async def test_export_not_found(
         self,
@@ -619,7 +695,7 @@ class TestExportDocumentWithRedactions:
 
         r = await client.get(f"/api/v1/documents/{doc['id']}/export")
         assert r.status_code == 200, r.text
-        assert r.content == pdf
+        assert r.content.startswith(b"%PDF")
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +802,31 @@ class TestUploadDocument:
         # error_handler wraps detail string in `error.message` envelope
         assert "Invalid file type" in r.text
 
+    async def test_upload_over_processing_limit_returns_413(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="admin")
+        from src.documents.processing_service import ProcessingResult, ProcessingStatus
+
+        mock_result = ProcessingResult(
+            status=ProcessingStatus.VALIDATION_FAILED,
+            message="Document has 3000 pages; the limit is 2000 pages per document.",
+            http_status=413,
+        )
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("long.pdf", _make_minimal_pdf_bytes(), "application/pdf")},
+            )
+
+        assert r.status_code == 413
+        assert "limit is 2000 pages" in r.json()["error"]["message"]
+
     async def test_upload_conversion_failed_returns_200_with_warning(
         self,
         authed_client_factory,
@@ -787,6 +888,43 @@ class TestUploadDocument:
 
         assert r.status_code == 500
         assert "GridFS" in r.text
+
+    async def test_upload_content_mismatch_returns_415(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """DOC-11: a `.pdf` whose bytes are HTML is refused before the
+        processing service ever sees it."""
+        client = await authed_client_factory(role="admin")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"<html>hi</html>", "application/pdf")},
+            )
+        assert r.status_code == 415, r.text
+
+    async def test_upload_over_limit_returns_413(
+        self,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch,
+    ) -> None:
+        """DOC-11: the size limit is enforced while reading the upload."""
+        monkeypatch.setattr("src.documents.processing_service.MAX_FILE_SIZE", 64)
+        client = await authed_client_factory(role="admin")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4" + b"x" * 200, "application/pdf")},
+            )
+        assert r.status_code == 413, r.text
 
     async def test_upload_guest_forbidden(
         self,
@@ -913,6 +1051,75 @@ class TestUploadDocument:
         assert r.status_code == 200, r.text
 
 
+class TestUploadCrossCaseOracle:
+    """AUTH-08: `POST /documents/` without a case let a team-scoped user run
+    dedup, Message-ID merge and thread consolidation across every case."""
+
+    async def test_user_without_case_id_is_rejected(
+        self, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+            )
+        assert r.status_code == 400, r.text
+
+    async def test_user_with_unknown_case_id_is_forbidden(
+        self, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user")
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(side_effect=AssertionError("service must not be called")),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": "no-such-case"},
+            )
+        assert r.status_code == 403, r.text
+
+    async def test_duplicate_in_inaccessible_case_is_not_disclosed(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user", email="dup-user@example.test")
+        me = await db.users.find_one({"email": "dup-user@example.test"})
+        mine = make_case(case_team=[{"user_id": me["id"], "role": "analyst", "status": "active"}])
+        theirs = make_case(case_team=[])
+        await db.cases.insert_many([mine, theirs])
+        other_doc = make_document(case_id=theirs["id"], filename="secret-memo.pdf")
+        await db.documents.insert_one(other_doc)
+        from src.documents.processing_service import ProcessingResult, ProcessingStatus
+
+        mock_result = ProcessingResult(
+            status=ProcessingStatus.DUPLICATE,
+            is_duplicate=True,
+            duplicate_of_id=other_doc["id"],
+            duplicate_of_filename="secret-memo.pdf",
+        )
+        with patch(
+            "src.documents.processing_service.DocumentProcessingService.process_upload",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            r = await client.post(
+                "/api/v1/documents/",
+                files={"file": ("x.pdf", b"%PDF-1.4", "application/pdf")},
+                data={"case_id": mine["id"]},
+            )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["is_duplicate"] is True
+        assert body["duplicate_of_id"] is None
+        assert body["duplicate_of_filename"] is None
+        assert other_doc["id"] not in r.text
+        assert "secret-memo" not in r.text
+
+
 # ---------------------------------------------------------------------------
 # DELETE /{document_id}  delete_document
 # ---------------------------------------------------------------------------
@@ -968,6 +1175,77 @@ class TestDeleteDocument:
         updated_sibling = await db.documents.find_one({"id": "email-2"})
         assert updated_sibling["thread_status"] == "active"
         assert updated_sibling["superseded_by"] is None
+
+    async def test_delete_removes_gridfs_content_and_originals(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """DOC-15: the PDF (content_file_id) and native original
+        (original_file_id) of the document and of every attachment are
+        removed from GridFS in the app's own database."""
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+        bucket = AsyncIOMotorGridFSBucket(db)
+        ids = [await bucket.upload_from_stream(f"f{i}", f"bytes-{i}".encode()) for i in range(4)]
+        unrelated = await bucket.upload_from_stream("keep", b"keep me")
+        doc = make_document(
+            id="gfs-parent",
+            content_file_id=ids[0],
+            original_file_id=ids[1],
+        )
+        att = make_document(
+            parent_document_id="gfs-parent",
+            content_file_id=ids[2],
+            original_file_id=ids[3],
+        )
+        pdf_only = make_document(parent_document_id="gfs-parent", original_file_id=None)
+        await db.documents.insert_many([doc, att, pdf_only])
+        client = await authed_client_factory(role="admin")
+
+        r = await client.delete("/api/v1/documents/gfs-parent")
+
+        assert r.status_code == 200, r.text
+        assert await db["fs.files"].count_documents({"_id": {"$in": ids}}) == 0
+        assert await db["fs.chunks"].count_documents({"files_id": {"$in": ids}}) == 0
+        assert await db["fs.files"].count_documents({"_id": unrelated}) == 1
+
+    async def test_delete_tolerates_already_missing_gridfs_file(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        from bson import ObjectId
+
+        doc = make_document(content_file_id=ObjectId(), original_file_id=None)
+        await db.documents.insert_one(doc)
+        client = await authed_client_factory(role="admin")
+        r = await client.delete(f"/api/v1/documents/{doc['id']}")
+        assert r.status_code == 200, r.text
+        assert await db.documents.find_one({"id": doc["id"]}) is None
+
+    async def test_delete_keeps_record_when_gridfs_delete_fails(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """If stored content cannot be removed, the record is kept so the
+        delete can be retried, and the caller gets an error, not 200."""
+        from bson import ObjectId
+
+        doc = make_document(content_file_id=ObjectId())
+        await db.documents.insert_one(doc)
+        client = await authed_client_factory(role="admin")
+        with patch(
+            "motor.motor_asyncio.AsyncIOMotorGridFSBucket.delete",
+            new=AsyncMock(side_effect=RuntimeError("mongo down")),
+        ):
+            r = await client.delete(f"/api/v1/documents/{doc['id']}")
+        assert r.status_code == 500
+        assert await db.documents.find_one({"id": doc["id"]}) is not None
 
     async def test_delete_not_found(
         self,
@@ -1628,71 +1906,24 @@ class TestGridFSBranches:
         patch_routes_db,
         monkeypatch,
     ) -> None:
-        """Delete path with `original_file_id` set -> hits GridFS delete
-        cleanup (lines 792-802)."""
+        """Delete path with `original_file_id` set -> GridFS delete through
+        the request's database (DOC-15). Previously this pinned a sync
+        MongoClient built from the unset MONGO_URI env var and the
+        hard-coded "blackbar" database; the swallow-errors sibling test was
+        replaced by `TestDeleteDocument.test_delete_keeps_record_when_gridfs_delete_fails`."""
         client = await authed_client_factory(role="admin")
         deleted: list[str] = []
 
-        class FakeGridFS:
-            def __init__(self, _db):
-                pass
+        async def fake_delete(self, fid):
+            deleted.append(fid)
 
-            def delete(self, fid):
-                deleted.append(fid)
-
-        class FakeClient:
-            def __init__(self, _uri):
-                pass
-
-            def __getitem__(self, _name):
-                return MagicMock()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr("pymongo.MongoClient", FakeClient)
-        monkeypatch.setattr("gridfs.GridFS", FakeGridFS)
+        monkeypatch.setattr("motor.motor_asyncio.AsyncIOMotorGridFSBucket.delete", fake_delete)
 
         doc = make_document(id="del-1", original_file_id="orig-to-delete")
         await db.documents.insert_one(doc)
         r = await client.delete("/api/v1/documents/del-1")
         assert r.status_code == 200
         assert deleted == ["orig-to-delete"]
-
-    async def test_delete_gridfs_error_is_logged_not_raised(
-        self,
-        db: AsyncIOMotorDatabase,
-        authed_client_factory,
-        patch_routes_db,
-        monkeypatch,
-    ) -> None:
-        """GridFS cleanup errors are swallowed — delete still succeeds."""
-        client = await authed_client_factory(role="admin")
-
-        class FakeGridFS:
-            def __init__(self, _db):
-                pass
-
-            def delete(self, fid):
-                raise RuntimeError("gridfs unavailable")
-
-        class FakeClient:
-            def __init__(self, _uri):
-                pass
-
-            def __getitem__(self, _name):
-                return MagicMock()
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr("pymongo.MongoClient", FakeClient)
-        monkeypatch.setattr("gridfs.GridFS", FakeGridFS)
-
-        doc = make_document(id="del-2", original_file_id="orig-bad")
-        await db.documents.insert_one(doc)
-        r = await client.delete("/api/v1/documents/del-2")
-        assert r.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -1939,7 +2170,13 @@ class TestGenerateAISuggestionsAsync:
         await db.documents.insert_one(doc)
 
         async def fake_suggestions(text, ctx=None):
-            return {"suggestions": [{"text": "Alice", "category": "name"}], "summary": "1 PII"}
+            return {
+                "suggestions": [{"text": "Alice", "category": "name"}],
+                "summary": "1 PII",
+                "provider": "openai",
+                "model": "test-model",
+                "analysis_truncated": False,
+            }
 
         def fake_enrich(suggestions, pdf, text_data):
             return suggestions
@@ -1953,6 +2190,44 @@ class TestGenerateAISuggestionsAsync:
         assert updated["processing_status"] == "ai_complete"
         assert updated["ai_suggestions"]["suggestions"] == [{"text": "Alice", "category": "name"}]
         assert updated["ai_suggestions"]["summary"] == "1 PII"
+        # LLM-16: provenance recorded
+        assert updated["ai_suggestions"]["method"] == "llm"
+        assert updated["ai_suggestions"]["provider"] == "openai"
+        assert updated["ai_suggestions"]["model"] == "test-model"
+
+    async def test_enrichment_reads_pdf_from_gridfs(
+        self, db: AsyncIOMotorDatabase, patch_routes_db, monkeypatch
+    ) -> None:
+        """Current uploads have no inline ``content``; the PDF comes from
+        GridFS (DOC-12)."""
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+        from src.documents import routes as documents_routes
+        from src.documents.routes import generate_ai_suggestions_async
+
+        file_id = await AsyncIOMotorGridFSBucket(db).upload_from_stream("g.pdf", b"%PDF-grid")
+        doc = make_document(
+            id="ai-grid", extracted_text="Alice", content_file_id=str(file_id), content=None
+        )
+        await db.documents.insert_one(doc)
+
+        async def fake_suggestions(text, ctx=None):
+            return {"suggestions": [{"text": "Alice"}], "summary": ""}
+
+        seen: list[bytes] = []
+
+        def fake_enrich(suggestions, pdf, text_data):
+            seen.append(pdf)
+            return suggestions
+
+        monkeypatch.setattr(documents_routes, "get_redaction_suggestions", fake_suggestions)
+        monkeypatch.setattr(documents_routes, "enrich_suggestions_with_coordinates", fake_enrich)
+
+        await generate_ai_suggestions_async("ai-grid", timeout=5, db=db)
+
+        assert seen == [b"%PDF-grid"]
+        updated = await db.documents.find_one({"id": "ai-grid"})
+        assert updated["processing_status"] == "ai_complete"
 
     async def test_doc_not_found_returns_early(
         self, db: AsyncIOMotorDatabase, patch_routes_db
@@ -2034,8 +2309,13 @@ class TestGenerateAISuggestionsAsync:
             lambda s, p, t: s,
         )
 
+        # LLM-17: the case title is not sent by default...
         await generate_ai_suggestions_async("ai-with-case", db=db)
-        assert captured["ctx"] is not None
+        assert captured["ctx"] is None
+
+        # ...only when LLM_SEND_CASE_CONTEXT opts in.
+        monkeypatch.setenv("LLM_SEND_CASE_CONTEXT", "true")
+        await generate_ai_suggestions_async("ai-with-case", db=db)
         assert "Records about Contract X" in captured["ctx"]
 
     async def test_timeout_writes_timeout_status(
@@ -2079,7 +2359,27 @@ class TestGenerateAISuggestionsAsync:
 
         updated = await db.documents.find_one({"id": "ai-err"})
         assert updated["processing_status"] == "ai_error"
-        assert "exploded" in updated["ai_suggestions"]["error"]
+        # LLM-02: no raw exception text is stored
+        assert "exploded" not in str(updated["ai_suggestions"])
+        assert updated["ai_suggestions"]["error"] == "analysis_failed"
+        assert updated["ai_suggestions"]["reference"] in updated["ai_suggestions"]["summary"]
+
+    async def test_no_egress_error_is_not_cached(
+        self, db: AsyncIOMotorDatabase, patch_routes_db, monkeypatch
+    ) -> None:
+        from src.documents import routes as documents_routes
+        from src.documents.routes import generate_ai_suggestions_async
+
+        await db.documents.insert_one(make_document(id="ai-off", extracted_text="text"))
+
+        async def disabled(text, ctx=None):
+            return {"suggestions": [], "summary": "AI disabled", "error_code": "ai_disabled"}
+
+        monkeypatch.setattr(documents_routes, "get_redaction_suggestions", disabled)
+        await generate_ai_suggestions_async("ai-off", timeout=5, db=db)
+        updated = await db.documents.find_one({"id": "ai-off"})
+        assert updated["processing_status"] == "ai_unavailable"
+        assert "ai_suggestions" not in updated
 
     async def test_no_db_provided_uses_get_database(
         self, db: AsyncIOMotorDatabase, patch_routes_db, monkeypatch

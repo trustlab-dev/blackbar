@@ -67,6 +67,28 @@ describe('HelpGuide — section switching', () => {
       screen.getByRole('heading', { name: /reading a suggestion/i }),
     ).toBeInTheDocument();
   });
+
+  it('LLM Configuration lists current Anthropic model IDs and no retired ones', async () => {
+    const user = userEvent.setup();
+    const { container } = renderWithProviders(<HelpGuide />);
+    await user.click(screen.getByRole('button', { name: /llm configuration/i }));
+    const text = container.textContent ?? '';
+    for (const id of ['claude-sonnet-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-haiku-4-5-20251001']) {
+      expect(text).toContain(id);
+    }
+    expect(text).not.toMatch(/claude-3|gpt-4|OPENAI_API_KEY/);
+    expect(text).toMatch(/API key must be re-entered/);
+  });
+
+  it('AI Suggestions explains that opening a document does not send it to the AI', async () => {
+    const user = userEvent.setup();
+    const { container } = renderWithProviders(<HelpGuide />);
+    await user.click(screen.getByRole('button', { name: /ai suggestions/i }));
+    const text = container.textContent ?? '';
+    expect(text).toMatch(/Opening a document does not send it/i);
+    expect(text).toMatch(/Partial analysis/);
+    expect(text).not.toMatch(/one LLM call per document/);
+  });
 });
 
 describe('HelpGuide — search', () => {

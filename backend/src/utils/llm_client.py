@@ -1,79 +1,116 @@
 """
-Unified LLM client using the new LLM configuration system.
-Provides backward-compatible interface for existing code.
+Unified LLM client using the LLM configuration system.
+Provides a backward-compatible interface for existing code.
 """
 
 import logging
+import unicodedata
 from typing import Any
 
 from ..database import db
 from ..llm import LLMService
+from ..llm.safety import LLMDisabledError, LLMError
+from ..llm.service import LLMCompletion, extract_completion
 
 logger = logging.getLogger(__name__)
 
 
+def normalize_prompt_text(text: str) -> str:
+    """Prepare text for a provider: NFC-normalise and replace control
+    characters (except newline, carriage return and tab) with spaces.
+
+    All providers accept UTF-8, so non-ASCII text is sent unchanged (LLM-11):
+    converting "José Côté" to "Jos? C?t?" made the model quote strings that
+    could not be found on the page.
+    """
+    text = unicodedata.normalize("NFC", text or "")
+    return "".join(
+        char if (ord(char) >= 32 and char != "\x7f") or char in "\n\r\t" else " " for char in text
+    )
+
+
 class LLMClient:
     """
-    Unified interface for LLM providers using the new configuration system.
-    Maintains backward compatibility with existing code.
+    Unified interface for LLM providers using the configuration system.
     """
 
     def __init__(self, llm_service: LLMService):
-        """
-        Initialize LLM client with service.
-
-        Args:
-            llm_service: LLM service instance
-        """
         self.service = llm_service
         self.config = None
         self.provider = None
         self.model = None
+        self.config_id = None
+        self.endpoint = None
         self.temperature = 0.7
         self.max_tokens = 2000
 
     async def _ensure_config(self):
-        """Ensure LLM configuration is loaded"""
+        """Load the default configuration.
+
+        Raises LLMDisabledError when the default config exists but is
+        switched off, so callers can report "AI disabled" instead of
+        "not configured" (LLM-04).
+        """
         if not self.config:
-            self.config = await self.service.get_default_llm()
+            config = await self.service.get_default_llm(include_disabled=True)
+            if config is not None and config.enabled is False:
+                raise LLMDisabledError()
+            self.config = config
             if self.config:
                 self.provider = self.config.request_format.value
                 self.model = self.config.model_name
+                self.config_id = self.config.id
+                self.endpoint = self.config.api_endpoint
                 self.temperature = self.config.default_settings.temperature
                 self.max_tokens = self.config.default_settings.max_tokens
 
     def _sanitize_text(self, text: str) -> str:
-        """
-        Sanitize text to handle encoding issues across all providers.
-        Converts ALL text to ASCII-safe characters.
-        """
-        # First, replace common Unicode characters with ASCII equivalents
-        replacements = {
-            "\xa0": " ",  # Non-breaking space
-            "\u2028": "\n",  # Line separator
-            "\u2029": "\n\n",  # Paragraph separator
-            "\u2192": "->",  # Rightwards arrow →
-            "\u2190": "<-",  # Leftwards arrow ←
-            "\u2022": "*",  # Bullet •
-            "\u2013": "-",  # En dash –
-            "\u2014": "--",  # Em dash —
-            "\u2018": "'",  # Left single quote '
-            "\u2019": "'",  # Right single quote '
-            "\u201c": '"',  # Left double quote "
-            "\u201d": '"',  # Right double quote "
-            "\u2026": "...",  # Ellipsis …
-        }
+        return normalize_prompt_text(text)
 
-        for unicode_char, ascii_char in replacements.items():
-            text = text.replace(unicode_char, ascii_char)
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMCompletion:
+        """Run a completion and return text plus finish reason."""
+        await self._ensure_config()
 
-        # Then encode to ASCII, replacing any remaining non-ASCII with '?'
-        text = text.encode("ascii", errors="replace").decode("ascii")
+        if not self.config:
+            raise ValueError("No LLM configuration available")
 
-        # Finally, remove control characters except newlines, tabs, carriage returns
-        text = "".join(char if ord(char) >= 32 or char in "\n\r\t" else " " for char in text)
+        sanitized = [
+            {"role": msg["role"], "content": self._sanitize_text(msg["content"])}
+            for msg in messages
+        ]
+        kwargs: dict[str, Any] = {}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
 
-        return text
+        try:
+            raw = await self.service.make_llm_call(self.config, sanitized, **kwargs)
+            text, finish_reason = extract_completion(self.config.request_format, raw)
+            return LLMCompletion(
+                text=text,
+                finish_reason=finish_reason,
+                provider=self.config.request_format.value,
+                model=self.config.model_name,
+            )
+        except LLMError as exc:
+            logger.error(
+                "LLM completion failed (provider=%s, reference=%s): %s",
+                self.provider,
+                exc.reference,
+                exc,
+            )
+            raise
+        except Exception as exc:
+            logger.error(
+                "LLM completion failed (provider=%s): %s", self.provider, type(exc).__name__
+            )
+            raise
 
     async def chat_completion(
         self,
@@ -81,64 +118,9 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """
-        Get a chat completion from the configured LLM provider.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            temperature: Optional override for temperature
-            max_tokens: Optional override for max_tokens
-
-        Returns:
-            The completion text
-        """
-        await self._ensure_config()
-
-        if not self.config:
-            raise ValueError("No LLM configuration available")
-
-        # Sanitize all message content before sending to provider
-        sanitized_messages = []
-        for msg in messages:
-            original = msg["content"]
-            sanitized = self._sanitize_text(original)
-            sanitized_messages.append({"role": msg["role"], "content": sanitized})
-            # Log if sanitization changed anything
-            if original != sanitized:
-                logger.info(
-                    f"Sanitized {len(original)} chars, removed {len(original) - len(sanitized)} chars"
-                )
-
-        try:
-            # Use the new LLM service to make the call
-            kwargs = {}
-            if temperature is not None:
-                kwargs["temperature"] = temperature
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
-
-            response = await self.service.make_llm_call(self.config, sanitized_messages, **kwargs)
-
-            # Extract text from response based on provider format
-            if self.config.request_format.value == "openai":
-                return response["choices"][0]["message"]["content"]
-            elif self.config.request_format.value == "anthropic":
-                return response["content"][0]["text"]
-            elif self.config.request_format.value == "google":
-                return response["candidates"][0]["content"]["parts"][0]["text"]
-            elif self.config.request_format.value == "cohere":
-                return response["text"]
-            else:
-                # Fallback - try to extract text
-                logger.warning(f"Unknown response format for {self.config.request_format}")
-                return str(response)
-
-        except Exception as e:
-            import traceback
-
-            logger.error(f"Error getting completion from {self.provider}: {str(e)}")
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-            raise
+        """Get the completion text from the configured LLM provider."""
+        completion = await self.complete(messages, temperature=temperature, max_tokens=max_tokens)
+        return completion.text
 
 
 async def get_llm_client() -> LLMClient | None:
@@ -146,21 +128,25 @@ async def get_llm_client() -> LLMClient | None:
     Get an initialized LLM client.
 
     Returns:
-        LLMClient instance or None if not configured
+        LLMClient instance or None if no default LLM is configured.
+
+    Raises:
+        LLMDisabledError: the default LLM configuration is switched off.
     """
     try:
         service = LLMService(db)
         client = LLMClient(service)
 
-        # Verify configuration exists
         await client._ensure_config()
         if not client.config:
             logger.warning("No LLM configuration available")
             return None
 
         return client
+    except LLMDisabledError:
+        raise
     except Exception as e:
-        logger.error(f"Error initializing LLM client: {str(e)}")
+        logger.error(f"Error initializing LLM client: {type(e).__name__}")
         return None
 
 
@@ -171,22 +157,28 @@ async def test_llm_connection() -> dict[str, Any]:
     Returns:
         Dict with success status and message
     """
-    client = await get_llm_client()
+    try:
+        client = await get_llm_client()
+    except LLMDisabledError as exc:
+        return {"success": False, "message": exc.public_detail()}
 
     if not client:
         return {"success": False, "message": "No default LLM configured"}
 
     try:
         messages = [
-            {"role": "user", "content": "Reply with just the word 'success' if you can read this."}
+            {"role": "system", "content": "You are a connection check. Reply briefly."},
+            {"role": "user", "content": "Reply with just the word 'success' if you can read this."},
         ]
 
-        response = await client.chat_completion(messages, temperature=0, max_tokens=10)
+        response = await client.chat_completion(messages, temperature=0, max_tokens=256)
 
         return {
             "success": True,
             "message": f"Connection successful! Provider: {client.provider}, Model: {client.model}",
             "response": response,
         }
+    except LLMError as e:
+        return {"success": False, "message": f"Connection failed: {e.public_detail()}"}
     except Exception as e:
-        return {"success": False, "message": f"Connection failed: {str(e)}"}
+        return {"success": False, "message": f"Connection failed: {type(e).__name__}"}

@@ -10,6 +10,7 @@ This module provides:
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 
 # Sentry
@@ -202,43 +203,143 @@ def _init_tracing():
     _tracer = trace.get_tracer(SERVICE_NAME_VALUE, SERVICE_VERSION_VALUE)
 
 
+def _sentry_options() -> dict:
+    """Options for sentry_sdk.init (LLM-15).
+
+    - ``max_request_body_size="never"``: request bodies (uploads, prompts,
+      credentials) are never attached. ``request_bodies`` is not an option in
+      sentry-sdk 2.x and made init raise, crashing startup.
+    - ``send_default_pii=False`` and ``include_local_variables=False``: no
+      user IPs/cookies and no frame locals (document text, prompts, keys).
+    - httpx integration disabled: it records outgoing URLs and query strings.
+    """
+    from sentry_sdk.integrations.httpx import HttpxIntegration
+
+    return {
+        "dsn": SENTRY_DSN,
+        "environment": ENVIRONMENT,
+        "release": f"{SERVICE_NAME_VALUE}@{SERVICE_VERSION_VALUE}",
+        "traces_sample_rate": 0.1 if ENVIRONMENT == "production" else 1.0,
+        "profiles_sample_rate": 0.1 if ENVIRONMENT == "production" else 1.0,
+        "integrations": [
+            FastApiIntegration(transaction_style="endpoint"),
+            StarletteIntegration(transaction_style="endpoint"),
+        ],
+        "disabled_integrations": [HttpxIntegration()],
+        "send_default_pii": False,
+        "max_request_body_size": "never",
+        "include_local_variables": False,
+        "before_send": _sentry_before_send,
+        "before_breadcrumb": _sentry_before_breadcrumb,
+    }
+
+
 def _init_sentry():
-    """Initialize Sentry error tracking."""
+    """Initialize Sentry error tracking. A Sentry problem never stops startup."""
     if not SENTRY_DSN:
         logging.info("Sentry DSN not configured, error tracking disabled")
         return
 
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        environment=ENVIRONMENT,
-        release=f"{SERVICE_NAME_VALUE}@{SERVICE_VERSION_VALUE}",
-        traces_sample_rate=0.1 if ENVIRONMENT == "production" else 1.0,
-        profiles_sample_rate=0.1 if ENVIRONMENT == "production" else 1.0,
-        integrations=[
-            FastApiIntegration(transaction_style="endpoint"),
-            StarletteIntegration(transaction_style="endpoint"),
-        ],
-        # Don't send PII
-        send_default_pii=False,
-        # Attach request data
-        request_bodies="medium",
-        # Filter sensitive data
-        before_send=_sentry_before_send,
-    )
+    try:
+        sentry_sdk.init(**_sentry_options())
+    except Exception as e:
+        logging.error(f"Sentry initialization failed; error tracking disabled: {type(e).__name__}")
+        return
     logging.info("Sentry error tracking initialized")
 
 
+_SENSITIVE_HEADERS = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-goog-api-key",
+    "api-key",
+}
+# Extra/context keys that may carry document text, prompts or LLM payloads.
+_SENSITIVE_KEY_RE = re.compile(
+    r"(document|doc_text|text|content|prompt|message|completion|llm|suggestion|summary|"
+    r"api_key|secret|token|password)",
+    re.IGNORECASE,
+)
+_FILTERED = "[FILTERED]"
+
+
+def _scrub_mapping(data):
+    if not isinstance(data, dict):
+        return data
+    return {
+        key: (_FILTERED if _SENSITIVE_KEY_RE.search(str(key)) else value)
+        for key, value in data.items()
+    }
+
+
 def _sentry_before_send(event, hint):
-    """Filter sensitive data before sending to Sentry."""
-    # Remove sensitive headers
-    if "request" in event and "headers" in event["request"]:
-        headers = event["request"]["headers"]
-        sensitive_headers = ["authorization", "cookie", "x-api-key"]
-        for header in sensitive_headers:
-            if header in headers:
-                headers[header] = "[FILTERED]"
+    """Filter sensitive data before sending to Sentry (LLM-15)."""
+    from src.llm.safety import redact_secrets
+
+    request = event.get("request")
+    if isinstance(request, dict):
+        headers = request.get("headers")
+        if isinstance(headers, dict):
+            for header in list(headers):
+                if header.lower() in _SENSITIVE_HEADERS:
+                    headers[header] = _FILTERED
+        for key in ("data", "cookies", "query_string"):
+            if key in request:
+                request[key] = _FILTERED
+        if isinstance(request.get("url"), str):
+            request["url"] = redact_secrets(request["url"])
+
+    if "extra" in event:
+        event["extra"] = _scrub_mapping(event["extra"])
+    contexts = event.get("contexts")
+    if isinstance(contexts, dict):
+        for name in list(contexts):
+            if _SENSITIVE_KEY_RE.search(name):
+                contexts[name] = _FILTERED
+            else:
+                contexts[name] = _scrub_mapping(contexts[name])
+
+    for exc in (event.get("exception") or {}).get("values", []) or []:
+        if isinstance(exc.get("value"), str):
+            exc["value"] = redact_secrets(exc["value"])
+        for frame in (exc.get("stacktrace") or {}).get("frames", []) or []:
+            frame.pop("vars", None)
+
+    logentry = event.get("logentry")
+    if isinstance(logentry, dict):
+        for key in ("message", "formatted"):
+            if isinstance(logentry.get(key), str):
+                logentry[key] = redact_secrets(logentry[key])
+
+    breadcrumbs = event.get("breadcrumbs")
+    if isinstance(breadcrumbs, dict) and isinstance(breadcrumbs.get("values"), list):
+        breadcrumbs["values"] = [
+            crumb
+            for crumb in (_sentry_before_breadcrumb(b, None) for b in breadcrumbs["values"])
+            if crumb is not None
+        ]
 
     return event
+
+
+def _sentry_before_breadcrumb(crumb, hint):
+    """Drop HTTP-client breadcrumbs (URLs with keys) and redact messages."""
+    from src.llm.safety import redact_secrets
+
+    if not isinstance(crumb, dict):
+        return crumb
+    if crumb.get("category") in ("httplib", "http", "httpx"):
+        return None
+    data = crumb.get("data")
+    if isinstance(data, dict):
+        data.pop("http.query", None)
+        crumb["data"] = _scrub_mapping(data)
+    if isinstance(crumb.get("message"), str):
+        crumb["message"] = redact_secrets(crumb["message"])
+    return crumb
 
 
 def _instrument_fastapi(app):

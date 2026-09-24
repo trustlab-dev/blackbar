@@ -14,10 +14,14 @@ import {
 } from '@mui/material';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
-import axios from 'axios';
+import { publicApi } from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
+import { useCapabilityFromUrl } from '../../utils/capabilityUrl';
 
 export const MagicLinkVerify: React.FC = () => {
-  const { token } = useParams();
+  // Single-use token: take it out of the address bar straight away and keep
+  // it only in memory. A refresh lands on /public/verify with no token.
+  const token = useCapabilityFromUrl(useParams().token, { cleanPath: '/public/verify' });
   const navigate = useNavigate();
   const [status, setStatus] = useState<'verifying' | 'success' | 'error'>('verifying');
   const [error, setError] = useState('');
@@ -26,7 +30,9 @@ export const MagicLinkVerify: React.FC = () => {
     const verifyToken = async () => {
       if (!token) {
         setStatus('error');
-        setError('Invalid magic link. Missing token.');
+        setError(
+          'This sign-in link has already been used or is incomplete. Sign-in links work once; request a new one to continue.',
+        );
         return;
       }
 
@@ -40,7 +46,7 @@ export const MagicLinkVerify: React.FC = () => {
       }
 
       try {
-        const response = await axios.post('/api/v1/auth/public/magic-link/verify', {
+        const response = await publicApi.post('/auth/public/magic-link/verify', {
           token,
           email: savedEmail
         });
@@ -68,7 +74,7 @@ export const MagicLinkVerify: React.FC = () => {
         if (err.response?.data?.error === 'invalid_token') {
           setError('This magic link is invalid or has expired. Please request a new one.');
         } else {
-          setError(err.response?.data?.detail || 'Failed to verify magic link. Please try again.');
+          setError(getApiErrorMessage(err, 'Failed to verify magic link. Please try again.'));
         }
       }
     };

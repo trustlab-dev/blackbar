@@ -144,6 +144,34 @@ async def _seed_contributor(
 
 
 class TestInviteContributor:
+    async def test_emailed_link_ignores_host_header(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """AUTH-29: capability links emailed to third parties are built from
+        PUBLIC_BASE_URL, never from the (spoofable) Host header."""
+        from unittest.mock import MagicMock
+
+        import src.workflow.routes as wf_routes
+
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://foi.example.gov")
+        send = MagicMock(return_value=True)
+        monkeypatch.setattr(wf_routes.email_service, "send_contributor_invitation", send)
+        case_id = await _seed_case(db, tracking_number="FOI-2026-0002")
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.post(
+            f"/api/v1/cases/{case_id}/contributors",
+            json={"name": "Bob", "email": "bob@example.com", "token_expiration_days": 7},
+            headers={"Host": "evil.example.com"},
+        )
+        assert r.status_code == 200, r.text
+        url = send.call_args.kwargs["upload_url"]
+        assert url.startswith("https://foi.example.gov/contribute/")
+        assert "evil.example.com" not in url
+
     async def test_invite_happy_path_uses_system_config_org_name(
         self,
         db: AsyncIOMotorDatabase,
@@ -573,6 +601,46 @@ class TestContributorUpload:
         contributor = await db.case_contributors.find_one({"id": cid})
         assert contributor["documents_uploaded"] == 1
 
+    @pytest.mark.parametrize(
+        "filename,body,limit,expected",
+        [
+            ("x.pdf", b"<html>not a pdf</html>", None, 415),
+            ("x.docx", b"%PDF-1.4 not a zip", None, 415),
+            ("x.pdf", b"%PDF-1.4" + b"x" * 200, 64, 413),
+        ],
+    )
+    async def test_upload_rejects_bad_content_and_oversize(
+        self,
+        db: AsyncIOMotorDatabase,
+        app,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+        filename: str,
+        body: bytes,
+        limit: int | None,
+        expected: int,
+    ) -> None:
+        """DOC-11: same shared check as the other upload entry points."""
+        case_id = await _seed_case(db)
+        cid = await _seed_contributor(db, case_id=case_id, raw_token="tok")
+        if limit is not None:
+            monkeypatch.setattr("src.documents.processing_service.MAX_FILE_SIZE", limit)
+        from src.documents import processing_service as ps_mod
+
+        async def _must_not_run(self, *args, **kwargs):
+            raise AssertionError("service must not be called")
+
+        monkeypatch.setattr(ps_mod.DocumentProcessingService, "process_upload", _must_not_run)
+        async with await self._public_client(app) as c:
+            r = await c.post(
+                f"/api/v1/contribute/{cid}/upload",
+                files={"file": (filename, body, "application/octet-stream")},
+                data={"token": "tok"},
+            )
+        assert r.status_code == expected, r.text
+        contributor = await db.case_contributors.find_one({"id": cid})
+        assert contributor.get("documents_uploaded", 0) == 0
+
     async def test_upload_bad_token_401(
         self,
         db: AsyncIOMotorDatabase,
@@ -655,6 +723,7 @@ class TestContributorUpload:
         class _Bad:
             status = ps_mod.ProcessingStatus.VALIDATION_FAILED
             message = "Bad file"
+            http_status = None
 
         async def _fake(self, *args, **kwargs):
             return _Bad()

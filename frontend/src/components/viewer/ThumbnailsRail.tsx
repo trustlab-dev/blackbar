@@ -3,12 +3,7 @@ import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import { pdfjs } from 'react-pdf';
 import './ThumbnailsRail.css';
-
-// Configure PDF.js worker - use local worker from node_modules
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString();
+import { PDF_DOCUMENT_OPTIONS } from './pdfSetup';
 
 interface Props {
   documentId: string;
@@ -30,7 +25,7 @@ const ThumbnailsRail: React.FC<Props> = ({ documentId, numPages, currentPage, on
 
     const loadThumbnails = async () => {
       try {
-        loadingTask = pdfjs.getDocument(pdfUrl);
+        loadingTask = pdfjs.getDocument({ ...PDF_DOCUMENT_OPTIONS, url: pdfUrl });
         const pdf = await loadingTask.promise;
 
         // Generate thumbnails for visible pages

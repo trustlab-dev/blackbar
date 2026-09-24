@@ -559,6 +559,24 @@ describe('CaseDetailView — approval banner & activity log', () => {
     ).toBeInTheDocument();
   });
 
+  it('renders a guest-shaped case with no audit log, comments, tags or links fields', async () => {
+    // Guests and team-scoped callers get these fields stripped server-side
+    // (backend cases/listing.py); the view must not crash on undefined.
+    const {
+      audit_log: _a,
+      comments: _c,
+      tags: _t,
+      document_ids: _d,
+      ...guestCase
+    } = baseCase;
+    mountHandlers({
+      caseData: { ...guestCase, tracking_number: 'FOI-2026-007-K7QX2M9A' },
+    });
+    renderWithProviders(<CaseDetailView />);
+    expect(await screen.findByText('Records request')).toBeInTheDocument();
+    expect(screen.getAllByText('FOI-2026-007-K7QX2M9A').length).toBeGreaterThan(0);
+  });
+
   it('falls back to the assignee role-only label and renders the no-tags state', async () => {
     mountHandlers({
       caseData: {

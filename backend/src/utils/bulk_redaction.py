@@ -6,7 +6,57 @@ Apply redactions across multiple documents efficiently
 import logging
 from datetime import datetime
 
+import fitz  # PyMuPDF
+
+from src.utils.pdf_limits import check_page_count
+
 logger = logging.getLogger(__name__)
+
+
+def locate_text_in_pdf(
+    pdf_content: bytes, search_text: str, pages: set[int] | None = None
+) -> tuple[list[dict], list[list[float]], list[int]]:
+    """Find every occurrence of ``search_text`` in the PDF's text layer.
+
+    Returns ``(hits, page_sizes, rotations)``. Each hit is
+    ``{"page", "x", "y", "width", "height"}`` in displayed (viewer) space,
+    the space stored redactions use, so rotated pages are handled (DOC-04).
+    ``pages`` (1-based) limits the search. Matching is case-insensitive.
+    """
+    doc = fitz.open(stream=pdf_content, filetype="pdf")
+    try:
+        check_page_count(doc.page_count)
+        page_sizes = [[float(p.rect.width), float(p.rect.height)] for p in doc]
+        rotations = [int(p.rotation) for p in doc]
+        hits: list[dict] = []
+        for page in doc:
+            page_num = page.number + 1
+            if pages is not None and page_num not in pages:
+                continue
+            for rect in page.search_for(search_text):
+                displayed = fitz.Rect(rect * page.rotation_matrix)
+                displayed.normalize()
+                displayed &= page.rect
+                if displayed.is_empty:
+                    continue
+                hits.append(
+                    {
+                        "page": page_num,
+                        "x": float(displayed.x0),
+                        "y": float(displayed.y0),
+                        "width": float(displayed.width),
+                        "height": float(displayed.height),
+                    }
+                )
+        return hits, page_sizes, rotations
+    finally:
+        doc.close()
+
+
+def pdf_page_geometry(pdf_content: bytes) -> tuple[list[list[float]], list[int]]:
+    """``(page_sizes, rotations)`` for a PDF, sizes in displayed space."""
+    _, sizes, rotations = locate_text_in_pdf(pdf_content, "", pages=set())
+    return sizes, rotations
 
 
 def find_text_in_documents(

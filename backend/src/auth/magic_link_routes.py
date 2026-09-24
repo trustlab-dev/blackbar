@@ -9,10 +9,14 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, validator
 
+from src.auth.audit import record_auth_event
 from src.auth.magic_link_service import MagicLinkService
+from src.config import public_base_url
 from src.core.database import get_shared_database
+from src.core.rate_limit import AUTH_TOKEN_LIMIT, client_ip, limiter
 from src.public_users.repository import MagicLinkTokensRepository, PublicUsersRepository
 from src.utils.email_service import EmailService
+from src.utils.log_utils import hash_email_for_logs
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,11 @@ logger = logging.getLogger(__name__)
 email_service = EmailService()
 
 router = APIRouter(prefix="/auth/public/magic-link", tags=["Magic Link Authentication"])
+
+
+def _audit_db(service: MagicLinkService):
+    """The database the service writes to, for the auth audit trail."""
+    return getattr(getattr(service, "users_repo", None), "db", None)
 
 
 # Dependency to get magic link service
@@ -76,6 +85,7 @@ class AuthResponse(BaseModel):
 
 # Endpoints
 @router.post("/request", response_model=MagicLinkResponse)
+@limiter.limit(AUTH_TOKEN_LIMIT)
 async def request_magic_link(
     request_data: MagicLinkRequest,
     request: Request,
@@ -84,12 +94,12 @@ async def request_magic_link(
     """
     Request a magic link to be sent to email
 
-    Rate limit: 3 requests per hour per email
+    Rate limit: 3 requests per hour per email, plus a per-IP limit (AUTH-16)
     Token expires: 15 minutes
     """
     try:
         # Get client info for audit
-        ip_address = request.client.host if request.client else None
+        ip_address = client_ip(request)
         user_agent = request.headers.get("user-agent")
 
         # Generate and store token
@@ -101,8 +111,7 @@ async def request_magic_link(
         )
 
         # Build magic link URL from configurable base URL
-        base_url = os.getenv("PUBLIC_BASE_URL", "http://localhost:3000")
-        magic_link_url = f"{base_url}/public/verify/{token}"
+        magic_link_url = f"{public_base_url()}/public/verify/{token}"
 
         # Send email
         org_name = os.getenv("ORG_NAME", "BlackBar")
@@ -113,8 +122,18 @@ async def request_magic_link(
             expires_minutes=15,
         )
 
+        await record_auth_event(
+            _audit_db(service),
+            "magic_link_requested",
+            request=request,
+            details={"email_hash": hash_email_for_logs(request_data.email)},
+        )
+
         if not email_sent:
-            logger.warning(f"Failed to send email to {request_data.email}, but token was created")
+            logger.warning(
+                f"Failed to send magic link email to {hash_email_for_logs(request_data.email)}, "
+                "but token was created"
+            )
             # Continue anyway - in dev mode, token is logged
 
         return MagicLinkResponse(
@@ -139,6 +158,7 @@ async def request_magic_link(
 
 
 @router.post("/verify", response_model=AuthResponse)
+@limiter.limit(AUTH_TOKEN_LIMIT)
 async def verify_magic_link(
     verify_data: VerifyRequest,
     request: Request,
@@ -154,6 +174,13 @@ async def verify_magic_link(
         user = await service.verify_magic_link(token=verify_data.token, email=verify_data.email)
 
         if not user:
+            await record_auth_event(
+                _audit_db(service),
+                "magic_link_verify_failed",
+                request=request,
+                success=False,
+                details={"email_hash": hash_email_for_logs(verify_data.email)},
+            )
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -164,6 +191,9 @@ async def verify_magic_link(
 
         # Issue JWT
         access_token = service.issue_token(user)
+        await record_auth_event(
+            _audit_db(service), "magic_link_verified", request=request, actor_id=user.id
+        )
 
         return AuthResponse(
             access_token=access_token,

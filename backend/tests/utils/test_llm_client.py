@@ -4,7 +4,7 @@
 provider-agnostic ``chat_completion`` interface. Tests use a stubbed
 ``LLMService`` (no real network calls) and verify:
 
-- Text sanitization replaces all listed Unicode -> ASCII pairs
+- Text normalisation keeps UTF-8 (LLM-11) and strips control characters
 - ``_ensure_config`` lazy-loads from the service exactly once
 - Each of the four provider response shapes (openai/anthropic/google/cohere)
   is parsed correctly
@@ -52,42 +52,23 @@ def _make_config(provider: str = "openai") -> LLMConfig:
 
 
 class TestSanitizeText:
-    def test_replaces_listed_unicode_chars(self) -> None:
-        svc = MagicMock()
-        client = LLMClient(svc)
-        text = "Hello\xa0world—with…everything"
-        clean = client._sanitize_text(text)
-        # nbsp -> space, em-dash -> --, ellipsis -> ...
-        assert "\xa0" not in clean
-        assert "—" not in clean
-        assert "…" not in clean
-        assert "Hello world--with...everything" == clean
+    """LLM-11: prompts are sent as UTF-8; only control characters are
+    replaced and text is NFC-normalised."""
 
-    def test_replaces_all_quote_styles(self) -> None:
-        svc = MagicMock()
-        client = LLMClient(svc)
-        clean = client._sanitize_text("‘a’ “b”")
-        assert clean == "'a' \"b\""
+    def test_non_ascii_text_is_preserved(self) -> None:
+        client = LLMClient(MagicMock())
+        text = "José Côté — “quoted” … 中文 O’Brien"
+        assert client._sanitize_text(text) == text
 
-    def test_replaces_arrows_and_bullets(self) -> None:
-        svc = MagicMock()
-        client = LLMClient(svc)
-        clean = client._sanitize_text("→ ← •")
-        assert clean == "-> <- *"
-
-    def test_non_ascii_chars_replaced_with_question_mark(self) -> None:
-        svc = MagicMock()
-        client = LLMClient(svc)
-        # An unhandled non-ascii char (CJK)
-        clean = client._sanitize_text("中")
-        assert clean == "?"
+    def test_nfc_normalisation(self) -> None:
+        client = LLMClient(MagicMock())
+        decomposed = "Jose\u0301"  # e + combining acute
+        assert client._sanitize_text(decomposed) == "José"
 
     def test_control_chars_replaced_with_space(self) -> None:
-        svc = MagicMock()
-        client = LLMClient(svc)
-        # \x01 is a control char; \n/\r/\t are preserved
-        clean = client._sanitize_text("a\x01b\nc\tx")
-        assert "a b\nc\tx" == clean
+        client = LLMClient(MagicMock())
+        clean = client._sanitize_text("a\x01b\nc\tx\x7f")
+        assert clean == "a b\nc\tx "
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +137,14 @@ class TestChatCompletion:
     async def test_anthropic_response_parsing(self) -> None:
         svc = MagicMock()
         svc.get_default_llm = AsyncMock(return_value=_make_config("anthropic"))
-        svc.make_llm_call = AsyncMock(return_value={"content": [{"text": "anthropic-reply"}]})
+        svc.make_llm_call = AsyncMock(
+            return_value={
+                "content": [
+                    {"type": "thinking", "thinking": ""},
+                    {"type": "text", "text": "anthropic-reply"},
+                ]
+            }
+        )
         client = LLMClient(svc)
         reply = await client.chat_completion([{"role": "user", "content": "hi"}])
         assert reply == "anthropic-reply"
@@ -182,18 +170,38 @@ class TestChatCompletion:
         assert reply == "cohere-reply"
 
     @pytest.mark.asyncio
-    async def test_unknown_format_falls_back_to_str(self) -> None:
-        """Pin: an unrecognized request_format logs a warning and
-        stringifies the response."""
+    async def test_unknown_format_raises(self) -> None:
         svc = MagicMock()
         cfg = _make_config("openai")
-        # Patch the request_format to a value the function doesn't branch on
         cfg.request_format = RequestFormat.CUSTOM
         svc.get_default_llm = AsyncMock(return_value=cfg)
         svc.make_llm_call = AsyncMock(return_value={"raw": "data"})
         client = LLMClient(svc)
-        reply = await client.chat_completion([{"role": "user", "content": "hi"}])
-        assert "raw" in reply
+        with pytest.raises(ValueError):
+            await client.chat_completion([{"role": "user", "content": "hi"}])
+
+    @pytest.mark.asyncio
+    async def test_complete_reports_truncation(self) -> None:
+        svc = MagicMock()
+        svc.get_default_llm = AsyncMock(return_value=_make_config("openai"))
+        svc.make_llm_call = AsyncMock(
+            return_value={"choices": [{"message": {"content": "[{"}, "finish_reason": "length"}]}
+        )
+        completion = await LLMClient(svc).complete([{"role": "user", "content": "hi"}])
+        assert completion.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_disabled_default_raises(self) -> None:
+        from src.llm.safety import LLMDisabledError
+
+        svc = MagicMock()
+        cfg = _make_config("openai")
+        cfg.enabled = False
+        svc.get_default_llm = AsyncMock(return_value=cfg)
+        svc.make_llm_call = AsyncMock()
+        with pytest.raises(LLMDisabledError):
+            await LLMClient(svc).chat_completion([{"role": "user", "content": "hi"}])
+        svc.make_llm_call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_temperature_and_max_tokens_overrides_forwarded(self) -> None:
@@ -231,10 +239,9 @@ class TestChatCompletion:
         svc.get_default_llm = AsyncMock(return_value=_make_config("openai"))
         svc.make_llm_call = AsyncMock(return_value={"choices": [{"message": {"content": "ok"}}]})
         client = LLMClient(svc)
-        await client.chat_completion([{"role": "user", "content": "hello—world"}])
+        await client.chat_completion([{"role": "user", "content": "héllo—world\x01"}])
         sent_messages = svc.make_llm_call.call_args.args[1]
-        assert "—" not in sent_messages[0]["content"]
-        assert "--" in sent_messages[0]["content"]
+        assert sent_messages[0]["content"] == "héllo—world "
 
 
 # ---------------------------------------------------------------------------
@@ -325,4 +332,18 @@ class TestTestLlmConnection:
         ):
             result = await test_llm_connection()
         assert result["success"] is False
-        assert "boom" in result["message"]
+        # Raw exception text is not surfaced (it can carry provider details).
+        assert "boom" not in result["message"]
+        assert "RuntimeError" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_reports_disabled(self) -> None:
+        from src.llm.safety import LLMDisabledError
+
+        with patch(
+            "src.utils.llm_client.get_llm_client",
+            new=AsyncMock(side_effect=LLMDisabledError()),
+        ):
+            result = await test_llm_connection()
+        assert result["success"] is False
+        assert "disabled" in result["message"].lower()

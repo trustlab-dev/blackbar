@@ -363,6 +363,56 @@ class TestGetAttachment:
         r = await client.get(f"/api/v1/documents/{parent_id}/attachments/{att_ids[0]}")
         assert r.status_code == 403
 
+    async def test_fetches_gridfs_stored_attachment_with_rfc6266_header(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Current uploads keep attachment bytes in GridFS, not ``content``
+        (DOC-12); the filename header must survive non-ASCII names."""
+        from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+        client = await authed_client_factory(role="admin")
+        case_id = await _seed_case(db)
+        file_id = await AsyncIOMotorGridFSBucket(db).upload_from_stream(
+            "résumé.pdf", b"%PDF-1.4 gridfs bytes"
+        )
+        parent_id, att_ids = await _seed_doc_with_attachments(
+            db,
+            case_id,
+            attachments=[
+                {
+                    "filename": "résumé.pdf",
+                    "mime_type": "application/pdf",
+                    "content_file_id": str(file_id),
+                }
+            ],
+        )
+
+        r = await client.get(f"/api/v1/documents/{parent_id}/attachments/{att_ids[0]}")
+        assert r.status_code == 200, r.text
+        assert r.content == b"%PDF-1.4 gridfs bytes"
+        disposition = r.headers["content-disposition"]
+        assert disposition.startswith("attachment; ")
+        assert "filename*=UTF-8''r%C3%A9sum%C3%A9.pdf" in disposition
+        assert r.headers["cache-control"] == "no-store, private"
+
+    async def test_get_attachment_without_content_returns_404(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="admin")
+        case_id = await _seed_case(db)
+        parent_id, att_ids = await _seed_doc_with_attachments(
+            db, case_id, attachments=[{"filename": "empty.pdf"}]
+        )
+        r = await client.get(f"/api/v1/documents/{parent_id}/attachments/{att_ids[0]}")
+        assert r.status_code == 404
+        assert "content not found" in r.text
+
     async def test_get_attachment_disappeared_returns_404(
         self,
         db: AsyncIOMotorDatabase,

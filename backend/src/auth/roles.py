@@ -34,7 +34,15 @@ AVAILABLE_ROLES = [
 ]
 
 # Role hierarchy (for permission checks)
-ROLE_HIERARCHY = {"admin": 4, "analyst": 3, "user": 2, "guest": 1}
+ROLE_HIERARCHY = {"owner": 5, "admin": 4, "analyst": 3, "user": 2, "guest": 1}
+
+# Every system role a user record may hold. `owner` is not offered in the
+# role picker (AVAILABLE_ROLES) but is honoured by the authz layer, so it is
+# assignable only by another owner (AUTH-25).
+SYSTEM_ROLES = ("owner", "admin", "analyst", "user", "guest")
+
+# Internal staff: everyone except external guests.
+STAFF_ROLES = ["owner", "admin", "analyst", "user"]
 
 
 def get_available_roles():
@@ -48,8 +56,8 @@ def get_role_ids():
 
 
 def is_valid_role(role: str) -> bool:
-    """Check if a role is valid"""
-    return role in get_role_ids()
+    """Check if a role is a known system role (including `owner`)."""
+    return role in SYSTEM_ROLES
 
 
 def get_role_level(role: str) -> int:

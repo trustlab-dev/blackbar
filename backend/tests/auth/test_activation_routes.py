@@ -174,6 +174,14 @@ class TestActivateOwner:
 class TestActivateOwnerDirectInvocation:
     """Direct-call tests for the route handler body. Bypasses middleware."""
 
+    @pytest.fixture(autouse=True)
+    def _no_rate_limit(self, monkeypatch: pytest.MonkeyPatch):
+        """The slowapi decorator insists on a real Starlette Request; these
+        tests call the handler with a stand-in, so switch the limiter off."""
+        from src.core.rate_limit import limiter
+
+        monkeypatch.setattr(limiter, "enabled", False)
+
     async def test_handler_success_returns_response_model(
         self, db: AsyncIOMotorDatabase, patch_activation_route_db
     ) -> None:

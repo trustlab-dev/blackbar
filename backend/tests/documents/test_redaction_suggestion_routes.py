@@ -113,6 +113,19 @@ async def _seed_case(db: AsyncIOMotorDatabase, **overrides: Any) -> str:
     return case["id"]
 
 
+COORDS = {"x": 72.0, "y": 90.0, "width": 40.0, "height": 14.0}
+
+
+def _text_pdf(text: str) -> bytes:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 100), text, fontsize=12)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
 async def _seed_document(db: AsyncIOMotorDatabase, **overrides: Any) -> str:
     doc = make_document(**overrides)
     await db.documents.insert_one(doc)
@@ -231,23 +244,38 @@ class TestGetRedactionSuggestions:
         from src.documents import redaction_suggestion_routes
 
         async def _fake_ai(text, context=None):
-            assert "Test Case" in (context or ""), "context should be passed"
+            # LLM-17: the case title is not sent unless LLM_SEND_CASE_CONTEXT
+            assert context is None
             return {
                 "suggestions": [{"text": "Some", "category": "personal_info", "reason": "x"}],
                 "summary": "synthetic summary",
+                "provider": "anthropic",
+                "model": "claude-sonnet-5",
+                "analysis_truncated": True,
+                "analysed_chars": 10,
+                "total_chars": 20,
             }
 
         monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _fake_ai)
-        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?generate=true")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "ai_complete"
-        assert body["method"] == "openai_gpt4"
+        assert body["method"] == "llm"
+        assert body["analysis_truncated"] is True
         assert body["summary"] == "synthetic summary"
 
-        # Verify cache was written
+        # Verify cache was written, with provenance (LLM-16)
         doc = await db.documents.find_one({"id": doc_id})
         assert doc["ai_suggestions"]["summary"] == "synthetic summary"
+        assert doc["ai_suggestions"]["provider"] == "anthropic"
+        assert doc["ai_suggestions"]["model"] == "claude-sonnet-5"
+        assert doc["ai_suggestions"]["analysed_chars"] == 10
+
+        # The cached response surfaces the truncation flag too.
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        assert r.json()["status"] == "cached"
+        assert r.json()["analysis_truncated"] is True
 
     async def test_cached_suggestions_returned(
         self,
@@ -335,15 +363,15 @@ class TestGetRedactionSuggestions:
         body = r.json()
         assert body["summary"] == "NEW"
 
-    async def test_empty_cache_auto_regenerates(
+    async def test_empty_cache_is_not_regenerated_on_view(
         self,
         db: AsyncIOMotorDatabase,
         authed_client_factory,
         patch_routes_db,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """If cached suggestions is empty (zero entries), the route
-        auto-regenerates rather than returning the empty cache."""
+        """LLM-04: a cached zero-result analysis is returned as-is; viewing
+        the document again does not re-send it to the LLM."""
         client = await authed_client_factory(role="admin")
         doc_id = await _seed_document(
             db,
@@ -353,16 +381,15 @@ class TestGetRedactionSuggestions:
 
         from src.documents import redaction_suggestion_routes
 
-        async def _fake_ai(text, context=None):
-            return {
-                "suggestions": [{"text": "fresh", "category": "x", "reason": "y"}],
-                "summary": "regenerated",
-            }
+        async def _explode(text, context=None):
+            raise AssertionError("LLM must not be called for a cached empty result")
 
-        monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _fake_ai)
+        monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _explode)
         r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
         body = r.json()
-        assert body["summary"] == "regenerated"
+        assert body["status"] == "cached"
+        assert body["suggestions"] == []
+        assert body["summary"] == "empty"
 
     # -- Demo mode (BLACKBAR_DEMO_MODE=true) -----------------------------------
     # In demo mode there is no live LLM configured. The route must NEVER call
@@ -489,9 +516,11 @@ class TestGetRedactionSuggestions:
             raise RuntimeError("LLM exploded")
 
         monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _boom)
-        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?generate=true")
         assert r.status_code == 500
-        assert "LLM exploded" in r.text
+        # Generic message with a reference, never the raw exception text
+        assert "LLM exploded" not in r.text
+        assert "reference" in r.text
 
     async def test_full_ai_no_case_id(
         self,
@@ -517,7 +546,7 @@ class TestGetRedactionSuggestions:
             return {"suggestions": [], "summary": "ok"}
 
         monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _fake_ai)
-        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?generate=true")
         assert r.status_code == 200
         assert captured["context"] is None
 
@@ -542,7 +571,7 @@ class TestGetRedactionSuggestions:
             return {"suggestions": [], "summary": "ok"}
 
         monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _fake_ai)
-        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?generate=true")
         assert r.status_code == 200
         assert captured["context"] is None
 
@@ -582,7 +611,7 @@ class TestGetRedactionSuggestions:
             "enrich_suggestions_with_coordinates",
             _fake_enrich,
         )
-        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?generate=true")
         assert r.status_code == 200, r.text
         assert enriched_calls  # Was called
 
@@ -630,8 +659,8 @@ class TestGetRedactionSuggestions:
     ) -> None:
         """Cached path with `content` AND suggestions already carrying
         `coordinates`: needs_enrichment evaluates False, so enrich is
-        NOT called. Covers branch 94->99 (skip enrichment, jump straight
-        to the rejected-tagging block)."""
+        NOT called. Only server-located suggestions (`has_coordinates`)
+        count as located (LLM-06)."""
         client = await authed_client_factory(role="admin")
         doc_id = await _seed_document(
             db,
@@ -639,7 +668,14 @@ class TestGetRedactionSuggestions:
             content=b"%PDF-1.4 fake",
             ai_suggestions={
                 "suggestions": [
-                    {"text": "has-coords", "category": "x", "coordinates": {"x": 1, "y": 2}}
+                    {
+                        "text": "has-coords",
+                        "category": "x",
+                        "coordinates": {"x": 1, "y": 2},
+                        "has_coordinates": True,
+                        "coord_space": "displayed",
+                        "page_rotation": 0,
+                    }
                 ],
                 "summary": "cached",
             },
@@ -661,6 +697,58 @@ class TestGetRedactionSuggestions:
         r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
         assert r.status_code == 200
         assert not called  # Enrichment was skipped because coords present
+
+    async def test_cached_legacy_coordinates_are_relocated(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """C1: a cached suggestion located by an older build (no
+        coordinate-space marker) holds unrotated boxes. It is re-located in
+        displayed space, the fresh cache is saved, and duplicates of the
+        same suggestion are located only once."""
+        import fitz
+
+        pdf = fitz.open()
+        page = pdf.new_page(width=612, height=792)
+        page.insert_text((72, 100), "Jane Doe SIN 123456789", fontsize=12)
+        unrotated = page.search_for("Jane Doe")[0]
+        page.set_rotation(90)
+        displayed = unrotated * page.rotation_matrix
+        content = pdf.tobytes()
+        pdf.close()
+
+        legacy = {
+            "text": "Jane Doe",
+            "category": "S22",
+            "reason": "name",
+            "page": 1,
+            "has_coordinates": True,
+            "coordinates": {
+                "x": unrotated.x0,
+                "y": unrotated.y0,
+                "width": unrotated.width,
+                "height": unrotated.height,
+            },
+        }
+        client = await authed_client_factory(role="admin")
+        doc_id = await _seed_document(
+            db,
+            extracted_text="Jane Doe SIN 123456789",
+            content=content,
+            ai_suggestions={"suggestions": [legacy, dict(legacy)], "summary": "cached"},
+        )
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        assert r.status_code == 200, r.text
+        (suggestion,) = r.json()["suggestions"]
+        assert suggestion["coord_space"] == "displayed"
+        assert suggestion["page_rotation"] == 90
+        box = suggestion["coordinates"]
+        assert box["x"] == pytest.approx(displayed.x0, abs=0.5)
+        assert box["y"] == pytest.approx(displayed.y0, abs=0.5)
+        stored = (await db.documents.find_one({"id": doc_id}))["ai_suggestions"]["suggestions"]
+        assert [s["coord_space"] for s in stored] == ["displayed"]
 
     async def test_cached_enrichment_when_pdf_content_present(
         self,
@@ -817,7 +905,12 @@ class TestApplyBulkRedaction:
     ) -> None:
         client = await authed_client_factory(role="admin")
         case_id = await _seed_case(db)
-        doc_id = await _seed_document(db, case_id=case_id, extracted_text="bob met alice and alice")
+        doc_id = await _seed_document(
+            db,
+            case_id=case_id,
+            extracted_text="bob met alice and alice",
+            content=_text_pdf("bob met alice and alice"),
+        )
         r = await client.post(
             "/api/v1/documents/bulk/apply-redaction",
             json={
@@ -832,11 +925,15 @@ class TestApplyBulkRedaction:
         assert body["success"] is True
         assert body["documents_affected"] == 1
         assert body["redactions_created"] == 2  # "alice" appears twice
-        # Persisted redactions with pending status
+        # Each occurrence is located on the page and stored as a real box
+        # (DOC-02: previously these were coordinate-less "needs_coordinates"
+        # records that released nothing).
         doc = await db.documents.find_one({"id": doc_id})
         assert len(doc["redactions"]) == 2
-        assert all(r["status"] == "pending" for r in doc["redactions"])
-        assert all(r["needs_coordinates"] for r in doc["redactions"])
+        for red in doc["redactions"]:
+            assert red["status"] == "approved" and red["source"] == "bulk_text"
+            assert red["page"] == 1 and red["width"] > 0 and red["height"] > 0
+            assert red["id"] and "needs_coordinates" not in red
         # Case audit log
         case = await db.cases.find_one({"id": case_id})
         assert any(e.get("action") == "bulk_redaction_applied" for e in case["audit_log"])
@@ -908,7 +1005,9 @@ class TestApplyBulkRedaction:
         `if case:` audit-log block is skipped (branch 283->302)."""
         client = await authed_client_factory(role="admin")
         case_id = "ghost-case-bulk"
-        await _seed_document(db, case_id=case_id, extracted_text="alice")
+        await _seed_document(
+            db, case_id=case_id, extracted_text="alice", content=_text_pdf("alice")
+        )
         r = await client.post(
             "/api/v1/documents/bulk/apply-redaction",
             json={
@@ -1058,13 +1157,18 @@ class TestRecordAIFeedback:
         authed_client_factory,
         patch_routes_db,
     ) -> None:
-        """`check_role(['owner','admin','analyst','user'])` accepts user."""
-        client = await authed_client_factory(role="user")
-        doc_id = await _seed_document(db)
+        """`check_role(['owner','admin','analyst','user'])` accepts a user who
+        is on the document's case team (LLM-12)."""
+        client = await authed_client_factory(role="user", email="team@example.test")
+        user_doc = await db.users.find_one({"email": "team@example.test"})
+        case_id = await _seed_case(
+            db, case_team=[{"user_id": user_doc["id"], "role": "analyst", "status": "active"}]
+        )
+        doc_id = await _seed_document(db, case_id=case_id)
         r = await client.post(
             f"/api/v1/documents/{doc_id}/ai-feedback",
             json={
-                "suggestion_text": "x",
+                "suggestion_text": "xy",
                 "suggestion_category": "y",
                 "suggestion_reason": "z",
                 "feedback": "accepted",
@@ -1110,6 +1214,7 @@ class TestApplyAISuggestionsBulk:
         doc_id_1 = await _seed_document(
             db,
             case_id=case_id,
+            content=_text_pdf("alice bob charlie x y"),
             ai_suggestions={
                 "suggestions": [
                     {
@@ -1118,10 +1223,8 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "high",
                         "has_coordinates": True,
                         "page": 1,
-                        "x": 1,
-                        "y": 2,
-                        "width": 3,
-                        "height": 4,
+                        # The stored (enriched) shape: geometry is nested.
+                        "coordinates": COORDS,
                         "reason": "name",
                     },
                     {
@@ -1131,6 +1234,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "low",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     },
                     {
                         # Filtered out by missing coordinates
@@ -1159,7 +1263,12 @@ class TestApplyAISuggestionsBulk:
         # Verify redaction added to doc_id_1
         doc = await db.documents.find_one({"id": doc_id_1})
         assert len(doc["redactions"]) == 1
-        assert doc["redactions"][0]["source"] == "ai_bulk_apply"
+        red = doc["redactions"][0]
+        assert red["source"] == "ai_bulk_apply" and red["status"] == "approved"
+        assert (red["x"], red["y"], red["width"], red["height"]) == (72.0, 90.0, 40.0, 14.0)
+        assert red["id"]
+        # The suggestion without coordinates is reported, not silently dropped.
+        assert body["skipped_without_coordinates"] == 1
 
     async def test_apply_category_filter(
         self,
@@ -1173,6 +1282,7 @@ class TestApplyAISuggestionsBulk:
         await _seed_document(
             db,
             case_id=case_id,
+            content=_text_pdf("alice bob charlie x y"),
             ai_suggestions={
                 "suggestions": [
                     {
@@ -1181,6 +1291,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "high",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     },
                     {
                         "text": "y",
@@ -1188,6 +1299,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "high",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     },
                 ]
             },
@@ -1213,6 +1325,7 @@ class TestApplyAISuggestionsBulk:
         await _seed_document(
             db,
             case_id=case_id,
+            content=_text_pdf("alice bob charlie x y"),
             ai_suggestions={
                 "suggestions": [
                     {
@@ -1221,6 +1334,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "medium",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     }
                 ]
             },
@@ -1385,3 +1499,301 @@ async def test_get_db_helper_returns_shared_database(mongo_uri: str) -> None:
     fake_request = MagicMock()
     result = await get_db(fake_request)
     assert result.name == "blackbar"
+
+
+# ---------------------------------------------------------------------------
+# Security-review 2026-09: LLM-02, LLM-04, LLM-12, LLM-14
+# ---------------------------------------------------------------------------
+
+GOOGLE_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1beta/models/test-gemini-model:generateContent"
+)
+GOOGLE_KEY = "AIzaSyDOCVIEWLEAKDOCVIEWLEAK0001"
+
+
+async def _seed_default_llm(
+    db: AsyncIOMotorDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool = True,
+    request_format: str = "google",
+    endpoint: str = GOOGLE_ENDPOINT,
+    api_key: str = GOOGLE_KEY,
+) -> None:
+    """A real default LLM config in the test db, reached through the real
+    get_llm_client() (no helper mocks)."""
+    import src.utils.llm_client as llm_client_mod
+    from src.llm.encryption import encrypt_api_key
+
+    monkeypatch.setattr(llm_client_mod, "db", db)
+    await db.llm_configs.insert_one(
+        {
+            "id": "llm-default",
+            "name": "Gemini",
+            "enabled": enabled,
+            "api_endpoint": endpoint,
+            "model_name": "test-gemini-model",
+            "request_format": request_format,
+            "default_settings": {"temperature": 0.3, "max_tokens": 2000, "top_p": 1.0},
+            "headers": None,
+            "notes": None,
+            "api_key_encrypted": encrypt_api_key(api_key),
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "created_by": "seed",
+        }
+    )
+    await db.system_config.insert_one({"id": "global_llm_config", "default_llm_id": "llm-default"})
+
+
+async def _set_auto_generate(db: AsyncIOMotorDatabase, value: bool) -> None:
+    await db.system_config.update_one(
+        {"id": "system_configuration"},
+        {"$set": {"auto_generate_ai_suggestions": value}},
+        upsert=True,
+    )
+
+
+class TestViewDoesNotEgress:
+    async def test_view_without_auto_generate_does_not_call_llm(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = await authed_client_factory(role="analyst")
+        doc_id = await _seed_document(db, extracted_text="Alice Smith lives here")
+
+        from src.documents import redaction_suggestion_routes
+
+        async def _explode(text, context=None):
+            raise AssertionError("viewing must not send the document to the LLM")
+
+        monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _explode)
+        r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?quick=false")
+        assert r.status_code == 200
+        assert r.json()["status"] == "not_generated"
+        doc = await db.documents.find_one({"id": doc_id})
+        assert "ai_suggestions" not in doc
+
+    async def test_view_with_auto_generate_calls_llm_once_then_caches_empty(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        await _set_auto_generate(db, True)
+        client = await authed_client_factory(role="analyst")
+        doc_id = await _seed_document(db, extracted_text="Nothing sensitive here")
+
+        from src.documents import redaction_suggestion_routes
+
+        calls = []
+
+        async def _fake_ai(text, context=None):
+            calls.append(text)
+            return {"suggestions": [], "summary": "AI identified 0 potential redactions"}
+
+        monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _fake_ai)
+        for _ in range(3):
+            r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+            assert r.status_code == 200
+        assert len(calls) == 1
+        assert r.json()["status"] == "cached"
+
+    async def test_disabled_llm_config_sends_nothing_and_caches_nothing(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import respx
+
+        await _seed_default_llm(db, monkeypatch, enabled=False)
+        client = await authed_client_factory(role="analyst")
+        doc_id = await _seed_document(db, extracted_text="Alice Smith")
+        with respx.mock(assert_all_mocked=True) as router:
+            r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?generate=true")
+            assert len(router.calls) == 0
+        body = r.json()
+        assert body["status"] == "ai_unavailable"
+        assert body["error_code"] == "ai_disabled"
+        assert "disabled" in body["summary"].lower()
+        doc = await db.documents.find_one({"id": doc_id})
+        assert "ai_suggestions" not in doc
+
+
+class TestProviderErrorDoesNotLeakKey:
+    async def test_google_401_key_absent_from_response_cache_and_logs(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        import httpx
+        import respx
+
+        await _seed_default_llm(db, monkeypatch)
+        client = await authed_client_factory(role="analyst")
+        doc_id = await _seed_document(db, extracted_text="Alice Smith")
+        caplog.set_level(logging.DEBUG)
+        with respx.mock(assert_all_mocked=True) as router:
+            route = router.post(GOOGLE_ENDPOINT).mock(
+                return_value=httpx.Response(
+                    401,
+                    json={"error": {"message": f"API key not valid: {GOOGLE_KEY}"}},
+                )
+            )
+            r = await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions?generate=true")
+            sent = route.calls.last.request
+        assert GOOGLE_KEY not in str(sent.url)
+        assert sent.headers["x-goog-api-key"] == GOOGLE_KEY
+
+        assert r.status_code == 200
+        body = r.json()
+        assert GOOGLE_KEY not in r.text
+        assert body["status"] == "ai_error"
+        assert body["error_code"] == "provider_error"
+        assert body["reference"] in body["summary"]
+
+        doc = await db.documents.find_one({"id": doc_id})
+        assert GOOGLE_KEY not in str(doc["ai_suggestions"])
+        assert doc["ai_suggestions"]["provider"] == "google"
+        assert GOOGLE_KEY not in caplog.text
+
+
+class TestLLMRateLimits:
+    async def test_per_document_cooldown(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LLM_REGENERATE_COOLDOWN_SECONDS", "60")
+        client = await authed_client_factory(role="analyst")
+        doc_id = await _seed_document(db, extracted_text="text")
+
+        from src.documents import redaction_suggestion_routes
+
+        async def _fake_ai(text, context=None):
+            return {"suggestions": [], "summary": "ok"}
+
+        monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _fake_ai)
+        url = f"/api/v1/documents/{doc_id}/redaction-suggestions?force_regenerate=true"
+        assert (await client.get(url)).status_code == 200
+        r = await client.get(url)
+        assert r.status_code == 429
+        assert int(r.headers["retry-after"]) > 0
+
+    async def test_per_user_rate_limit(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("LLM_REGENERATE_COOLDOWN_SECONDS", "0")
+        monkeypatch.setenv("RATE_LIMIT_LLM", "2/minute")
+        client = await authed_client_factory(role="analyst")
+        doc_id = await _seed_document(db, extracted_text="text")
+
+        from src.documents import redaction_suggestion_routes
+
+        async def _fake_ai(text, context=None):
+            return {"suggestions": [], "summary": "ok"}
+
+        monkeypatch.setattr(redaction_suggestion_routes, "get_redaction_suggestions", _fake_ai)
+        url = f"/api/v1/documents/{doc_id}/redaction-suggestions?force_regenerate=true"
+        assert (await client.get(url)).status_code == 200
+        assert (await client.get(url)).status_code == 200
+        r = await client.get(url)
+        assert r.status_code == 429
+        # Cached reads are never limited.
+        assert (
+            await client.get(f"/api/v1/documents/{doc_id}/redaction-suggestions")
+        ).status_code == 200
+
+
+class TestFeedbackAccessAndRetention:
+    async def test_user_outside_case_team_gets_403(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user")
+        case_id = await _seed_case(db, case_team=[])
+        doc_id = await _seed_document(db, case_id=case_id)
+        r = await client.post(
+            f"/api/v1/documents/{doc_id}/ai-feedback",
+            json={
+                "suggestion_text": "Alice Smith",
+                "suggestion_category": "S22",
+                "suggestion_reason": "name",
+                "feedback": "rejected",
+            },
+        )
+        assert r.status_code == 403
+        doc = await db.documents.find_one({"id": doc_id})
+        assert not doc.get("rejected_ai_suggestions")
+        assert await db["ai_feedback"].count_documents({}) == 0
+
+    async def test_missing_document_404(self, authed_client_factory, patch_routes_db) -> None:
+        client = await authed_client_factory(role="admin")
+        r = await client.post(
+            "/api/v1/documents/ghost/ai-feedback",
+            json={
+                "suggestion_text": "Alice",
+                "suggestion_category": "S22",
+                "feedback": "accepted",
+            },
+        )
+        assert r.status_code == 404
+
+    async def test_invalid_feedback_value_422(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="admin")
+        doc_id = await _seed_document(db)
+        r = await client.post(
+            f"/api/v1/documents/{doc_id}/ai-feedback",
+            json={
+                "suggestion_text": "Alice",
+                "suggestion_category": "S22",
+                "feedback": "maybe",
+            },
+        )
+        assert r.status_code == 422
+
+    async def test_feedback_stores_hash_with_ttl_not_text(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="admin")
+        doc_id = await _seed_document(db)
+        r = await client.post(
+            f"/api/v1/documents/{doc_id}/ai-feedback",
+            json={
+                "suggestion_text": "Alice Smith SIN 123-456-789",
+                "suggestion_category": "S22",
+                "suggestion_reason": "Alice Smith is named",
+                "feedback": "accepted",
+            },
+        )
+        assert r.status_code == 200
+        record = await db["ai_feedback"].find_one({})
+        assert "Alice" not in str(record)
+        assert len(record["suggestion_hash"]) == 64
+        assert record["expires_at"] > record["timestamp"]
+        indexes = await db["ai_feedback"].index_information()
+        assert any(
+            spec.get("expireAfterSeconds") == 0 and spec["key"] == [("expires_at", 1)]
+            for spec in indexes.values()
+        )

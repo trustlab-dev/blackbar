@@ -810,3 +810,75 @@ class TestGenerateLetterStub:
         client: AsyncClient = await authed_client_factory(role="admin")
         r = await client.post(f"/api/v1/cases/{case_id}/generate-letter")
         assert r.status_code == 501
+
+
+# ---------------------------------------------------------------------------
+# AUTH-12: list responses must not hand raw case documents to team members
+# ---------------------------------------------------------------------------
+
+
+def _sensitive_case(member_id: str) -> dict:
+    return make_case(
+        case_team=[{"user_id": member_id, "role": "third_party", "status": "active"}],
+        comments=[
+            {"id": "c1", "text": "public note", "type": "public"},
+            {"id": "c2", "text": "internal staff note", "type": "internal"},
+        ],
+        audit_log=[{"action": "case_created", "details": {"reason": "internal reason"}}],
+        collection_links=[{"token": "LIVE-COLLECTION-TOKEN", "is_active": True}],
+        release_packages=[{"id": "p1", "access_token": "LIVE-RELEASE-TOKEN"}],
+        extensions=[{"reason": "internal extension reason"}],
+    )
+
+
+class TestListCasesFieldExposure:
+    async def test_guest_list_hides_tokens_internal_comments_and_audit(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="guest", email="guest-list@example.test")
+        me = await db.users.find_one({"email": "guest-list@example.test"})
+        await db.cases.insert_one(_sensitive_case(me["id"]))
+
+        r = await client.get("/api/v1/cases/")
+        assert r.status_code == 200, r.text
+        [case] = r.json()["cases"]
+        for needle in (
+            "LIVE-COLLECTION-TOKEN",
+            "LIVE-RELEASE-TOKEN",
+            "internal staff note",
+            "internal reason",
+            "internal extension reason",
+        ):
+            assert needle not in r.text
+        assert [c["text"] for c in case["comments"]] == ["public note"]
+
+    async def test_user_list_hides_capability_tokens(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="user", email="user-list@example.test")
+        me = await db.users.find_one({"email": "user-list@example.test"})
+        await db.cases.insert_one(_sensitive_case(me["id"]))
+
+        r = await client.get("/api/v1/cases/")
+        assert r.status_code == 200, r.text
+        assert "LIVE-COLLECTION-TOKEN" not in r.text
+        assert "LIVE-RELEASE-TOKEN" not in r.text
+
+    async def test_analyst_list_is_unchanged(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        client = await authed_client_factory(role="analyst")
+        await db.cases.insert_one(_sensitive_case("someone"))
+        r = await client.get("/api/v1/cases/")
+        assert r.status_code == 200, r.text
+        assert "LIVE-COLLECTION-TOKEN" in r.text
+
+    async def test_owner_sees_all_cases(
+        self, db: AsyncIOMotorDatabase, authed_client_factory, patch_routes_db
+    ) -> None:
+        """Owners have global access; the list used to scope them to their teams."""
+        client = await authed_client_factory(role="owner")
+        await db.cases.insert_one(make_case(case_team=[]))
+        r = await client.get("/api/v1/cases/")
+        assert r.status_code == 200, r.text
+        assert r.json()["total"] == 1

@@ -20,6 +20,8 @@ def _sanitize_filename(name: str) -> str:
     return _os.path.basename(name).replace("\n", "").replace("\r", "").replace("\x00", "")
 
 
+import asyncio
+import copy
 import logging
 import os
 import uuid
@@ -39,15 +41,32 @@ from src.utils.email_threads import (  # noqa: F401 — re-exported for processi
     consolidate_email_thread,
     extract_thread_identifiers,
     find_thread_emails,
+    thread_identifiers_from_headers,
 )
+from src.utils.filenames import NO_STORE_HEADERS, content_disposition, safe_basename
 from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
     extract_text_with_coordinates,
     get_text_summary,
 )
+from src.utils.pdf_limits import PdfLimitExceeded
+from src.utils.pdf_redaction import RedactionError, apply_redactions_to_pdf
+from src.utils.redaction_records import (
+    RedactionValidationError,
+    ensure_redaction_ids,
+    partition_redactions,
+    unresolved_message,
+    unresolved_summary,
+)
 
-from ..core.authz import assert_case_access, check_document_access
+from ..core.authz import assert_case_access, check_document_access, has_global_access
 from ..database import db
 from ..dependencies import check_role, get_current_user
+from .redaction_store import (
+    assert_not_conversion_failed,
+    get_page_sizes,
+    load_document_pdf,
+    page_rotations,
+)
 
 # NOTE on re-exports above (extract_text_with_coordinates, get_text_summary,
 # generate_document_summary, consolidate_email_thread,
@@ -57,8 +76,8 @@ from ..dependencies import check_role, get_current_user
 # module. Long-term direction: processing_service should import the
 # originals directly from utils/. Until then, these re-exports must stay.
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Module logger only: configuring the root logger here overrode the app's
+# logging setup on import (LLM-10).
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -138,7 +157,9 @@ async def get_document(
             content = grid_out.read()
             sync_client.close()
 
-            return Response(content=content, media_type="application/pdf")
+            return Response(
+                content=content, media_type="application/pdf", headers=dict(NO_STORE_HEADERS)
+            )
         except Exception as e:
             logger.warning(
                 f"GridFS retrieval failed for {document_id}, falling back to document content: {e}"
@@ -147,7 +168,9 @@ async def get_document(
 
     # Legacy: content stored directly in document
     if doc.get("content"):
-        return Response(content=doc["content"], media_type="application/pdf")
+        return Response(
+            content=doc["content"], media_type="application/pdf", headers=dict(NO_STORE_HEADERS)
+        )
 
     # No content found anywhere
     logger.error(
@@ -201,7 +224,8 @@ async def download_original_file(
                 content=content,
                 media_type=content_type,
                 headers={
-                    "Content-Disposition": f'attachment; filename="{_sanitize_filename(filename)}"'
+                    "Content-Disposition": content_disposition(filename),
+                    **NO_STORE_HEADERS,
                 },
             )
         except Exception as e:
@@ -227,7 +251,10 @@ async def download_original_file(
             return Response(
                 content=content,
                 media_type="application/pdf",
-                headers={"Content-Disposition": f'attachment; filename="{doc["filename"]}"'},
+                headers={
+                    "Content-Disposition": content_disposition(doc.get("filename")),
+                    **NO_STORE_HEADERS,
+                },
             )
         except Exception as e:
             logger.warning(
@@ -241,7 +268,10 @@ async def download_original_file(
         return Response(
             content=doc["content"],
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{doc["filename"]}"'},
+            headers={
+                "Content-Disposition": content_disposition(doc.get("filename")),
+                **NO_STORE_HEADERS,
+            },
         )
 
     # No content found anywhere
@@ -277,15 +307,59 @@ async def get_document_metadata(
             "pages": [],  # No page-level data for simple extraction
         }
 
+    redactions = await _redactions_with_ids(db, doc)
+
+    # Tag every redaction that blocks export/release with its reason, so the
+    # viewer can list them and offer approve/reject or delete (I1, C1).
+    try:
+        rotations: list[int] | None = page_rotations(await get_page_sizes(doc, db))
+    except HTTPException:
+        rotations = None
+    unresolved = unresolved_summary(redactions, rotations)
+    blocking = {d["id"]: d for d in unresolved}
+    redactions = [
+        {**r, "review_required": blocking[r["id"]]} if r.get("id") in blocking else r
+        for r in redactions
+    ]
+
     return {
         "id": doc["id"],
         "filename": doc["filename"],
-        "redactions": doc.get("redactions", []),
+        "redactions": redactions,
+        "unresolved_redactions": unresolved,
         "text_data": text_data,
         "text_summary": doc.get("text_summary"),
         "mime_type": doc.get("mime_type"),
         "size": doc.get("size"),
+        "status": doc.get("status"),
+        "conversion_failed": bool(
+            doc.get("conversion_failed") or doc.get("status") == "conversion_failed"
+        ),
     }
+
+
+async def _redactions_with_ids(db, doc: dict) -> list[dict]:
+    """Return the document's redactions, giving legacy records without an id
+    a uuid and saving it so clients can address every record by id.
+
+    The write is conditional on the array being unchanged since it was read,
+    so a concurrent edit is never overwritten; on a lost race we re-read.
+    """
+    redactions = doc.get("redactions") or []
+    for _ in range(3):
+        original = copy.deepcopy(redactions)
+        if not ensure_redaction_ids(redactions):
+            return redactions
+        result = await db.documents.update_one(
+            {"id": doc["id"], "redactions": original},
+            {"$set": {"redactions": redactions}},
+        )
+        if result.matched_count:
+            return redactions
+        fresh = await db.documents.find_one({"id": doc["id"]}, {"redactions": 1})
+        redactions = (fresh or {}).get("redactions") or []
+    logger.warning("Could not persist backfilled redaction ids for document %s", doc["id"])
+    return redactions
 
 
 # EXPORT DOCUMENT WITH APPLIED REDACTIONS
@@ -314,88 +388,54 @@ async def export_document_with_redactions(
         if not check_document_access(doc, current_user, case):
             raise HTTPException(status_code=403, detail="You don't have access to this document")
 
-        # Get the redactions
-        redactions = doc.get("redactions", [])
-        logger.info(f"Exporting document with {len(redactions)} redactions")
+        # One release rule for export and release (DOC-13): approved
+        # redactions are burned in, rejected ones ignored, anything still
+        # awaiting review blocks the export.
+        assert_not_conversion_failed(doc)
+        pdf_content = await load_document_pdf(doc, db)
+        if not pdf_content:
+            raise HTTPException(status_code=404, detail="Document content not found")
 
-        # If no redactions, return the original document with descriptive filename
-        if not redactions:
-            from datetime import datetime
-
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            original_name = doc["filename"].replace(".pdf", "")
-            doc_id_short = document_id[:8]
-            export_filename = f"{original_name}_NOREDACTIONS_{doc_id_short}_{timestamp}.pdf"
-
-            return Response(
-                content=doc["content"],
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f'attachment; filename="{_sanitize_filename(export_filename)}"'
+        # Page rotations let the rule hold back legacy boxes on rotated
+        # pages, whose coordinate space is unknown (C1).
+        rotations = page_rotations(await get_page_sizes(doc, db, pdf_content))
+        to_apply, unresolved = partition_redactions(doc.get("redactions", []), rotations)
+        if unresolved:
+            details = unresolved_summary(unresolved, rotations)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": unresolved_message(details, "exporting"),
+                    "unresolved_redactions": details,
                 },
             )
 
-        # Apply redactions to the PDF
-        from io import BytesIO
-
-        import fitz  # PyMuPDF
-
-        # Load the PDF
-        pdf_content = BytesIO(doc["content"])
-        pdf_document = fitz.open("pdf", pdf_content.read())
-
-        # Apply each redaction
-        for redaction in redactions:
-            # Apply all redactions except explicitly rejected ones
-            status = redaction.get("status", "pending")
-            if status != "rejected":
-                page_number = redaction.get("page", 1) - 1  # Convert to 0-based index
-                x1 = float(redaction.get("x", 0))
-                y1 = float(redaction.get("y", 0))
-                width = float(redaction.get("width", 100))
-                height = float(redaction.get("height", 20))
-                x2 = x1 + width
-                y2 = y1 + height
-
-                # Ensure page number is valid
-                if 0 <= page_number < len(pdf_document):
-                    page = pdf_document[page_number]
-
-                    # Add redaction annotation with black fill and text overlay
-                    rect = fitz.Rect(x1, y1, x2, y2)
-                    # Add the redaction with section code as overlay text
-                    section_code = redaction.get("reason", "REDACTED")
-                    page.add_redact_annot(
-                        rect, text=section_code, fill=(0, 0, 0), text_color=(1, 1, 1)
-                    )
-                    logger.info(
-                        f"Added redaction at page {page_number + 1}: ({x1}, {y1}, {x2}, {y2})"
-                    )
-
-        # Apply the redactions - this permanently removes the text under the boxes
-        for page in pdf_document:
-            page.apply_redactions()
-
-        # Save to BytesIO
-        output_pdf = BytesIO()
-        pdf_document.save(output_pdf, garbage=4, deflate=True)
-        pdf_document.close()
-        output_pdf.seek(0)
-
-        # Generate descriptive filename with document ID and timestamp
-        from datetime import datetime
+        # Same pipeline as the release package: validate, burn, sanitise,
+        # verify. CPU-bound, so off the event loop (DOC-09).
+        try:
+            redacted = await asyncio.to_thread(apply_redactions_to_pdf, pdf_content, to_apply)
+        except RedactionValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid redaction: {exc}") from exc
+        except PdfLimitExceeded as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except RedactionError as exc:
+            logger.error(f"Export of {document_id} failed redaction checks: {exc}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Document could not be safely redacted: {exc}",
+            ) from exc
 
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        original_name = doc["filename"].replace(".pdf", "")
-        doc_id_short = document_id[:8]  # First 8 chars of UUID
-        export_filename = f"{original_name}_REDACTED_{doc_id_short}_{timestamp}.pdf"
+        original_name = safe_basename(doc.get("filename")).rsplit(".", 1)[0]
+        marker = "REDACTED" if to_apply else "NOREDACTIONS"
+        export_filename = f"{original_name}_{marker}_{document_id[:8]}_{timestamp}.pdf"
 
-        # Return the redacted PDF
         return Response(
-            content=output_pdf.read(),
+            content=redacted,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f'attachment; filename="{_sanitize_filename(export_filename)}"'
+                "Content-Disposition": content_disposition(export_filename),
+                **NO_STORE_HEADERS,
             },
         )
 
@@ -448,7 +488,6 @@ ALLOWED_EXTENSIONS = [
     ".tif",
     ".webp",
 ]
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB — matches processing_service.py
 
 
 async def merge_attachments_into_existing_email(
@@ -633,20 +672,30 @@ async def upload_document(
     - Email thread consolidation
     - Attachment processing
     """
-    from .processing_service import DocumentProcessingService, ProcessingStatus, UploadContext
+    from .processing_service import (
+        DocumentProcessingService,
+        ProcessingStatus,
+        UploadContext,
+        read_verified_upload,
+    )
 
-    # If uploading into an existing case, enforce object-level access: the
-    # route role gate admits `user`, so a team-scoped user must not be able
-    # to inject a document into a case they are not a member of. A missing
-    # case doc is left to the processing service (preserves the historical
-    # behaviour where a document may carry a case_id with no case row yet).
-    if case_id:
+    # Object-level access. The route role gate admits `user`, so:
+    # - a team-scoped caller must name a case (AUTH-08: without one, dedup,
+    #   Message-ID merge and thread consolidation ran across every case), and
+    #   the case must exist and be one they can access;
+    # - global roles may still upload without a case, or with a case_id that
+    #   has no case row yet (historical behaviour).
+    if not has_global_access(current_user):
+        if not case_id:
+            raise HTTPException(status_code=400, detail="case_id is required")
+        assert_case_access(await db.cases.find_one({"id": case_id}), current_user)
+    elif case_id:
         case = await db.cases.find_one({"id": case_id})
         if case is not None:
             assert_case_access(case, current_user)
 
-    # Read file content
-    content = await file.read()
+    # Read file content (size-capped while streaming, type sniffed; DOC-11)
+    content = await read_verified_upload(file)
 
     # Use shared processing service
     service = DocumentProcessingService(db)
@@ -668,15 +717,31 @@ async def upload_document(
 
     # Handle result based on status
     if result.status == ProcessingStatus.DUPLICATE:
+        # Only name the existing document if the caller could open it;
+        # otherwise the dedup answer is a cross-case oracle (AUTH-08).
+        duplicate_of_id = result.duplicate_of_id
+        duplicate_of_filename = result.duplicate_of_filename
+        if duplicate_of_id and not has_global_access(current_user):
+            dup = await db.documents.find_one(
+                {"id": duplicate_of_id}, {"_id": 0, "case_id": 1, "shared_with": 1}
+            )
+            dup_case = (
+                await db.cases.find_one({"id": dup["case_id"]})
+                if dup and dup.get("case_id")
+                else None
+            )
+            if not dup or not check_document_access(dup, current_user, dup_case):
+                duplicate_of_id = None
+                duplicate_of_filename = None
         return {
             "message": "Duplicate document detected",
             "is_duplicate": True,
-            "duplicate_of_id": result.duplicate_of_id,
-            "duplicate_of_filename": result.duplicate_of_filename,
+            "duplicate_of_id": duplicate_of_id,
+            "duplicate_of_filename": duplicate_of_filename,
             "upload_date": None,  # Could fetch from DB if needed
         }
     elif result.status == ProcessingStatus.VALIDATION_FAILED:
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(status_code=result.http_status or 400, detail=result.message)
     elif result.status == ProcessingStatus.CONVERSION_FAILED:
         # Still return success but with warning
         logger.warning(f"Conversion failed for {file.filename}: {result.error}")
@@ -718,42 +783,34 @@ async def generate_ai_suggestions_async(
     db=None,  # Accept existing connection
 ):
     """
-    Background task to generate AI suggestions for a document.
+    Background task to generate AI suggestions for a document (upload-time,
+    only queued when the org's auto-generate setting is on).
 
-    Args:
-        document_id: Document ID
-        timeout: Timeout in seconds for AI generation
-        db: Existing database connection (optional)
+    Stored results record the provider/model that received the text
+    (LLM-16) and never contain raw exception or provider text (LLM-02).
     """
-    import asyncio
+    from src.config import llm_settings
+    from src.llm.safety import new_error_reference
+
+    from .redaction_suggestion_routes import _ANALYSIS_FIELDS, _NO_EGRESS_ERRORS
 
     try:
         logger.info(f"Starting AI suggestion generation for document {document_id}")
 
-        # Get database if not provided
         if db is None:
             from ..core.database import get_database
 
             db = get_database()
 
-        # Update status to show AI is processing
         await db.documents.update_one(
             {"id": document_id}, {"$set": {"processing_status": "ai_processing"}}
         )
-        logger.info(f"✓ Document {document_id} - Status: AI_PROCESSING (background task started)")
 
-        # Get document
         doc = await db.documents.find_one({"id": document_id})
         if not doc:
-            logger.error(
-                f"Document {document_id} not found for AI suggestion generation in database {db.name}"
-            )
-            # Try to list all documents to debug
-            all_docs = await db.documents.find({}).to_list(length=10)
-            logger.error(f"Available documents: {[d.get('id') for d in all_docs]}")
+            logger.error(f"Document {document_id} not found for AI suggestion generation")
             return
 
-        # Check if text has been extracted
         extracted_text = doc.get("extracted_text")
         if not extracted_text:
             text_data = doc.get("text_data")
@@ -764,47 +821,60 @@ async def generate_ai_suggestions_async(
             logger.warning(f"No text extracted for document {document_id}, skipping AI suggestions")
             return
 
-        # Get case context if available
+        # Data minimisation (LLM-17): no case title unless opted in.
         context = None
-        if doc.get("case_id"):
+        if llm_settings.send_case_context and doc.get("case_id"):
             case = await db.cases.find_one({"id": doc["case_id"]})
             if case:
                 context = f"Case: {case.get('title', 'Unknown')}. Type: FOI Request"
 
-        # Generate suggestions with timeout
         result = await asyncio.wait_for(
             get_redaction_suggestions(extracted_text, context), timeout=timeout
         )
 
+        if result.get("error_code") in _NO_EGRESS_ERRORS:
+            # Nothing was sent; do not cache, so a later view or regenerate
+            # can run once AI is available.
+            await db.documents.update_one(
+                {"id": document_id}, {"$set": {"processing_status": "ai_unavailable"}}
+            )
+            logger.info(
+                f"Document {document_id} - AI unavailable ({result.get('error_code')}), not cached"
+            )
+            return
+
         suggestions = result.get("suggestions", [])
 
-        # Enrich with coordinates
-        pdf_content = doc.get("content")
+        # Enrich with coordinates off the event loop (LLM-13).
+        pdf_content = await load_document_pdf(doc, db)
         text_data = doc.get("text_data")
         if pdf_content:
-            suggestions = enrich_suggestions_with_coordinates(suggestions, pdf_content, text_data)
-            result["suggestions"] = suggestions
+            suggestions = await asyncio.to_thread(
+                enrich_suggestions_with_coordinates, suggestions, pdf_content, text_data
+            )
 
-        # Cache the results
         cache_data = {
             "suggestions": suggestions,
             "summary": result.get("summary", ""),
-            "method": "openai_gpt4",
+            "method": "llm",
             "generated_at": datetime.utcnow(),
             "auto_generated": True,
+            **{k: result[k] for k in _ANALYSIS_FIELDS if k in result},
         }
+        status = "ai_error" if result.get("error") else "ai_complete"
 
         await db.documents.update_one(
             {"id": document_id},
-            {"$set": {"ai_suggestions": cache_data, "processing_status": "ai_complete"}},
+            {"$set": {"ai_suggestions": cache_data, "processing_status": status}},
         )
 
         logger.info(
-            f"✓ Document {document_id} - Status: AI_COMPLETE ({len(suggestions)} suggestions generated)"
+            f"Document {document_id} - Status: {status.upper()} "
+            f"({len(suggestions)} suggestions generated)"
         )
 
     except TimeoutError:
-        logger.error(f"✗ Document {document_id} - Status: AI_TIMEOUT (generation timed out)")
+        logger.error(f"Document {document_id} - Status: AI_TIMEOUT (generation timed out)")
         await db.documents.update_one(
             {"id": document_id},
             {
@@ -813,6 +883,7 @@ async def generate_ai_suggestions_async(
                         "suggestions": [],
                         "summary": "AI suggestion generation timed out",
                         "error": "timeout",
+                        "error_code": "timeout",
                         "generated_at": datetime.utcnow(),
                     },
                     "processing_status": "ai_timeout",
@@ -820,21 +891,43 @@ async def generate_ai_suggestions_async(
             },
         )
     except Exception as e:
-        logger.error(f"✗ Document {document_id} - Status: AI_ERROR - {str(e)}")
+        reference = new_error_reference()
+        logger.error(
+            f"Document {document_id} - Status: AI_ERROR (reference {reference}): "
+            f"{type(e).__name__}"
+        )
+        if db is None:
+            return
         await db.documents.update_one(
             {"id": document_id},
             {
                 "$set": {
                     "ai_suggestions": {
                         "suggestions": [],
-                        "summary": f"Error: {str(e)}",
-                        "error": str(e),
+                        "summary": f"AI suggestion generation failed (reference {reference}).",
+                        "error": "analysis_failed",
+                        "error_code": "analysis_failed",
+                        "reference": reference,
                         "generated_at": datetime.utcnow(),
                     },
                     "processing_status": "ai_error",
                 }
             },
         )
+
+
+async def _delete_gridfs_files(db, file_ids: list) -> None:
+    """Delete GridFS files through the request's own database handle (same
+    client, credentials and database name as the rest of the app)."""
+    from gridfs.errors import NoFile
+    from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+
+    bucket = AsyncIOMotorGridFSBucket(db)
+    for file_id in file_ids:
+        try:
+            await bucket.delete(file_id)
+        except NoFile:
+            logger.info(f"GridFS file {file_id} already absent")
 
 
 # DELETE DOCUMENT (New)
@@ -854,6 +947,25 @@ async def delete_document(request: Request, document_id: str, db=Depends(get_db)
         raise HTTPException(status_code=404, detail="Document not found")
 
     case_id = doc.get("case_id")
+
+    # Remove stored content first (the PDF and the native original, for the
+    # document and every attachment). If that fails the records are kept so
+    # the delete can be retried, rather than orphaning readable files (DOC-15).
+    attachments = await db.documents.find(
+        {"parent_document_id": document_id},
+        {"_id": 0, "id": 1, "content_file_id": 1, "original_file_id": 1},
+    ).to_list(length=None)
+    gridfs_ids = [
+        file_id
+        for record in [doc, *attachments]
+        for file_id in (record.get("content_file_id"), record.get("original_file_id"))
+        if file_id is not None
+    ]
+    try:
+        await _delete_gridfs_files(db, gridfs_ids)
+    except Exception:
+        logger.exception(f"Could not delete stored content for document {document_id}")
+        raise HTTPException(status_code=500, detail="Failed to delete stored document content")
 
     # Delete all attachments associated with this document
     attachment_delete_result = await db.documents.delete_many({"parent_document_id": document_id})
@@ -898,23 +1010,6 @@ async def delete_document(request: Request, document_id: str, db=Depends(get_db)
     if case_id:
         await db.cases.update_one({"id": case_id}, {"$pull": {"document_ids": document_id}})
         logger.info(f"Removed document {document_id} from case {case_id}")
-
-    # Clean up GridFS originals if they exist
-    try:
-        if "original_file_id" in doc:
-            # Get the synchronous database for GridFS
-            from pymongo import MongoClient
-
-            mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb:27017")
-            sync_client = MongoClient(mongo_uri)
-            sync_db = sync_client["blackbar"]
-            fs = gridfs.GridFS(sync_db)
-
-            fs.delete(doc["original_file_id"])
-            logger.info(f"Deleted GridFS original for document {document_id}")
-            sync_client.close()
-    except Exception as gridfs_error:
-        logger.warning(f"Could not delete GridFS original: {gridfs_error}")
 
     return {
         "message": "Document deleted successfully",

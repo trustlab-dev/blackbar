@@ -47,6 +47,7 @@ function Harness() {
   return (
     <Routes>
       <Route path="/upload/:token" element={<PublicUploadPortal />} />
+      <Route path="/upload" element={<PublicUploadPortal />} />
     </Routes>
   );
 }
@@ -196,7 +197,7 @@ describe('PublicUploadPortal — file selection and removal', () => {
     renderWithProviders(<Harness />, { route: '/upload/tok' });
     await screen.findByText('My Case');
 
-    const file = new File(['a'], 'a.txt', { type: 'text/plain' });
+    const file = new File(['a'], 'a.pdf', { type: 'application/pdf' });
     const input = document.getElementById('file-input') as HTMLInputElement;
     Object.defineProperty(input, 'files', {
       value: [file],
@@ -204,7 +205,7 @@ describe('PublicUploadPortal — file selection and removal', () => {
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
 
-    expect(await screen.findByText('a.txt')).toBeInTheDocument();
+    expect(await screen.findByText('a.pdf')).toBeInTheDocument();
     expect(screen.getByText(/files to upload \(1\)/i)).toBeInTheDocument();
   });
 
@@ -221,7 +222,7 @@ describe('PublicUploadPortal — file selection and removal', () => {
     await screen.findByText('My Case');
 
     const dropZone = document.querySelector('.drop-zone') as HTMLElement;
-    const file = new File(['a'], 'dropped.txt');
+    const file = new File(['a'], 'dropped.pdf');
 
     // dragover then drop
     const dragOver = new Event('dragover', { bubbles: true, cancelable: true });
@@ -242,7 +243,7 @@ describe('PublicUploadPortal — file selection and removal', () => {
     });
     dropZone.dispatchEvent(drop);
 
-    expect(await screen.findByText('dropped.txt')).toBeInTheDocument();
+    expect(await screen.findByText('dropped.pdf')).toBeInTheDocument();
   });
 
   it('removes a pending file via the remove button', async () => {
@@ -259,16 +260,16 @@ describe('PublicUploadPortal — file selection and removal', () => {
     await screen.findByText('My Case');
 
     const input = document.getElementById('file-input') as HTMLInputElement;
-    const file = new File(['a'], 'remove-me.txt');
+    const file = new File(['a'], 'remove-me.pdf');
     Object.defineProperty(input, 'files', {
       value: [file],
       configurable: true,
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await screen.findByText('remove-me.txt');
+    await screen.findByText('remove-me.pdf');
 
     await user.click(screen.getByRole('button', { name: '✕' }));
-    expect(screen.queryByText('remove-me.txt')).not.toBeInTheDocument();
+    expect(screen.queryByText('remove-me.pdf')).not.toBeInTheDocument();
   });
 
   it('clicking the drop zone forwards click to the hidden file input', async () => {
@@ -340,11 +341,11 @@ describe('PublicUploadPortal — submission validation', () => {
     // Add a file (so the files-length guard passes when we reach it)
     const input = document.getElementById('file-input') as HTMLInputElement;
     Object.defineProperty(input, 'files', {
-      value: [new File(['a'], 'a.txt')],
+      value: [new File(['a'], 'a.pdf')],
       configurable: true,
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await screen.findByText('a.txt');
+    await screen.findByText('a.pdf');
 
     // Bypass disabled-state by dispatching submit directly without filling
     // name/email fields. fireEvent dispatches the synthetic submit that
@@ -391,14 +392,14 @@ describe('PublicUploadPortal — upload flow', () => {
     const input = document.getElementById('file-input') as HTMLInputElement;
     Object.defineProperty(input, 'files', {
       value: [
-        new File(['a'], 'a.txt'),
-        new File(['b'], 'b.txt'),
+        new File(['a'], 'a.pdf'),
+        new File(['b'], 'b.pdf'),
       ],
       configurable: true,
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await screen.findByText('a.txt');
-    await screen.findByText('b.txt');
+    await screen.findByText('a.pdf');
+    await screen.findByText('b.pdf');
 
     await user.click(screen.getByRole('button', { name: /upload 2 files/i }));
 
@@ -428,11 +429,11 @@ describe('PublicUploadPortal — upload flow', () => {
     await user.type(screen.getByPlaceholderText(/john@example\.com/i), 'a@b.com');
     const input = document.getElementById('file-input') as HTMLInputElement;
     Object.defineProperty(input, 'files', {
-      value: [new File(['a'], 'a.txt')],
+      value: [new File(['a'], 'a.pdf')],
       configurable: true,
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await screen.findByText('a.txt');
+    await screen.findByText('a.pdf');
 
     await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
     await waitFor(() =>
@@ -461,11 +462,11 @@ describe('PublicUploadPortal — upload flow', () => {
     await user.type(screen.getByPlaceholderText(/john@example\.com/i), 'a@b.com');
     const input = document.getElementById('file-input') as HTMLInputElement;
     Object.defineProperty(input, 'files', {
-      value: [new File(['a'], 'a.txt')],
+      value: [new File(['a'], 'a.pdf')],
       configurable: true,
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await screen.findByText('a.txt');
+    await screen.findByText('a.pdf');
 
     await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
     await waitFor(() =>
@@ -499,11 +500,11 @@ describe('PublicUploadPortal — upload flow', () => {
     await user.type(screen.getByPlaceholderText(/john@example\.com/i), 'a@b.com');
     const input = document.getElementById('file-input') as HTMLInputElement;
     Object.defineProperty(input, 'files', {
-      value: [new File(['a'], 'a.txt')],
+      value: [new File(['a'], 'a.pdf')],
       configurable: true,
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    await screen.findByText('a.txt');
+    await screen.findByText('a.pdf');
 
     await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
     await screen.findByText(/upload complete/i);
@@ -528,7 +529,7 @@ describe('PublicUploadPortal — file size formatting', () => {
     await screen.findByText('My Case');
     const input = document.getElementById('file-input') as HTMLInputElement;
     // File with no content — size 0
-    const empty = new File([], 'empty.txt');
+    const empty = new File([], 'empty.pdf');
     Object.defineProperty(input, 'files', {
       value: [empty],
       configurable: true,
@@ -549,13 +550,119 @@ describe('PublicUploadPortal — file size formatting', () => {
     renderWithProviders(<Harness />, { route: '/upload/tok' });
     await screen.findByText('My Case');
     const input = document.getElementById('file-input') as HTMLInputElement;
-    const kb = new File([new Uint8Array(2048)], 'two-kb.bin');
+    const kb = new File([new Uint8Array(2048)], 'two-kb.pdf');
     Object.defineProperty(input, 'files', {
       value: [kb],
       configurable: true,
     });
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    expect(await screen.findByText(/two-kb\.bin/)).toBeInTheDocument();
+    expect(await screen.findByText(/two-kb\.pdf/)).toBeInTheDocument();
     expect(screen.getByText(/2 KB/i)).toBeInTheDocument();
   });
+});
+
+describe('PublicUploadPortal — client-side upload checks', () => {
+  it('keeps valid files and reports rejected ones', async () => {
+    server.use(
+      http.get(`${API_BASE}/cases/collect/tok`, () =>
+        HttpResponse.json(makeCollectionInfo()),
+      ),
+      http.get(`${API_BASE}/admin/config/public`, () =>
+        HttpResponse.json({}),
+      ),
+    );
+    renderWithProviders(<Harness />, { route: '/upload/tok' });
+    await screen.findByText('My Case');
+
+    const input = document.getElementById('file-input') as HTMLInputElement;
+    expect(input.accept).toContain('.pdf');
+    const ok = new File(['a'], 'ok.pdf', { type: 'application/pdf' });
+    const bad = new File(['<svg/>'], 'logo.svg', { type: 'image/svg+xml' });
+    Object.defineProperty(input, 'files', { value: [ok, bad], configurable: true });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(await screen.findByText('ok.pdf')).toBeInTheDocument();
+    expect(screen.getByText(/files to upload \(1\)/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/logo\.svg" is not a supported file type/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('PublicUploadPortal — collection token leaves the address bar', () => {
+  it('strips the token from the URL and stashes it for a refresh', async () => {
+    const replace = vi.spyOn(window.history, 'replaceState');
+    server.use(
+      http.get(`${API_BASE}/cases/collect/tok`, () =>
+        HttpResponse.json(makeCollectionInfo()),
+      ),
+      http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+    );
+    renderWithProviders(<Harness />, { route: '/upload/tok' });
+    await screen.findByText('My Case');
+    expect(replace).toHaveBeenCalledWith(window.history.state, '', '/collect');
+    expect(sessionStorage.getItem('blackbar.capability.collect')).toBe('tok');
+  });
+
+  it('loads the collection from the stash after a refresh on /collect', async () => {
+    sessionStorage.setItem('blackbar.capability.collect', 'tok');
+    server.use(
+      http.get(`${API_BASE}/cases/collect/tok`, () =>
+        HttpResponse.json(makeCollectionInfo()),
+      ),
+      http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+    );
+    renderWithProviders(<Harness />, { route: '/upload' });
+    expect(await screen.findByText('My Case')).toBeInTheDocument();
+  });
+
+  it('explains a missing link instead of loading forever', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+    );
+    renderWithProviders(<Harness />, { route: '/upload' });
+    expect(await screen.findByText(/link not available/i)).toBeInTheDocument();
+    expect(screen.getByText(/open the upload link/i)).toBeInTheDocument();
+  });
+});
+
+describe('PublicUploadPortal — files the browser cannot type', () => {
+  it.each(['', 'application/octet-stream'])(
+    'sends a .msg reported as %j with the Outlook MIME type',
+    async (type) => {
+      // jsdom's FormData stringifies Node's File (see setupTests), so read
+      // the part the component appends rather than the parsed request body.
+      const append = vi.spyOn(FormData.prototype, 'append');
+      let uploaded = false;
+      server.use(
+        http.get(`${API_BASE}/cases/collect/tok`, () =>
+          HttpResponse.json(makeCollectionInfo()),
+        ),
+        http.get(`${API_BASE}/admin/config/public`, () => HttpResponse.json({})),
+        http.post(`${API_BASE}/cases/collect/tok/upload`, () => {
+          uploaded = true;
+          return HttpResponse.json({ ok: true });
+        }),
+      );
+      const user = userEvent.setup();
+      renderWithProviders(<Harness />, { route: '/upload/tok' });
+      await screen.findByText('My Case');
+      await user.type(screen.getByPlaceholderText(/john doe/i), 'Tester');
+      await user.type(screen.getByPlaceholderText(/john@example\.com/i), 't@x.com');
+
+      const input = document.getElementById('file-input') as HTMLInputElement;
+      Object.defineProperty(input, 'files', {
+        value: [new File(['msg'], 'mail.msg', { type })],
+        configurable: true,
+      });
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await screen.findByText('mail.msg');
+      await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
+
+      await waitFor(() => expect(uploaded).toBe(true));
+      const part = append.mock.calls.find(([name]) => name === 'file')?.[1] as File;
+      expect(part.name).toBe('mail.msg');
+      expect(part.type).toBe('application/vnd.ms-outlook');
+    },
+  );
 });

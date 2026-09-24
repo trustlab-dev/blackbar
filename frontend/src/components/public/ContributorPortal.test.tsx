@@ -50,6 +50,7 @@ function Harness() {
         path="/contribute/:contributorId"
         element={<ContributorPortal />}
       />
+      <Route path="/contribute" element={<ContributorPortal />} />
     </Routes>
   );
 }
@@ -262,7 +263,7 @@ describe('ContributorPortal — upload flow', () => {
                 : [
                     {
                       id: 'doc-new',
-                      filename: 'test.txt',
+                      filename: 'test.pdf',
                       uploaded_at: '2026-05-13T10:00:00Z',
                     },
                   ],
@@ -278,7 +279,7 @@ describe('ContributorPortal — upload flow', () => {
     renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
     await screen.findByText(/select files to upload/i);
 
-    const file = new File(['hi'], 'test.txt', { type: 'text/plain' });
+    const file = new File(['hi'], 'test.pdf', { type: 'application/pdf' });
     const input = document.getElementById('file-upload') as HTMLInputElement;
     Object.defineProperty(input, 'files', { value: [file], configurable: true });
     input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -288,7 +289,7 @@ describe('ContributorPortal — upload flow', () => {
         screen.getByText(/successfully uploaded 1 file/i),
       ).toBeInTheDocument(),
     );
-    expect(await screen.findByText('test.txt')).toBeInTheDocument();
+    expect(await screen.findByText('test.pdf')).toBeInTheDocument();
   });
 
   it('does nothing when the input change has no files', async () => {
@@ -567,5 +568,119 @@ describe('ContributorPortal — alert dismissal', () => {
     expect(
       screen.queryByText(/failed to confirm submission/i),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe('ContributorPortal — client-side upload checks', () => {
+  it('uses the backend allow-list for the file input', async () => {
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () =>
+        HttpResponse.json(makeInfoResponse()),
+      ),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/select files to upload/i);
+    const input = document.getElementById('file-upload') as HTMLInputElement;
+    expect(input.accept).toContain('.pdf');
+    expect(input.accept).not.toContain('*/*');
+  });
+
+  it('rejects disallowed and oversized files without uploading them', async () => {
+    let uploads = 0;
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () =>
+        HttpResponse.json(makeInfoResponse()),
+      ),
+      http.post(`${API_BASE}/contribute/c-1/upload`, () => {
+        uploads += 1;
+        return HttpResponse.json({ id: 'doc-new' });
+      }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/select files to upload/i);
+
+    const exe = new File(['x'], 'payload.exe', { type: 'application/x-msdownload' });
+    const big = new File(['x'], 'huge.pdf', { type: 'application/pdf' });
+    Object.defineProperty(big, 'size', { value: 101 * 1024 * 1024 });
+    const input = document.getElementById('file-upload') as HTMLInputElement;
+    Object.defineProperty(input, 'files', { value: [exe, big], configurable: true });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(
+      await screen.findByText(/payload\.exe" is not a supported file type/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/huge\.pdf" is too large/i)).toBeInTheDocument();
+    expect(uploads).toBe(0);
+  });
+});
+
+describe('ContributorPortal — link credentials leave the address bar', () => {
+  it('strips the id and token from the URL and stashes them for a refresh', async () => {
+    const replace = vi.spyOn(window.history, 'replaceState');
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () => HttpResponse.json(makeInfoResponse())),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/records upload portal/i);
+    expect(replace).toHaveBeenCalledWith(window.history.state, '', '/contribute');
+    expect(sessionStorage.getItem('blackbar.capability.contributor')).toBe(
+      JSON.stringify({ id: 'c-1', token: 'tok' }),
+    );
+  });
+
+  it('loads from the stash after a refresh on /contribute', async () => {
+    sessionStorage.setItem(
+      'blackbar.capability.contributor',
+      JSON.stringify({ id: 'c-1', token: 'tok' }),
+    );
+    let sentToken: string | null = null;
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, ({ request }) => {
+        sentToken = new URL(request.url).searchParams.get('token');
+        return HttpResponse.json(makeInfoResponse());
+      }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute' });
+    expect(await screen.findByText(/records upload portal/i)).toBeInTheDocument();
+    expect(sentToken).toBe('tok');
+  });
+
+  it("does not pair one contributor's id with another's stashed token", async () => {
+    sessionStorage.setItem(
+      'blackbar.capability.contributor',
+      JSON.stringify({ id: 'c-other', token: 'tok-other' }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1' });
+    expect(await screen.findByText(/invalid or missing access token/i)).toBeInTheDocument();
+  });
+});
+
+describe('ContributorPortal — files the browser cannot type', () => {
+  it('sends a .msg with an empty type as application/vnd.ms-outlook', async () => {
+    // jsdom's FormData stringifies Node's File (see setupTests), so read the
+    // part the component appends rather than the parsed request body.
+    const append = vi.spyOn(FormData.prototype, 'append');
+    let uploads = 0;
+    server.use(
+      http.get(`${API_BASE}/contribute/c-1`, () => HttpResponse.json(makeInfoResponse())),
+      http.post(`${API_BASE}/contribute/c-1/upload`, () => {
+        uploads += 1;
+        return HttpResponse.json({ id: 'doc-new' });
+      }),
+    );
+    renderWithProviders(<Harness />, { route: '/contribute/c-1?token=tok' });
+    await screen.findByText(/select files to upload/i);
+
+    const input = document.getElementById('file-upload') as HTMLInputElement;
+    Object.defineProperty(input, 'files', {
+      value: [new File(['m'], 'mail.msg', { type: '' })],
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await waitFor(() => expect(uploads).toBe(1));
+    const part = append.mock.calls.find(([name]) => name === 'file')?.[1] as File;
+    expect(part.name).toBe('mail.msg');
+    expect(part.type).toBe('application/vnd.ms-outlook');
   });
 });

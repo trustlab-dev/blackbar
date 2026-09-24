@@ -145,7 +145,7 @@ class TestLLMConfigCreate:
         cfg = LLMConfigCreate(
             name="Anthropic",
             api_endpoint="https://api.anthropic.com/v1/messages",
-            model_name="claude-3-5-sonnet-20241022",
+            model_name="claude-sonnet-5",
             request_format=RequestFormat.ANTHROPIC,
             api_key="sk-ant-1234",
             headers={"X-Custom": "value"},

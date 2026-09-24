@@ -23,12 +23,19 @@ export default defineConfig({
       '/api': {
         target: 'http://backend:8000',
         changeOrigin: true,
+        // Append the client address to X-Forwarded-For. The backend trusts
+        // the compose subnet (TRUSTED_PROXIES), so dev and demo rate limits
+        // key by client instead of by this proxy.
+        xfwd: true,
       },
     },
   },
   build: {
     outDir: 'build', // match CRA's output dir so Dockerfile doesn't need changes
-    sourcemap: true,
+    // No source maps in the production bundle: nginx would serve them
+    // publicly next to the JS. If Sentry symbolication is wanted later,
+    // switch to 'hidden' and upload + delete the maps in CI.
+    sourcemap: false,
   },
   test: {
     globals: true,

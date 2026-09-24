@@ -4,6 +4,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from '../test-utils/msw-handlers';
 import { AuthProvider, useAuth } from './AuthContext';
 import type { ReactNode } from 'react';
+import * as telemetry from '../utils/telemetry';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -346,6 +347,7 @@ describe('AuthProvider — logout', () => {
       ),
     );
 
+    const clearUserSpy = vi.spyOn(telemetry, 'clearUser');
     const { result } = renderHook(() => useAuth(), { wrapper });
     await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
 
@@ -353,6 +355,8 @@ describe('AuthProvider — logout', () => {
       result.current.logout();
     });
 
+    // The Sentry scope must not keep the previous user after logout.
+    expect(clearUserSpy).toHaveBeenCalled();
     expect(result.current.user).toBeNull();
     expect(result.current.token).toBeNull();
     expect(result.current.roles).toEqual([]);
@@ -365,6 +369,87 @@ describe('AuthProvider — logout', () => {
       expect(localStorage.getItem(k)).toBeNull();
     });
     expect(localStorage.getItem('preserve-me')).toBe('1');
+  });
+});
+
+describe('AuthProvider — logout revokes the session server-side', () => {
+  const meOk = () =>
+    server.use(
+      http.get('/api/v1/auth/me', () =>
+        HttpResponse.json({
+          id: 'user-1',
+          email: 'a@b.com',
+          name: 'Alice',
+          status: 'active',
+          roles: ['admin'],
+        }),
+      ),
+    );
+
+  it('POSTs /auth/logout with the current token, then clears state', async () => {
+    const token = makeJwt(3600);
+    localStorage.setItem('token', token);
+    meOk();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+
+    act(() => {
+      result.current.logout();
+    });
+
+    const logoutCalls = fetchSpy.mock.calls.filter(([u]) => String(u).endsWith('/auth/logout'));
+    expect(logoutCalls).toHaveLength(1);
+    expect(logoutCalls[0][1]).toMatchObject({
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(result.current.isAuthenticated).toBe(false);
+    expect(localStorage.getItem('token')).toBeNull();
+  });
+
+  it('still clears local state when the revoke call fails', async () => {
+    localStorage.setItem('token', makeJwt(3600));
+    meOk();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'));
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+
+    act(() => {
+      result.current.logout();
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(result.current.token).toBeNull();
+    expect(localStorage.getItem('token')).toBeNull();
+  });
+
+  it('does not call the staff logout route for a public (magic-link) session', async () => {
+    localStorage.setItem('token', makeJwt(3600));
+    localStorage.setItem('user_type', 'public');
+    meOk();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isAuthenticated).toBe(true));
+    act(() => {
+      result.current.logout();
+    });
+    expect(fetchSpy.mock.calls.some(([u]) => String(u).endsWith('/auth/logout'))).toBe(false);
+  });
+
+  it('does not call the server when an expired token is cleaned up on load', async () => {
+    localStorage.setItem('token', makeJwt(-60));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(localStorage.getItem('token')).toBeNull());
+    expect(fetchSpy.mock.calls.some(([u]) => String(u).endsWith('/auth/logout'))).toBe(false);
   });
 });
 

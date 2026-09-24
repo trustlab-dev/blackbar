@@ -11,7 +11,7 @@ which is mounted at `/api/v1/documents`):
 
     POST   /{document_id}/redactions/propose
     GET    /{document_id}/redactions/proposed
-    PUT    /{document_id}/redactions/{redaction_index}/approve
+    PUT    /{document_id}/redactions/{redaction_ref}/approve   (stable id; legacy index)
     GET    /{document_id}/redactions
     POST   /{document_id}/redactions
     PUT    /{document_id}/redactions/{redaction_id}        (status query param)
@@ -33,9 +33,9 @@ string id. Source registers /approve first which makes it win when the
 index is numeric. We test both.
 
 Findings pinned (candidates for audit Section 11):
-- The `add_redaction` endpoint (POST /{document_id}/redactions) accepts
-  a *raw `dict`* request body with no Pydantic validation. Any shape
-  goes in (including empty `{}`). Pinned.
+- The `add_redaction` endpoint (POST /{document_id}/redactions) takes a
+  raw `dict` body, but its geometry is validated against the document's
+  pages (422 otherwise; DOC-02/07, see test_redaction_workflow_safety.py).
 - The `update_redaction_status` endpoint (PUT
   /{document_id}/redactions/{redaction_id}) uses `redactions._id`
   in its mongo filter — but the source's `add_redaction` writes the
@@ -53,7 +53,6 @@ Findings pinned (candidates for audit Section 11):
 from __future__ import annotations
 
 import asyncio
-import uuid
 from datetime import datetime
 from typing import Any
 
@@ -122,6 +121,11 @@ async def _seed_case_with_team_member(
 
 async def _seed_document(db: AsyncIOMotorDatabase, case_id: str, **doc_overrides: Any) -> str:
     """Seed a document row referencing `case_id`. Returns document id."""
+    # Redaction writes are validated against the document's pages. Seeded
+    # documents carry cached page geometry (100 pages of 1200x2100 pt) so
+    # the coordinate tests below fit; the geometry rules themselves are
+    # covered in test_redaction_workflow_safety.py.
+    doc_overrides.setdefault("page_dims", [[1200.0, 2100.0, 0]] * 100)
     doc = make_document(case_id=case_id, **doc_overrides)
     await db.documents.insert_one(doc)
     return doc["id"]
@@ -386,7 +390,7 @@ class TestApproveOrRejectProposed:
                     "y": 2,
                     "width": 10,
                     "height": 5,
-                    "id": str(uuid.uuid4()),
+                    "id": "proposed-1",
                 }
             ],
         )
@@ -402,7 +406,7 @@ class TestApproveOrRejectProposed:
             db, "analyst", "ap1@example.com", authed_client_factory
         )
         r = await client.put(
-            f"/api/v1/documents/{doc_id}/redactions/0/approve",
+            f"/api/v1/documents/{doc_id}/redactions/proposed-1/approve",
             json={"action": "approve", "notes": "Looks good"},
         )
         assert r.status_code == 200, r.text
@@ -425,7 +429,7 @@ class TestApproveOrRejectProposed:
             db, "analyst", "rj1@example.com", authed_client_factory
         )
         r = await client.put(
-            f"/api/v1/documents/{doc_id}/redactions/0/approve",
+            f"/api/v1/documents/{doc_id}/redactions/proposed-1/approve",
             json={"action": "reject", "notes": "Not needed"},
         )
         assert r.status_code == 200
@@ -450,7 +454,7 @@ class TestApproveOrRejectProposed:
             db, "analyst", "iv@example.com", authed_client_factory
         )
         r = await client.put(
-            f"/api/v1/documents/{doc_id}/redactions/0/approve",
+            f"/api/v1/documents/{doc_id}/redactions/proposed-1/approve",
             json={"action": "maybe"},
         )
         assert r.status_code == 400
@@ -482,7 +486,7 @@ class TestApproveOrRejectProposed:
             redactions=[{"type": "proposed", "status": "proposed", "page": 1, "id": "x"}],
         )
         r = await client.put(
-            f"/api/v1/documents/{doc_id}/redactions/0/approve",
+            f"/api/v1/documents/{doc_id}/redactions/proposed-1/approve",
             json={"action": "approve"},
         )
         assert r.status_code == 404
@@ -500,7 +504,7 @@ class TestApproveOrRejectProposed:
             db, "legal", "lg@example.com", authed_client_factory
         )
         r = await client.put(
-            f"/api/v1/documents/{doc_id}/redactions/0/approve",
+            f"/api/v1/documents/{doc_id}/redactions/proposed-1/approve",
             json={"action": "approve"},
         )
         assert r.status_code == 403
@@ -522,7 +526,7 @@ class TestApproveOrRejectProposed:
             redactions=[{"type": "proposed", "status": "proposed", "page": 1, "id": "x"}],
         )
         r = await client.put(
-            f"/api/v1/documents/{doc_id}/redactions/0/approve",
+            f"/api/v1/documents/{doc_id}/redactions/proposed-1/approve",
             json={"action": "approve"},
         )
         assert r.status_code == 403
@@ -556,10 +560,21 @@ class TestApproveOrRejectProposed:
         doc_id = await _seed_document(
             db,
             case_id,
-            redactions=[{"type": "professional", "page": 1, "id": "x", "status": "approved"}],
+            redactions=[
+                {
+                    "type": "professional",
+                    "page": 1,
+                    "x": 1,
+                    "y": 2,
+                    "width": 10,
+                    "height": 5,
+                    "id": "x",
+                    "status": "approved",
+                }
+            ],
         )
         r = await client.put(
-            f"/api/v1/documents/{doc_id}/redactions/0/approve",
+            f"/api/v1/documents/{doc_id}/redactions/x/approve",
             json={"action": "approve"},
         )
         assert r.status_code == 400
@@ -774,29 +789,92 @@ class TestAddRedaction:
         assert len(doc["redactions"]) == 1
         red = doc["redactions"][0]
         assert red["created_by_role"] == "admin"
-        assert red["status"] == "pending"
+        assert red["status"] == "approved"  # analyst/admin boxes apply immediately
         # Case audit log gained an entry
         case = await db.cases.find_one({"id": case_id})
         assert any(e.get("action") == "redaction_created" for e in case["audit_log"])
 
-    async def test_add_redaction_preserves_provided_id(
+    async def test_add_redaction_ignores_client_supplied_id(
         self,
         db: AsyncIOMotorDatabase,
         authed_client_factory,
         patch_routes_db,
     ) -> None:
-        """If the body includes `id`, the endpoint keeps it (pin: no
-        UUID regeneration when present)."""
+        """AUTH-07: the id is always server-generated. A caller-chosen id
+        could collide with an existing redaction so a later delete would
+        remove both."""
         client = await authed_client_factory(role="admin")
         case_id = await _seed_case_with_team_member(db, "x", "analyst")
-        doc_id = await _seed_document(db, case_id)
-        my_id = "my-custom-id-123"
+        doc_id = await _seed_document(db, case_id, redactions=[{"id": "taken", "page": 1}])
         r = await client.post(
             f"/api/v1/documents/{doc_id}/redactions",
-            json={"id": my_id, "page": 1, "x": 1, "y": 1, "width": 1, "height": 1},
+            json={"id": "taken", "page": 1, "x": 1, "y": 1, "width": 1, "height": 1},
         )
         assert r.status_code == 200
-        assert r.json()["id"] == my_id
+        assert r.json()["id"] != "taken"
+        doc = await db.documents.find_one({"id": doc_id})
+        assert [red["id"] for red in doc["redactions"]].count("taken") == 1
+
+    async def test_add_redaction_drops_server_controlled_fields(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """AUTH-07: the body is no longer pushed verbatim (mass assignment)."""
+        client = await authed_client_factory(role="user", email="mass@example.com")
+        me = await db.users.find_one({"email": "mass@example.com"})
+        case_id = await _seed_case_with_team_member(db, me["id"], "analyst")
+        doc_id = await _seed_document(db, case_id)
+        r = await client.post(
+            f"/api/v1/documents/{doc_id}/redactions",
+            json={
+                "page": 1,
+                "x": 1,
+                "y": 1,
+                "width": 1,
+                "height": 1,
+                "category": "S22",
+                "description": "why",
+                "approval_status": "approved",
+                "is_contested": True,
+                "source": "ai",
+                "created_by": "someone-else",
+                "status": "accepted",
+            },
+        )
+        assert r.status_code == 200, r.text
+        red = (await db.documents.find_one({"id": doc_id}))["redactions"][0]
+        assert red["category"] == "S22"
+        assert red["description"] == "why"
+        assert red["created_by"] == me["id"]
+        assert red["status"] == "approved"  # analyst/admin boxes apply immediately
+        for field in ("approval_status", "is_contested"):
+            assert field not in red
+        assert red["source"] == "manual"  # server-set; client "ai" ignored
+
+    @pytest.mark.parametrize("case_id", [None, "ghost-case"])
+    async def test_add_redaction_user_on_caseless_document_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        case_id,
+    ) -> None:
+        """AUTH-07: a document with no (or a deleted) case used to skip the
+        access check entirely (fail open)."""
+        client = await authed_client_factory(role="user")
+        doc = make_document()
+        doc["case_id"] = case_id
+        await db.documents.insert_one(doc)
+        r = await client.post(
+            f"/api/v1/documents/{doc['id']}/redactions",
+            json={"page": 1, "x": 1, "y": 1, "width": 1, "height": 1},
+        )
+        assert r.status_code == 403
+        assert "redactions" not in (await db.documents.find_one({"id": doc["id"]})) or not (
+            await db.documents.find_one({"id": doc["id"]})
+        ).get("redactions")
 
     async def test_add_redaction_user_on_team_can_add(
         self,
@@ -955,10 +1033,11 @@ class TestUpdateRedactionStatus:
             f"/api/v1/documents/{doc_id}/redactions/{rid}?status=accepted",
         )
         assert r.status_code == 200, r.text
-        assert "accepted" in r.json()["message"]
+        # "accepted" is stored as "approved", the one status the release
+        # rule applies (DOC-13).
+        assert "approved" in r.json()["message"]
         doc = await db.documents.find_one({"id": doc_id})
-        # Status persisted
-        assert doc["redactions"][0]["status"] == "accepted"
+        assert doc["redactions"][0]["status"] == "approved"
 
     async def test_update_status_to_rejected(
         self,
@@ -1037,7 +1116,14 @@ class TestUpdateRedactionStatus:
         # 1. POST a new redaction via the standard handler
         post_r = await client.post(
             f"/api/v1/documents/{doc_id}/redactions",
-            json={"page": 1, "category": "personal"},
+            json={
+                "page": 1,
+                "x": 10,
+                "y": 10,
+                "width": 50,
+                "height": 12,
+                "category": "personal",
+            },
         )
         assert post_r.status_code == 200, post_r.text
         new_id = post_r.json()["id"]
@@ -1048,7 +1134,7 @@ class TestUpdateRedactionStatus:
 
         doc = await db.documents.find_one({"id": doc_id})
         assert doc["redactions"][0]["id"] == new_id
-        assert doc["redactions"][0]["status"] == "accepted"
+        assert doc["redactions"][0]["status"] == "approved"
 
 
 # ---------------------------------------------------------------------------
@@ -1396,6 +1482,24 @@ class TestDeleteRedaction:
         assert r.status_code == 404
         assert "Redaction not found" in r.text
 
+    @pytest.mark.parametrize("case_id", [None, "ghost-case"])
+    async def test_delete_user_on_caseless_document_forbidden(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        case_id,
+    ) -> None:
+        """AUTH-07: deleting redactions on a case-less document must not fail
+        open (it leads to unredacted output via /export)."""
+        client = await authed_client_factory(role="user")
+        doc = make_document(redactions=[{"id": "r1", "page": 1}])
+        doc["case_id"] = case_id
+        await db.documents.insert_one(doc)
+        r = await client.delete(f"/api/v1/documents/{doc['id']}/redactions/r1")
+        assert r.status_code == 403
+        assert len((await db.documents.find_one({"id": doc["id"]}))["redactions"]) == 1
+
     async def test_delete_no_case_skips_audit(
         self,
         db: AsyncIOMotorDatabase,
@@ -1615,9 +1719,10 @@ async def test_approval_state_machine_propose_then_approve(
     assert doc["redactions"][0]["type"] == "proposed"
     assert doc["redactions"][0]["approval_status"] == "pending"
 
-    # Approve (same user, who has analyst case role -> can approve)
+    # Approve by stable id (same user, who has analyst case role)
+    rid = doc["redactions"][0]["id"]
     r2 = await client.put(
-        f"/api/v1/documents/{doc_id}/redactions/0/approve",
+        f"/api/v1/documents/{doc_id}/redactions/{rid}/approve",
         json={"action": "approve", "notes": "ok"},
     )
     assert r2.status_code == 200

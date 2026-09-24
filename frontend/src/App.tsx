@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Route, Routes, Link, Navigate, useNavigate, useParams } from 'react-router-dom';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
+import { BrowserRouter as Router, Route, Routes, Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Box, CircularProgress, MenuItem, IconButton, Avatar, Divider } from '@mui/material';
 import Menu from '@mui/material/Menu';
 import LogoutIcon from '@mui/icons-material/Logout';
@@ -27,6 +27,8 @@ import Login from './components/Login';
 import SharedDocuments from './components/SharedDocuments';
 import ProtectedRoute from './components/ProtectedRoute';
 import ContributorPortal from './components/public/ContributorPortal';
+import { publicApi } from './api/client';
+import { syncReplayWithRoute } from './utils/telemetry';
 
 const DocumentViewerWrapper: React.FC = () => {
   const { documentId } = useParams();
@@ -36,7 +38,7 @@ const DocumentViewerWrapper: React.FC = () => {
 
 const Header: React.FC = () => {
   const { currentRole } = useUser();
-  const { user, roles } = useAuth();
+  const { user, roles, logout } = useAuth();
   const [orgName, setOrgName] = useState('BlackBar');
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const open = Boolean(anchorEl);
@@ -54,6 +56,9 @@ const Header: React.FC = () => {
   };
 
   const handleLogout = () => {
+    // Revokes the token server-side (fire-and-forget) and clears auth state
+    // and the telemetry user.
+    logout();
     localStorage.clear();
     window.location.href = '/login';
   };
@@ -62,13 +67,10 @@ const Header: React.FC = () => {
   useEffect(() => {
     const fetchBranding = async () => {
       try {
-        const response = await fetch('/api/v1/admin/config/public');
-        if (response.ok) {
-          const data = await response.json();
-          setOrgName(data.org_name || 'Freedom of Information Office');
-          if (data.primary_color) {
-            document.documentElement.style.setProperty('--primary-color', data.primary_color);
-          }
+        const { data } = await publicApi.get('/admin/config/public');
+        setOrgName(data.org_name || 'Freedom of Information Office');
+        if (data.primary_color) {
+          document.documentElement.style.setProperty('--primary-color', data.primary_color);
         }
       } catch (error) {
         console.error('Error fetching branding:', error);
@@ -206,6 +208,15 @@ const ConfigLoadingGate: React.FC = () => (
 const AppContent = () => {
   const { currentRole } = useUser();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+
+  // Session Replay must not record public or capability-token pages. A layout
+  // effect runs in the same commit as the new route's DOM, before rrweb's
+  // mutation observer delivers it.
+  useLayoutEffect(() => {
+    syncReplayWithRoute(pathname);
+  }, [pathname]);
+
   // Phase 4 Batch 4.4 (audit F7): the prior default of
   // `enable_public_requests: true` caused the root `/` and `/request`
   // routes to redirect through the magic-link portal on first render
@@ -225,8 +236,7 @@ const AppContent = () => {
   useEffect(() => {
     const fetchPublicConfig = async () => {
       try {
-        const response = await fetch('/api/v1/admin/config/public');
-        const data = await response.json();
+        const { data } = await publicApi.get('/admin/config/public');
         setPublicConfig({
           enable_public_requests: data.enable_public_requests,
           enable_request_tracking: data.enable_request_tracking,
@@ -241,10 +251,20 @@ const AppContent = () => {
     fetchPublicConfig();
   }, []);
 
-  // Check if user is authenticated
+  // A magic-link (public portal) session also keeps its JWT under `token`,
+  // but the backend refuses it on every staff endpoint (403
+  // PUBLIC_TOKEN_FORBIDDEN). Staff routes must not render for it, or every
+  // page would load into a wall of 403s.
+  const isPublicSession = () => localStorage.getItem('user_type') === 'public';
+
+  // Check if a staff user is authenticated
   const isAuthenticated = () => {
-    return localStorage.getItem('token') !== null;
+    return localStorage.getItem('token') !== null && !isPublicSession();
   };
+
+  // Where an unauthenticated visitor to a staff route goes: requesters back
+  // to their own dashboard, everyone else to the staff login.
+  const staffLoginPath = isPublicSession() ? '/public/dashboard' : '/login';
 
   // Handler for successful login
   const handleLoginSuccess = () => {
@@ -283,24 +303,33 @@ const AppContent = () => {
           )
         } />
 
-        <Route path="/track/:trackingNumber" element={
-          publicConfig.enable_request_tracking ? (
-            <PublicTrackingPage />
-          ) : (
-            <FeatureDisabled featureName="Request Tracking" />
-          )
-        } />
+        {/* Capability-token routes. Each page reads its token, stashes it
+            where a refresh can find it, and strips it from the address bar
+            (utils/capabilityUrl.ts), so each also has a token-less route. */}
+        <Route path="/public/verify" element={<PublicVerifyPage />} />
+        {['/track/:trackingNumber', '/track'].map((path) => (
+          <Route key={path} path={path} element={
+            publicConfig.enable_request_tracking ? (
+              <PublicTrackingPage />
+            ) : (
+              <FeatureDisabled featureName="Request Tracking" />
+            )
+          } />
+        ))}
 
-        <Route path="/collect/:token" element={
-          publicConfig.enable_public_upload ? (
-            <PublicUploadPortal />
-          ) : (
-            <FeatureDisabled featureName="Public Upload" />
-          )
-        } />
+        {['/collect/:token', '/collect'].map((path) => (
+          <Route key={path} path={path} element={
+            publicConfig.enable_public_upload ? (
+              <PublicUploadPortal />
+            ) : (
+              <FeatureDisabled featureName="Public Upload" />
+            )
+          } />
+        ))}
 
         {/* Contributor Portal (token-based, no auth) */}
         <Route path="/contribute/:contributorId" element={<ContributorPortal />} />
+        <Route path="/contribute" element={<ContributorPortal />} />
 
         {/* Root path - redirect based on auth status */}
         {/* Phase 4 Batch 4.4 (audit F7): wait for the public-config
@@ -326,7 +355,7 @@ const AppContent = () => {
               <SharedDocuments />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         {/* Protected Routes - require authentication */}
@@ -337,7 +366,7 @@ const AppContent = () => {
               <CaseQueue />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         {/* Priority Queue Route */}
@@ -348,7 +377,7 @@ const AppContent = () => {
               <PriorityQueue currentUserId={localStorage.getItem('userId') || undefined} />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/cases/new" element={
@@ -358,7 +387,7 @@ const AppContent = () => {
               <CaseForm />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/cases/:caseId" element={
@@ -368,7 +397,7 @@ const AppContent = () => {
               <CaseDetailView />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/cases/:caseId/documents" element={
@@ -378,23 +407,27 @@ const AppContent = () => {
               <CaseDocuments />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
         <Route path="/documents/:documentId" element={
           isAuthenticated() ? (
             <DocumentViewerWrapper />
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
 
         {/* Admin Routes - Protected with role checks */}
         <Route path="/admin" element={
-          <ProtectedRoute isAuthenticated={isAuthenticated()} requiredRoles={['owner', 'admin']}>
-            <Header />
-            <AdminConsole />
-          </ProtectedRoute>
+          isPublicSession() ? (
+            <Navigate to={staffLoginPath} replace />
+          ) : (
+            <ProtectedRoute isAuthenticated={isAuthenticated()} requiredRoles={['owner', 'admin']}>
+              <Header />
+              <AdminConsole />
+            </ProtectedRoute>
+          )
         } />
 
         {/* Help Route */}
@@ -405,7 +438,7 @@ const AppContent = () => {
               <HelpGuide />
             </>
           ) : (
-            <Navigate to="/login" replace />
+            <Navigate to={staffLoginPath} replace />
           )
         } />
       </Routes>

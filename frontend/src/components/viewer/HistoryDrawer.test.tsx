@@ -154,11 +154,11 @@ describe('HistoryDrawer', () => {
     );
   });
 
-  it('shows error from response detail on 500', async () => {
+  it('shows the backend error message on a 4xx', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     server.use(
       http.get(URL, () =>
-        HttpResponse.json({ detail: 'Server boom' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'Server boom' } }, { status: 400 }),
       ),
     );
     renderWithProviders(

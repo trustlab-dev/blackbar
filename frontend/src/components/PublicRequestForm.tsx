@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import api from '../api/client';
+import { publicApi as api } from '../api/client';
 import './PublicRequestForm.css';
+import { getApiErrorMessage } from '../api/errors';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -117,7 +118,7 @@ const PublicRequestForm: React.FC = () => {
       setTrackingNumber(response.data.tracking_number);
       setSubmitted(true);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to submit request. Please try again.');
+      setError(getApiErrorMessage(err, 'Failed to submit request. Please try again.'));
     } finally {
       setSubmitting(false);
     }

@@ -1,66 +1,80 @@
 import logging
 
-import jwt
 from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import OAuth2PasswordBearer
-from jwt import InvalidTokenError as JWTError
 
-from src.config import ALGORITHM, JWT_SECRET
+from src.auth.auth_service import AuthService
 from src.database import users
 
 logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
 
+# Fields the principal lookup needs. Never includes password or token hashes.
+_PRINCIPAL_PROJECTION = {
+    "_id": 0,
+    "id": 1,
+    "email": 1,
+    "role": 1,
+    "status": 1,
+    "token_version": 1,
+}
 
-async def get_current_user(request: Request, token: str = Security(oauth2_scheme)):
+
+async def get_current_user(request: Request, token: str | None = Security(oauth2_scheme)):
+    """Resolve the internal (staff) principal for this request.
+
+    The token only identifies the user; authorization data comes from the
+    database on every request (AUTH-14):
+
+    - public (magic-link) principals are refused with 403 (AUTH-03);
+    - unknown, deleted, disabled or pending users get 401;
+    - a token whose `tv` claim no longer matches `users.token_version`
+      (bumped by logout, password change, disable, role change) gets 401;
+    - the role is the DB role, not the token's role claim.
+
+    The result is cached on ``request.state`` so several dependencies in one
+    request cost a single lookup.
     """
-    Extracts user info from JWT token.
-    Checks request.state first (set by AuthMiddleware).
-    """
-    # Check if AuthMiddleware already validated the token
-    if hasattr(request.state, "user_id") and request.state.user_id:
-        # Get user from database
-        user = await users.find_one({"id": request.state.user_id})
-        if user:
-            role = request.state.roles[0] if request.state.roles else user.get("role", "user")
-            return {
-                "id": user.get("id"),
-                "username": user.get("email"),
-                "email": user.get("email"),
-                "role": role,
-            }
+    cached = getattr(request.state, "current_user", None)
+    if cached is not None:
+        return cached
 
-    # Fall back to token validation
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = getattr(request.state, "user_id", None)
+    realm = getattr(request.state, "realm", None)
+    token_version = getattr(request.state, "token_version", 0)
 
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+    if not user_id:
+        # AuthMiddleware did not run for this path; validate the token here.
+        if not token:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        payload = AuthService.validate_token(token)
+        if payload is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id, realm, token_version = payload.sub, payload.realm, payload.tv
 
-        # New token format: sub = user_id, role = string
-        user_id = payload.get("sub")
-        if user_id:
-            user = await users.find_one({"id": user_id})
-            if not user:
-                raise HTTPException(status_code=401, detail="User not found")
+    if realm == "public":
+        raise HTTPException(status_code=403, detail="Public accounts cannot access this endpoint")
 
-            role = payload.get("role", "user")
-            # Support legacy tokens with roles list
-            if not role and "roles" in payload:
-                roles = payload.get("roles", [])
-                role = roles[0] if roles else "user"
+    user = await users.find_one({"id": user_id}, _PRINCIPAL_PROJECTION)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
 
-            return {
-                "id": user.get("id"),
-                "username": user.get("email"),
-                "email": user.get("email"),
-                "role": role,
-            }
+    if user.get("status", "active") != "active":
+        logger.warning(f"Refused token for inactive user {user_id} ({user.get('status')})")
+        raise HTTPException(status_code=401, detail="Account is not active")
 
-        raise HTTPException(status_code=401, detail="Invalid token")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    if int(user.get("token_version") or 0) != int(token_version or 0):
+        raise HTTPException(status_code=401, detail="Session has been revoked")
+
+    principal = {
+        "id": user.get("id"),
+        "username": user.get("email"),
+        "email": user.get("email"),
+        "role": user.get("role") or "user",
+    }
+    request.state.current_user = principal
+    return principal
 
 
 def check_role(required_roles: list):

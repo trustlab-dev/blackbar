@@ -1,82 +1,70 @@
 """
-API Key Encryption Utilities
+API key encryption for stored LLM provider credentials.
+
+The key comes only from ``LLM_API_KEY_ENCRYPTION_KEY`` (LLM-19). There is no
+fallback key and no ``.env`` parsing: without a valid key, encrypting or
+decrypting fails closed. ``src.config`` validates the key at startup and
+refuses to start in production without one.
+
+Rotation: set ``LLM_API_KEY_ENCRYPTION_KEY`` to a comma-separated list
+``new,old``. New values are encrypted with the first key; any listed key
+decrypts (MultiFernet). Re-save each LLM config (or re-enter its key) to
+move it to the new key, then drop the old one.
 """
 
 import logging
 import os
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 logger = logging.getLogger(__name__)
 
+ENV_VAR = "LLM_API_KEY_ENCRYPTION_KEY"
+
+
+class EncryptionKeyError(ValueError):
+    """The encryption key is missing, malformed, or does not match the data."""
+
+
+def get_encryption_keys() -> list[bytes]:
+    """Return the configured Fernet keys (first one encrypts)."""
+    raw = os.getenv(ENV_VAR) or ""
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if not keys:
+        raise EncryptionKeyError(
+            f"{ENV_VAR} not set. Generate one with: "
+            'python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"'
+        )
+    return [k.encode() for k in keys]
+
 
 def get_encryption_key() -> bytes:
-    """
-    Get encryption key from environment variable.
-    If not set, raise an error (production requirement).
-    """
-    key_str = os.getenv("LLM_API_KEY_ENCRYPTION_KEY")
+    """The primary (encrypting) key."""
+    return get_encryption_keys()[0]
 
-    if not key_str:
-        # Try to read from .env file directly (fallback)
-        env_path = "/app/.env"
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    if line.startswith("LLM_API_KEY_ENCRYPTION_KEY="):
-                        key_str = line.split("=", 1)[1].strip()
-                        logger.info("Loaded encryption key from .env file")
-                        break
 
-    if not key_str:
-        raise ValueError(
-            "LLM_API_KEY_ENCRYPTION_KEY not set. "
-            'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
-        )
-
-    return key_str.encode()
+def _cipher() -> MultiFernet:
+    try:
+        return MultiFernet([Fernet(k) for k in get_encryption_keys()])
+    except (ValueError, TypeError) as exc:
+        if isinstance(exc, EncryptionKeyError):
+            raise
+        raise EncryptionKeyError(f"{ENV_VAR} is not a valid Fernet key") from None
 
 
 def encrypt_api_key(api_key: str) -> str:
-    """
-    Encrypt an API key for storage.
-
-    Args:
-        api_key: Plain text API key
-
-    Returns:
-        Encrypted API key as string
-    """
-    cipher = Fernet(get_encryption_key())
-    encrypted = cipher.encrypt(api_key.encode())
-    return encrypted.decode()
+    """Encrypt an API key for storage."""
+    return _cipher().encrypt(api_key.encode()).decode()
 
 
 def decrypt_api_key(encrypted_key: str) -> str:
-    """
-    Decrypt an API key for use.
-
-    Args:
-        encrypted_key: Encrypted API key string
-
-    Returns:
-        Plain text API key
-    """
-    cipher = Fernet(get_encryption_key())
-    decrypted = cipher.decrypt(encrypted_key.encode())
-    return decrypted.decode()
-
-
-def test_encryption():
-    """Test encryption/decryption"""
-    test_key = "sk-test-1234567890"
-    encrypted = encrypt_api_key(test_key)
-    decrypted = decrypt_api_key(encrypted)
-    assert decrypted == test_key, "Encryption test failed"
-    logger.info("Encryption test passed")
-
-
-if __name__ == "__main__":
-    # Run test
-    logging.basicConfig(level=logging.INFO)
-    test_encryption()
+    """Decrypt a stored API key. Raises EncryptionKeyError when no configured
+    key can decrypt it (for example after an incomplete key rotation)."""
+    try:
+        return _cipher().decrypt(encrypted_key.encode()).decode()
+    except InvalidToken:
+        raise EncryptionKeyError(
+            f"Stored LLM API key cannot be decrypted with {ENV_VAR}; "
+            "re-enter the API key for this configuration."
+        ) from None
