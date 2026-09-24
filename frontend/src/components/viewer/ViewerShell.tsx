@@ -50,13 +50,17 @@ import {
   RedactionReviewAction,
 } from '../../api/redactionApi';
 import {
-  effectiveRedactionStatus,
+  describeUnresolved,
   EffectiveRedactionStatus,
+  formatUnresolvedList,
+  statusFromServerReview,
+  unresolvedReasonLabel,
+  UnresolvedRedaction,
+  unresolvedRedactionsFromError,
 } from '../../utils/redactionStatus';
 import BlockingRedactionsBanner, {
   BlockingRedaction,
   LEGACY_NO_ID_HINT,
-  reviewHint,
 } from './BlockingRedactionsBanner';
 import PDFViewerWithSelection from './PDFViewerWithSelection';
 import LeftToolRail from './LeftToolRail';
@@ -111,6 +115,36 @@ interface Redaction {
   // Export/release rule applied to the stored record: only 'approved' is
   // burned in; 'unresolved' blocks export (see utils/redactionStatus.ts).
   effectiveStatus?: EffectiveRedactionStatus;
+  // Why an unresolved record blocks, from the metadata `review_required`
+  // (or the client rule when the response has no server list).
+  review?: UnresolvedRedaction;
+}
+
+/**
+ * Status of a record the add endpoint just stored: the response gives its
+ * status; the box is the one we sent, in the viewer's displayed space (the
+ * server stamps coord_space/page_rotation itself).
+ */
+function statusOfNewRecord(
+  record: { id?: string; page: number; x: number; y: number; width: number; height: number },
+  status: string | undefined,
+): Pick<Redaction, 'effectiveStatus' | 'review'> {
+  const type = status === 'proposed' ? 'proposed' : 'professional';
+  return statusFromServerReview({ ...record, status, type }, false);
+}
+
+/** Last resort for an unresolved record without a review reason. */
+function reviewOf(r: Redaction): UnresolvedRedaction {
+  return (
+    r.review ??
+    describeUnresolved(r) ?? {
+      id: r.id ?? null,
+      page: r.page,
+      status: r.status ?? null,
+      reason: 'unknown_status',
+      approvable: true,
+    }
+  );
 }
 
 type SnackSeverity = 'error' | 'warning' | 'info' | 'success';
@@ -232,6 +266,9 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       // Redactions are stored in the document metadata
       const response = await api.get(`/documents/${documentId}/metadata`);
       if (response.data.redactions) {
+        // The server lists every blocking record (unresolved_redactions) and
+        // tags each with review_required; prefer that to the client rule.
+        const hasServerList = Array.isArray(response.data.unresolved_redactions);
         // Map backend format to frontend format, keeping all metadata including ID
         const mappedRedactions = response.data.redactions.map((r: any) => ({
           id: r.id, // Important: keep the ID for deletion
@@ -252,7 +289,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           createdAt: r.created_at,
           type: r.type,
           status: r.status,
-          effectiveStatus: effectiveRedactionStatus(r),
+          ...statusFromServerReview(r, hasServerList),
         }));
         setRedactions(mappedRedactions);
       }
@@ -501,7 +538,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           ...local,
           id: result.id,
           status: result.status,
-          effectiveStatus: effectiveRedactionStatus({ status: result.status }),
+          ...statusOfNewRecord({ ...local, id: result.id }, result.status),
           // The add response is {message, id, status}; the server records a
           // proposed box as type "proposed" and an approved one as professional.
           type: result.status === 'proposed' ? 'proposed' : 'professional',
@@ -585,7 +622,10 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
         height: suggestion.coordinates.height,
         page: suggestion.page,
         category: suggestion.category || suggestion.section || 'S22',
-        description: suggestion.reason || ''
+        description: suggestion.reason || '',
+        // The backend checks that the burned box removes this text
+        // (backend/src/utils/pdf_redaction.py verification).
+        ...(suggestion.text ? { text: suggestion.text } : {}),
       };
 
       const response = await api.post(`/documents/${documentId}/redactions`, redactionData);
@@ -610,7 +650,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
         createdAt: backendRedaction.created_at || new Date().toISOString(),
         // Rendered from the response: approved for analysts, proposed otherwise.
         status: backendRedaction.status,
-        effectiveStatus: effectiveRedactionStatus({ status: backendRedaction.status }),
+        ...statusOfNewRecord({ ...redactionData, id: backendRedaction.id }, backendRedaction.status),
         type: backendRedaction.status === 'proposed' ? 'proposed' : 'professional'
       };
 
@@ -730,7 +770,9 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       const redactionData = {
         x, y, width, height, page,
         category: suggestion.category || 'S22',
-        description: suggestion.reason || ''
+        description: suggestion.reason || '',
+        // Checked against the page after burning (see handleAcceptSuggestion).
+        ...(suggestion.text ? { text: suggestion.text } : {}),
       };
 
       try {
@@ -758,7 +800,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           createdByRole: backendRedaction.created_by_role || 'admin',
           createdAt: backendRedaction.created_at || new Date().toISOString(),
           status: backendRedaction.status,
-          effectiveStatus: effectiveRedactionStatus({ status: backendRedaction.status }),
+          ...statusOfNewRecord({ ...redactionData, id: backendRedaction.id }, backendRedaction.status),
           type: backendRedaction.status === 'proposed' ? 'proposed' : 'professional'
         };
 
@@ -806,6 +848,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
               status,
               type: action === 'approve' ? 'professional' : r.type,
               effectiveStatus: status,
+              review: undefined,
             }
           : r
       ));
@@ -822,6 +865,33 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       } else {
         notify(getApiErrorMessage(error, `Failed to ${action} the redaction.`));
       }
+    } finally {
+      setReviewBusyId(null);
+    }
+  };
+
+  // Delete a blocking redaction whose fix is to delete and re-add it (no
+  // usable geometry, legacy coordinates on a rotated page).
+  const handleDeleteBlockingRedaction = async (target: BlockingRedaction) => {
+    if (!target.id) {
+      notify(LEGACY_NO_ID_HINT, 'warning');
+      return;
+    }
+    const redactionId = target.id;
+    setReviewBusyId(redactionId);
+    try {
+      await api.delete(`/documents/${documentId}/redactions/${redactionId}`);
+      // Selection is an index into the list: keep it on the same record.
+      const deletedIndex = redactions.findIndex(r => r.id === redactionId);
+      if (selectedRedactionIndex !== null && deletedIndex >= 0) {
+        if (selectedRedactionIndex === deletedIndex) handleDeselectRedaction();
+        else if (selectedRedactionIndex > deletedIndex) setSelectedRedactionIndex(selectedRedactionIndex - 1);
+      }
+      setRedactions(prev => prev.filter(r => r.id !== redactionId));
+      notify('Redaction deleted. Add it again if the text still needs redacting.', 'success');
+    } catch (error) {
+      console.error('Failed to delete redaction:', error);
+      notify(getApiErrorMessage(error, 'Failed to delete redaction.'));
     } finally {
       setReviewBusyId(null);
     }
@@ -850,8 +920,19 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
       URL.revokeObjectURL(url);
     } catch (error: any) {
       console.error('Export failed:', error);
+      const blocking = unresolvedRedactionsFromError(error);
       if (error?.response?.status === 409) setReviewListOpen(true);
-      notify(getApiErrorMessage(error, 'Export failed. Please try again.'));
+      if (blocking.length > 0) {
+        // The 409 lists each blocking redaction (routes.py export handler):
+        // show them, and reload so the review list matches the server.
+        notify(
+          `Export blocked by ${blocking.length} redaction${blocking.length !== 1 ? 's' : ''} awaiting review. ` +
+            `${formatUnresolvedList(blocking).join('; ')}.`,
+        );
+        void fetchRedactions();
+      } else {
+        notify(getApiErrorMessage(error, 'Export failed. Please try again.'));
+      }
     } finally {
       setExporting(false);
     }
@@ -1175,11 +1256,13 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           type: r.type,
           categoryName: r.reason?.categoryName,
           notes: r.reason?.notes,
+          review: reviewOf(r),
         }))}
         expanded={reviewListOpen}
         onToggle={() => setReviewListOpen(open => !open)}
         onApprove={(r) => handleReviewRedaction(r, 'approve')}
         onReject={(r) => handleReviewRedaction(r, 'reject')}
+        onDelete={handleDeleteBlockingRedaction}
         onGoTo={handleGoToRedaction}
         busyId={reviewBusyId}
       />
@@ -1427,6 +1510,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
                         {redaction.effectiveStatus === 'unresolved' && (
                           <Typography variant="caption" sx={{ color: 'var(--text-secondary)' }}>
                             Awaiting review: blocks export and release.
+                            {' '}{unresolvedReasonLabel(String(reviewOf(redaction).reason))}.
                           </Typography>
                         )}
                         {redaction.effectiveStatus === 'rejected' && (
@@ -1439,7 +1523,7 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
 
                     {/* Approve/reject a proposal */}
                     {redaction?.id && redaction.effectiveStatus === 'unresolved' && !isEditingRedaction &&
-                      reviewHint({ id: redaction.id, page: redaction.page, status: redaction.status, type: redaction.type }) === null && (
+                      reviewOf(redaction).approvable && (
                       <Box sx={{ display: 'flex', gap: 1 }}>
                         <Button
                           fullWidth

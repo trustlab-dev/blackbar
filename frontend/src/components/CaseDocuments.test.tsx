@@ -724,16 +724,37 @@ describe('CaseDocuments — redaction/release readiness', () => {
     expect(option('withheld').disabled).toBe(false);
   });
 
+  // A usable box (the status rule checks geometry before status).
+  const box = { page: 1, x: 10, y: 10, width: 50, height: 20 };
+
   it('counts redactions that block export/release', async () => {
     listDocs([
       {
         ...baseDoc,
         redactions: [
-          { id: 'r1', status: 'approved' },
-          { id: 'r2', status: 'proposed' },
-          { id: 'r3', status: 'contested' },
-          { id: 'r4', status: 'rejected' },
-          { id: 'r5', status: 'pending', created_by_role: 'admin' },
+          { ...box, id: 'r1', status: 'approved' },
+          { ...box, id: 'r2', status: 'proposed' },
+          { ...box, id: 'r3', status: 'contested' },
+          { ...box, id: 'r4', status: 'rejected' },
+          { ...box, id: 'r5', status: 'pending', created_by_role: 'admin' },
+        ],
+      },
+    ]);
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('report.pdf');
+    expect(screen.getByText(/2 redactions awaiting review/i)).toBeInTheDocument();
+  });
+
+  it('counts boxes without geometry and legacy boxes on rotated pages as awaiting review', async () => {
+    listDocs([
+      {
+        ...baseDoc,
+        page_dims: [[612, 792, 0], [792, 612, 90]],
+        redactions: [
+          { ...box, id: 'r1', status: 'approved' },
+          { id: 'r2', page: 1, status: 'approved' },
+          { ...box, id: 'r3', page: 2, status: 'approved' },
+          { ...box, id: 'r4', page: 2, status: 'approved', coord_space: 'displayed', page_rotation: 90 },
         ],
       },
     ]);

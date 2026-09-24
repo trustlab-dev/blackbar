@@ -21,7 +21,12 @@ import UploadFileIcon from '@mui/icons-material/UploadFile';
 import './CaseDocuments.css';
 import { getApiErrorMessage } from '../api/errors';
 import { getUploadWarnings, partitionUploadFiles, UPLOAD_ACCEPT } from '../utils/uploadValidation';
-import { getBlockingRedactions, isConversionFailed, RedactionStatusFields } from '../utils/redactionStatus';
+import {
+  getBlockingRedactions,
+  isConversionFailed,
+  pageRotationsFromDims,
+  RedactionStatusFields,
+} from '../utils/redactionStatus';
 
 // API_BASE_URL not needed - api client already has baseURL configured
 
@@ -52,6 +57,8 @@ interface Document {
   conversion_failed?: boolean;
   conversion_error?: string;
   redactions?: RedactionStatusFields[];
+  // [[w, h, rotation], ...] cached by the backend (redaction_store.py).
+  page_dims?: unknown;
 }
 
 interface Attachment {
@@ -927,7 +934,9 @@ const CaseDocuments: React.FC = () => {
                         )}
                         {(() => {
                           const conversionFailed = isConversionFailed(doc);
-                          const blocking = conversionFailed ? 0 : getBlockingRedactions(doc.redactions).length;
+                          const blocking = conversionFailed
+                            ? 0
+                            : getBlockingRedactions(doc.redactions, pageRotationsFromDims(doc.page_dims)).length;
                           if (!conversionFailed && blocking === 0) return null;
                           return (
                             <div className="doc-badges">

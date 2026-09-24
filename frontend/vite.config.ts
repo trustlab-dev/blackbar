@@ -23,6 +23,10 @@ export default defineConfig({
       '/api': {
         target: 'http://backend:8000',
         changeOrigin: true,
+        // Append the client address to X-Forwarded-For. The backend trusts
+        // the compose subnet (TRUSTED_PROXIES), so dev and demo rate limits
+        // key by client instead of by this proxy.
+        xfwd: true,
       },
     },
   },

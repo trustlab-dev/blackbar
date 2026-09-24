@@ -539,6 +539,7 @@ describe('ViewerShell', () => {
     await waitFor(() => expect(postBody).not.toBeNull());
     expect(postBody.x).toBe(10);
     expect(postBody.y).toBe(10);
+    expect(postBody.text).toBe('hello world');
   });
 
   it('thumbnails rail can be toggled off (default on)', async () => {
@@ -805,6 +806,12 @@ describe('ViewerShell', () => {
       coordinates: { x: 10, y: 10, width: 50, height: 20 },
     });
     await waitFor(() => expect(postBody).not.toBeNull());
+    // The backend checks the burned box removes this text (pdf_redaction.py).
+    expect(postBody.text).toBe('name');
+    expect(postBody).toMatchObject({ x: 10, y: 10, width: 50, height: 20, page: 1 });
+    // coord_space / page_rotation are stamped by the server, never sent.
+    expect(postBody).not.toHaveProperty('coord_space');
+    expect(postBody).not.toHaveProperty('page_rotation');
   });
 
   it('handleAcceptSuggestion ignores suggestion without coordinates', async () => {
@@ -1146,6 +1153,121 @@ describe('ViewerShell — redaction review and export', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^review$/i }));
     expect(screen.getByText(/resolve the contest/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^approve$/i })).toBeNull();
+  });
+
+  describe('server review list (metadata unresolved_redactions)', () => {
+    const noGeometry = {
+      id: 'r-geo', page: 2, status: 'approved', type: 'professional', category: 'S22',
+      description: 'bulk',
+    };
+    const reviewNoGeometry = {
+      id: 'r-geo', page: 2, status: 'approved', reason: 'no_geometry',
+      message: 'Redaction has no usable position on the page and cannot be approved.',
+      approvable: false,
+    };
+    const rotated = { ...approved, id: 'r-rot', page: 1 };
+    const reviewRotated = {
+      id: 'r-rot', page: 1, status: 'approved', reason: 'legacy_rotated_coordinates',
+      message: 'Created by an older version of BlackBar on a rotated page...', approvable: true,
+    };
+
+    function withServerReview(redactions: any[], unresolved: any[]) {
+      server.use(
+        http.get(META_URL, () =>
+          HttpResponse.json({ ...metaResponse(), redactions, unresolved_redactions: unresolved }),
+        ),
+      );
+    }
+
+    it('offers Delete, not Approve, for a redaction with no usable geometry and shows why', async () => {
+      let deleted = '';
+      withServerReview([{ ...noGeometry, review_required: reviewNoGeometry }, approved], [reviewNoGeometry]);
+      server.use(
+        http.delete(REDACT_DEL_URL, ({ params }) => {
+          deleted = String(params.rid);
+          return HttpResponse.json({ message: 'Redaction deleted' });
+        }),
+      );
+      renderWithProviders(<ViewerShell documentId="doc-1" />);
+      expect(await screen.findByText(/1 redaction awaiting review/i)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /^review$/i }));
+      expect(screen.getByText(/no usable geometry: delete and re-add/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^approve$/i })).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: /^delete$/i }));
+      await waitFor(() => expect(deleted).toBe('r-geo'));
+      await waitFor(() => expect(screen.queryByText(/awaiting review/i)).toBeNull());
+    });
+
+    it('blocks an approved legacy box on a rotated page and offers Approve and Delete', async () => {
+      let putBody: any = null;
+      withServerReview([{ ...rotated, review_required: reviewRotated }], [reviewRotated]);
+      server.use(
+        http.put(APPROVE_URL, async ({ request }) => {
+          putBody = await request.json();
+          return HttpResponse.json({ success: true, message: 'Proposed redaction approved', redaction_id: 'r-rot' });
+        }),
+      );
+      renderWithProviders(<ViewerShell documentId="doc-1" />);
+      expect(await screen.findByText(/1 redaction awaiting review/i)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /^review$/i }));
+      expect(screen.getByText(/legacy coordinates on a rotated page/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /^approve$/i }));
+      await waitFor(() => expect(putBody).toEqual({ action: 'approve' }));
+      await waitFor(() => expect(screen.queryByText(/awaiting review/i)).toBeNull());
+    });
+
+    it('prefers the server list over the client rule', async () => {
+      // The client rule would call a status-less record unresolved; the
+      // server did not list it, so it does not block.
+      withServerReview([{ ...approved, id: 'r-x', status: undefined }], []);
+      renderWithProviders(<ViewerShell documentId="doc-1" />);
+      await waitFor(() => expect(mockPdfViewerProps.current?.redactions?.length).toBe(1));
+      expect(screen.queryByText(/awaiting review/i)).toBeNull();
+    });
+
+    it('falls back to the client rule (no_geometry) without a server list', async () => {
+      withRedactions([{ ...noGeometry, x: undefined }]);
+      renderWithProviders(<ViewerShell documentId="doc-1" />);
+      await userEvent.click(await screen.findByRole('button', { name: /^review$/i }));
+      expect(screen.getByText(/no usable geometry: delete and re-add/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^approve$/i })).toBeNull();
+    });
+  });
+
+  it('export 409 lists each blocking redaction with its page and reason', async () => {
+    let metaCalls = 0;
+    server.use(
+      http.get(META_URL, () => {
+        metaCalls += 1;
+        return HttpResponse.json({ ...metaResponse(), redactions: [approved] });
+      }),
+      http.get(EXPORT_URL, () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'HTTP_409',
+              message: '1 redaction(s) are awaiting review and block exporting: r-ok (page 2): no_geometry.',
+              details: {
+                unresolved_redactions: [
+                  { id: 'r-ok', page: 2, status: 'approved', reason: 'no_geometry', message: 'm', approvable: false },
+                ],
+              },
+            },
+          },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    const before = metaCalls;
+    await userEvent.click(screen.getByRole('button', { name: /export redacted pdf/i }));
+    expect(
+      await screen.findByText(/Page 2: No usable geometry: delete and re-add/i),
+    ).toBeInTheDocument();
+    // The redactions are reloaded so the review list shows the server's view.
+    await waitFor(() => expect(metaCalls).toBeGreaterThan(before));
   });
 
   it('export 409 shows the backend message', async () => {

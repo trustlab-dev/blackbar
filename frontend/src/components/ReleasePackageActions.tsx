@@ -30,7 +30,13 @@ import CloseIcon from '@mui/icons-material/Close';
 import DescriptionIcon from '@mui/icons-material/Description';
 import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
 import { getApiErrorMessage } from '../api/errors';
-import { getBlockingRedactions, isConversionFailed } from '../utils/redactionStatus';
+import {
+  formatUnresolvedList,
+  getBlockingRedactions,
+  isConversionFailed,
+  pageRotationsFromDims,
+  parseUnresolvedList,
+} from '../utils/redactionStatus';
 
 // Types matching backend models
 interface IncludedDocument {
@@ -47,6 +53,9 @@ interface PackageDocumentIssue {
   document_id?: string | null;
   filename?: string | null;
   reason: string;
+  // Each redaction that blocked the document: id, page, status, reason
+  // code, message, approvable (redaction_records.py describe_unresolved).
+  unresolved_redactions?: unknown[] | null;
 }
 
 interface ReleasePackageResponse {
@@ -86,19 +95,48 @@ interface Document {
   status: string;
   conversion_failed?: boolean;
   redactions?: any[];
+  // [[w, h, rotation], ...] cached by the backend (redaction_store.py).
+  page_dims?: unknown;
 }
 
 const IssueList: React.FC<{ issues: PackageDocumentIssue[] }> = ({ issues }) => (
   <List dense disablePadding>
-    {issues.map((issue, i) => (
-      <ListItem key={`${issue.document_id ?? 'doc'}-${i}`} disableGutters sx={{ py: 0 }}>
-        <ListItemText
-          primary={issue.filename || issue.document_id || 'Unknown document'}
-          secondary={issue.reason || undefined}
-          slotProps={{ primary: { variant: 'body2' }, secondary: { variant: 'caption' } }}
-        />
-      </ListItem>
-    ))}
+    {issues.map((issue, i) => {
+      // With the per-redaction list, show it instead of the long one-line
+      // reason that repeats the same ids.
+      const blocking = parseUnresolvedList(issue.unresolved_redactions);
+      const n = blocking.length;
+      return (
+        <ListItem
+          key={`${issue.document_id ?? 'doc'}-${i}`}
+          disableGutters
+          sx={{ py: 0, flexDirection: 'column', alignItems: 'flex-start' }}
+        >
+          <ListItemText
+            primary={issue.filename || issue.document_id || 'Unknown document'}
+            secondary={
+              n > 0
+                ? `${n} redaction${n !== 1 ? 's' : ''} awaiting review:`
+                : issue.reason || undefined
+            }
+            slotProps={{ primary: { variant: 'body2' }, secondary: { variant: 'caption' } }}
+          />
+          {n > 0 && (
+            <Box component="ul" sx={{ m: 0, pl: 2 }}>
+              {formatUnresolvedList(blocking).map((line, j) => (
+                <Typography
+                  key={`${blocking[j].id ?? 'r'}-${j}`}
+                  component="li"
+                  variant="caption"
+                >
+                  {line}
+                </Typography>
+              ))}
+            </Box>
+          )}
+        </ListItem>
+      );
+    })}
   </List>
 );
 
@@ -390,7 +428,8 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
               </>
             )}
             <Typography variant="caption" sx={{ display: 'block', mt: 1 }}>
-              Fix these documents (approve or reject pending redactions), then generate again.
+              Fix these documents (approve or reject pending redactions, delete and re-add those
+              with no usable position), then generate again.
             </Typography>
           </Alert>
         )}
@@ -555,14 +594,18 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
                         primary={doc.filename}
                         secondary={(() => {
                           const total = doc.redactions?.length || 0;
-                          const blocking = getBlockingRedactions(doc.redactions).length;
+                          const blocking = getBlockingRedactions(
+                            doc.redactions,
+                            pageRotationsFromDims(doc.page_dims),
+                          ).length;
                           return blocking > 0
                             ? `${total} redactions · ${blocking} awaiting review (will fail release)`
                             : `${total} redactions`;
                         })()}
                         slotProps={{
                           secondary:
-                            getBlockingRedactions(doc.redactions).length > 0
+                            getBlockingRedactions(doc.redactions, pageRotationsFromDims(doc.page_dims))
+                              .length > 0
                               ? { color: 'error' }
                               : undefined,
                         }}
