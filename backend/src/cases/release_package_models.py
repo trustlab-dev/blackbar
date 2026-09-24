@@ -22,6 +22,7 @@ class ReleasePackageStatus(str, Enum):
     RELEASED = "released"  # Published to public portal
     EXPIRED = "expired"  # Past expiration date
     REVOKED = "revoked"  # Manually revoked
+    FAILED = "failed"  # Generation failed; see generation_message / failed_documents
 
 
 class IncludedDocument(BaseModel):
@@ -33,6 +34,14 @@ class IncludedDocument(BaseModel):
     page_count: int | None = None
     redaction_count: int = 0
     exemptions: list[str] = []
+
+
+class PackageDocumentIssue(BaseModel):
+    """A document that was left out of a package, and why."""
+
+    document_id: str | None = None
+    filename: str | None = None
+    reason: str
 
 
 class DownloadRecord(BaseModel):
@@ -76,6 +85,10 @@ class ReleasePackageDB(BaseModel):
     document_count: int = 0
     total_redactions: int = 0
     included_documents: list[IncludedDocument] = []
+    # Documents that failed safe redaction (the package is then FAILED) and
+    # documents deliberately left out (e.g. failed conversion to PDF).
+    failed_documents: list[PackageDocumentIssue] = []
+    skipped_documents: list[PackageDocumentIssue] = []
 
     # Access control (only active when status = RELEASED)
     access_token: str  # Secure token for public download URL
@@ -118,6 +131,8 @@ class ReleasePackageResponse(BaseModel):
     document_count: int
     total_redactions: int = 0
     included_documents: list[IncludedDocument] = []
+    failed_documents: list[PackageDocumentIssue] = []
+    skipped_documents: list[PackageDocumentIssue] = []
 
     # Progress (when generating)
     generation_progress: int = 0

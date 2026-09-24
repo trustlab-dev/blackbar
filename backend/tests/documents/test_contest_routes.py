@@ -7,7 +7,7 @@ reject-document state machines.
 Endpoints under test (mounted at `/api/v1/documents/...` via
 `contest_router` included from `documents/routes.py`):
 
-    POST   /{document_id}/redactions/{redaction_index}/contest
+    POST   /{document_id}/redactions/{redaction_ref}/contest   (stable id; legacy index)
     GET    /{document_id}/contests
     PUT    /contests/{contest_id}/resolve
     POST   /{document_id}/reject
@@ -136,8 +136,8 @@ class TestContestRedaction:
             ],
         )
         r = await client.post(
-            f"/api/v1/documents/{doc_id}/redactions/0/contest",
-            json={"redaction_index": 0, "reason": "Public interest"},
+            f"/api/v1/documents/{doc_id}/redactions/r1/contest",
+            json={"reason": "Public interest"},
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -151,6 +151,7 @@ class TestContestRedaction:
         assert contest["contested_by"] == me["id"]
         assert contest["contested_by_role"] == "legal"
         assert contest["document_id"] == doc_id
+        assert contest["redaction_id"] == "r1"
 
         # Redaction flipped to contested
         doc = await db.documents.find_one({"id": doc_id})
@@ -874,8 +875,8 @@ class TestContestLifecycle:
         )
         # 1. File contest
         r1 = await legal_client.post(
-            f"/api/v1/documents/{doc_id}/redactions/0/contest",
-            json={"redaction_index": 0, "reason": "Public interest"},
+            f"/api/v1/documents/{doc_id}/redactions/r1/contest",
+            json={"reason": "Public interest"},
         )
         assert r1.status_code == 200
         contest_id = r1.json()["contest_id"]

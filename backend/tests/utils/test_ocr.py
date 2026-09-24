@@ -235,3 +235,102 @@ class TestGetTextSummary:
         assert "2 pages" in summary
         # Preview present (first chunk of text)
         assert "word" in summary
+
+
+# ---------------------------------------------------------------------------
+# DOC-09: resource limits and event-loop offloading
+# ---------------------------------------------------------------------------
+
+_EMPTY_OCR = {
+    "text": [],
+    "conf": [],
+    "left": [],
+    "top": [],
+    "width": [],
+    "height": [],
+    "line_num": [],
+}
+
+
+def _blank_pdf(pages: int = 1, width: float = 612, height: float = 792) -> bytes:
+    doc = fitz.open()
+    for _ in range(pages):
+        page = doc.new_page(width=width, height=height)
+        page.draw_rect(fitz.Rect(0, 0, 10, 10), color=(0, 0, 0), fill=(0, 0, 0))
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+class TestOcrLimits:
+    def test_pillow_pixel_limit_is_set_explicitly(self) -> None:
+        from PIL import Image
+
+        from src.utils import pdf_limits
+
+        assert Image.MAX_IMAGE_PIXELS == pdf_limits.MAX_RENDER_PIXELS
+
+    @pytest.mark.asyncio
+    async def test_too_many_pages_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src.utils import pdf_limits
+
+        monkeypatch.setattr(pdf_limits, "MAX_PDF_PAGES", 2)
+        with pytest.raises(pdf_limits.PdfLimitExceeded):
+            await extract_text_with_coordinates(_blank_pdf(pages=3))
+
+    @pytest.mark.asyncio
+    async def test_giant_page_is_refused_before_rendering(self) -> None:
+        from src.utils.pdf_limits import PdfLimitExceeded
+
+        pdf = _blank_pdf(width=14400, height=14400)
+        with (
+            patch("src.utils.ocr.pytesseract.image_to_data", return_value=_EMPTY_OCR) as ocr,
+            pytest.raises(PdfLimitExceeded),
+        ):
+            await extract_text_with_coordinates(pdf)
+        ocr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_large_page_is_rendered_within_pixel_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.utils import pdf_limits
+
+        monkeypatch.setattr(pdf_limits, "MAX_RENDER_PIXELS", 10_000_000)
+        seen: list[tuple[int, int]] = []
+
+        def fake_ocr(img, **kwargs):
+            seen.append(img.size)
+            return _EMPTY_OCR
+
+        with patch("src.utils.ocr.pytesseract.image_to_data", side_effect=fake_ocr):
+            await extract_text_with_coordinates(_blank_pdf(width=2160, height=2160))
+        (size,) = seen
+        assert size[0] * size[1] <= 10_000_000
+
+    @pytest.mark.asyncio
+    async def test_ocr_has_a_per_page_timeout_and_timeouts_are_recorded(self) -> None:
+        from src.utils import pdf_limits
+
+        with patch(
+            "src.utils.ocr.pytesseract.image_to_data",
+            side_effect=RuntimeError("Tesseract process timeout"),
+        ) as ocr:
+            result = await extract_text_with_coordinates(_blank_pdf())
+        assert ocr.call_args.kwargs["timeout"] == pdf_limits.OCR_PAGE_TIMEOUT_SECONDS
+        assert result["pages"][0]["ocr_error"]
+        assert result["ocr_errors"] == [1]
+
+    @pytest.mark.asyncio
+    async def test_extraction_runs_off_the_event_loop(self) -> None:
+        import threading
+
+        threads: list[str] = []
+
+        def fake_ocr(img, **kwargs):
+            threads.append(threading.current_thread().name)
+            return _EMPTY_OCR
+
+        with patch("src.utils.ocr.pytesseract.image_to_data", side_effect=fake_ocr):
+            await extract_text_with_coordinates(_blank_pdf())
+        assert threads and threads[0] != threading.main_thread().name

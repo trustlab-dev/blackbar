@@ -20,6 +20,7 @@ def _sanitize_filename(name: str) -> str:
     return _os.path.basename(name).replace("\n", "").replace("\r", "").replace("\x00", "")
 
 
+import asyncio
 import logging
 import os
 import uuid
@@ -40,14 +41,19 @@ from src.utils.email_threads import (  # noqa: F401 — re-exported for processi
     extract_thread_identifiers,
     find_thread_emails,
 )
+from src.utils.filenames import NO_STORE_HEADERS, content_disposition, safe_basename
 from src.utils.ocr import (  # noqa: F401 — re-exported for processing_service
     extract_text_with_coordinates,
     get_text_summary,
 )
+from src.utils.pdf_limits import PdfLimitExceeded
+from src.utils.pdf_redaction import RedactionError, apply_redactions_to_pdf
+from src.utils.redaction_records import RedactionValidationError, partition_redactions
 
 from ..core.authz import assert_case_access, check_document_access, has_global_access
 from ..database import db
 from ..dependencies import check_role, get_current_user
+from .redaction_store import assert_not_conversion_failed, load_document_pdf
 
 # NOTE on re-exports above (extract_text_with_coordinates, get_text_summary,
 # generate_document_summary, consolidate_email_thread,
@@ -138,7 +144,9 @@ async def get_document(
             content = grid_out.read()
             sync_client.close()
 
-            return Response(content=content, media_type="application/pdf")
+            return Response(
+                content=content, media_type="application/pdf", headers=dict(NO_STORE_HEADERS)
+            )
         except Exception as e:
             logger.warning(
                 f"GridFS retrieval failed for {document_id}, falling back to document content: {e}"
@@ -147,7 +155,9 @@ async def get_document(
 
     # Legacy: content stored directly in document
     if doc.get("content"):
-        return Response(content=doc["content"], media_type="application/pdf")
+        return Response(
+            content=doc["content"], media_type="application/pdf", headers=dict(NO_STORE_HEADERS)
+        )
 
     # No content found anywhere
     logger.error(
@@ -201,7 +211,8 @@ async def download_original_file(
                 content=content,
                 media_type=content_type,
                 headers={
-                    "Content-Disposition": f'attachment; filename="{_sanitize_filename(filename)}"'
+                    "Content-Disposition": content_disposition(filename),
+                    **NO_STORE_HEADERS,
                 },
             )
         except Exception as e:
@@ -227,7 +238,10 @@ async def download_original_file(
             return Response(
                 content=content,
                 media_type="application/pdf",
-                headers={"Content-Disposition": f'attachment; filename="{doc["filename"]}"'},
+                headers={
+                    "Content-Disposition": content_disposition(doc.get("filename")),
+                    **NO_STORE_HEADERS,
+                },
             )
         except Exception as e:
             logger.warning(
@@ -241,7 +255,10 @@ async def download_original_file(
         return Response(
             content=doc["content"],
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{doc["filename"]}"'},
+            headers={
+                "Content-Disposition": content_disposition(doc.get("filename")),
+                **NO_STORE_HEADERS,
+            },
         )
 
     # No content found anywhere
@@ -314,88 +331,50 @@ async def export_document_with_redactions(
         if not check_document_access(doc, current_user, case):
             raise HTTPException(status_code=403, detail="You don't have access to this document")
 
-        # Get the redactions
-        redactions = doc.get("redactions", [])
-        logger.info(f"Exporting document with {len(redactions)} redactions")
-
-        # If no redactions, return the original document with descriptive filename
-        if not redactions:
-            from datetime import datetime
-
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            original_name = doc["filename"].replace(".pdf", "")
-            doc_id_short = document_id[:8]
-            export_filename = f"{original_name}_NOREDACTIONS_{doc_id_short}_{timestamp}.pdf"
-
-            return Response(
-                content=doc["content"],
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f'attachment; filename="{_sanitize_filename(export_filename)}"'
-                },
+        # One release rule for export and release (DOC-13): approved
+        # redactions are burned in, rejected ones ignored, anything still
+        # awaiting review blocks the export.
+        assert_not_conversion_failed(doc)
+        to_apply, unresolved = partition_redactions(doc.get("redactions", []))
+        if unresolved:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{len(unresolved)} redaction(s) are awaiting review (proposed, "
+                    "contested or pending). Approve or reject them before exporting."
+                ),
             )
 
-        # Apply redactions to the PDF
-        from io import BytesIO
+        pdf_content = await load_document_pdf(doc, db)
+        if not pdf_content:
+            raise HTTPException(status_code=404, detail="Document content not found")
 
-        import fitz  # PyMuPDF
-
-        # Load the PDF
-        pdf_content = BytesIO(doc["content"])
-        pdf_document = fitz.open("pdf", pdf_content.read())
-
-        # Apply each redaction
-        for redaction in redactions:
-            # Apply all redactions except explicitly rejected ones
-            status = redaction.get("status", "pending")
-            if status != "rejected":
-                page_number = redaction.get("page", 1) - 1  # Convert to 0-based index
-                x1 = float(redaction.get("x", 0))
-                y1 = float(redaction.get("y", 0))
-                width = float(redaction.get("width", 100))
-                height = float(redaction.get("height", 20))
-                x2 = x1 + width
-                y2 = y1 + height
-
-                # Ensure page number is valid
-                if 0 <= page_number < len(pdf_document):
-                    page = pdf_document[page_number]
-
-                    # Add redaction annotation with black fill and text overlay
-                    rect = fitz.Rect(x1, y1, x2, y2)
-                    # Add the redaction with section code as overlay text
-                    section_code = redaction.get("reason", "REDACTED")
-                    page.add_redact_annot(
-                        rect, text=section_code, fill=(0, 0, 0), text_color=(1, 1, 1)
-                    )
-                    logger.info(
-                        f"Added redaction at page {page_number + 1}: ({x1}, {y1}, {x2}, {y2})"
-                    )
-
-        # Apply the redactions - this permanently removes the text under the boxes
-        for page in pdf_document:
-            page.apply_redactions()
-
-        # Save to BytesIO
-        output_pdf = BytesIO()
-        pdf_document.save(output_pdf, garbage=4, deflate=True)
-        pdf_document.close()
-        output_pdf.seek(0)
-
-        # Generate descriptive filename with document ID and timestamp
-        from datetime import datetime
+        # Same pipeline as the release package: validate, burn, sanitise,
+        # verify. CPU-bound, so off the event loop (DOC-09).
+        try:
+            redacted = await asyncio.to_thread(apply_redactions_to_pdf, pdf_content, to_apply)
+        except RedactionValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid redaction: {exc}") from exc
+        except PdfLimitExceeded as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except RedactionError as exc:
+            logger.error(f"Export of {document_id} failed redaction checks: {exc}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Document could not be safely redacted: {exc}",
+            ) from exc
 
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        original_name = doc["filename"].replace(".pdf", "")
-        doc_id_short = document_id[:8]  # First 8 chars of UUID
-        export_filename = f"{original_name}_REDACTED_{doc_id_short}_{timestamp}.pdf"
+        original_name = safe_basename(doc.get("filename")).rsplit(".", 1)[0]
+        marker = "REDACTED" if to_apply else "NOREDACTIONS"
+        export_filename = f"{original_name}_{marker}_{document_id[:8]}_{timestamp}.pdf"
 
-        # Return the redacted PDF
         return Response(
-            content=output_pdf.read(),
+            content=redacted,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f'attachment; filename="{_sanitize_filename(export_filename)}"'
+                "Content-Disposition": content_disposition(export_filename),
+                **NO_STORE_HEADERS,
             },
         )
 

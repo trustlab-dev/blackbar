@@ -6,6 +6,7 @@ Split from documents/routes.py in Phase 1.5 (2026-05-11) to keep individual
 route modules tractable. Mounted via include_router in documents/routes.py.
 """
 
+import asyncio
 import logging
 import os
 import uuid
@@ -15,19 +16,28 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from src.utils.ai_redaction import (
     enrich_suggestions_with_coordinates,
+    find_text_in_ocr_data,
     get_quick_pii_suggestions,
     get_redaction_suggestions,
 )
 from src.utils.bulk_redaction import (
-    create_bulk_redactions,
     create_redaction_template,
-    find_text_in_documents,
+    locate_text_in_pdf,
+    pdf_page_geometry,
     preview_bulk_redaction,
+)
+from src.utils.pdf_limits import PdfLimitExceeded
+from src.utils.redaction_records import (
+    APPROVED,
+    RedactionValidationError,
+    new_redaction_record,
+    validate_redaction,
 )
 
 from ..core.database import get_database_from_request
 from ..database import db
 from ..dependencies import check_role, get_current_user
+from .redaction_store import load_document_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -115,18 +125,19 @@ async def get_document_redaction_suggestions(
                 )
 
                 # Enrich cached suggestions with coordinates if not already present
-                pdf_content = doc.get("content")
                 text_data = doc.get("text_data")
+                needs_enrichment = any(
+                    not s.get("coordinates") and not s.get("bbox") for s in cached_suggestions
+                )
+                pdf_content = await load_document_pdf(doc, db) if needs_enrichment else None
                 if pdf_content:
-                    # Check if suggestions already have coordinates
-                    needs_enrichment = any(
-                        not s.get("coordinates") and not s.get("bbox") for s in cached_suggestions
+                    logger.info("Enriching cached suggestions with coordinates")
+                    cached_suggestions = await asyncio.to_thread(
+                        enrich_suggestions_with_coordinates,
+                        cached_suggestions,
+                        pdf_content,
+                        text_data,
                     )
-                    if needs_enrichment:
-                        logger.info("Enriching cached suggestions with coordinates")
-                        cached_suggestions = enrich_suggestions_with_coordinates(
-                            cached_suggestions, pdf_content, text_data
-                        )
 
                 # Mark rejected suggestions
                 rejected_suggestions = doc.get("rejected_ai_suggestions", [])
@@ -148,12 +159,12 @@ async def get_document_redaction_suggestions(
             # Quick PII detection using patterns
             suggestions = get_quick_pii_suggestions(extracted_text)
 
-            # Enrich with coordinates
-            pdf_content = doc.get("content")
+            # Enrich with coordinates (GridFS-backed documents too, DOC-12)
+            pdf_content = await load_document_pdf(doc, db)
             text_data = doc.get("text_data")
             if pdf_content:
-                suggestions = enrich_suggestions_with_coordinates(
-                    suggestions, pdf_content, text_data
+                suggestions = await asyncio.to_thread(
+                    enrich_suggestions_with_coordinates, suggestions, pdf_content, text_data
                 )
 
             return {
@@ -185,11 +196,11 @@ async def get_document_redaction_suggestions(
             suggestions = result.get("suggestions", [])
 
             # Enrich with coordinates by searching PDF
-            pdf_content = doc.get("content")
+            pdf_content = await load_document_pdf(doc, db)
             text_data = doc.get("text_data")
             if pdf_content:
-                suggestions = enrich_suggestions_with_coordinates(
-                    suggestions, pdf_content, text_data
+                suggestions = await asyncio.to_thread(
+                    enrich_suggestions_with_coordinates, suggestions, pdf_content, text_data
                 )
                 result["suggestions"] = suggestions
 
@@ -285,41 +296,112 @@ async def apply_bulk_redaction_endpoint(
     if not case_documents:
         raise HTTPException(status_code=404, detail="No documents found in case")
 
-    # Find all matches
-    matches = find_text_in_documents(case_documents, search_text)
+    # Locate every occurrence on the real pages (DOC-02). Records are built
+    # and validated for all documents before anything is written, so a bad
+    # box fails the whole request (422) instead of being stored.
+    needle = search_text.casefold()
+    planned: dict[str, list[dict]] = {}
+    matches: dict[str, dict] = {}
+    unresolved: list[dict] = []
+    errors: list[str] = []
 
-    if not matches:
-        return {
-            "success": True,
-            "message": "No matches found",
-            "documents_affected": 0,
-            "redactions_created": 0,
+    for doc in case_documents:
+        doc_id = doc.get("id")
+        text_source = (
+            doc.get("extracted_text") or (doc.get("text_data") or {}).get("full_text") or ""
+        )
+        text_count = text_source.casefold().count(needle)
+
+        def _unresolved(reason: str, located: int = 0, _doc=doc, _count=text_count) -> None:
+            unresolved.append(
+                {
+                    "document_id": _doc.get("id"),
+                    "filename": _doc.get("filename"),
+                    "occurrences": _count,
+                    "located": located,
+                    "reason": reason,
+                }
+            )
+
+        if doc.get("conversion_failed") or doc.get("status") == "conversion_failed":
+            if text_count:
+                _unresolved("document failed conversion to PDF")
+            continue
+        pdf_content = await load_document_pdf(doc, db)
+        if not pdf_content:
+            if text_count:
+                _unresolved("document content is not available")
+            continue
+        try:
+            hits, page_sizes, _ = await asyncio.to_thread(
+                locate_text_in_pdf, pdf_content, search_text
+            )
+        except PdfLimitExceeded as exc:
+            if text_count:
+                _unresolved(str(exc))
+            continue
+        except Exception:
+            if text_count:
+                _unresolved("document content is not a readable PDF")
+            continue
+        if not hits and doc.get("text_data"):
+            # Scanned pages: OCR word boxes are already in displayed space.
+            hits = find_text_in_ocr_data(search_text, doc["text_data"])
+        if not hits:
+            if text_count:
+                _unresolved("text appears in the extracted text but was not found on any page")
+            continue
+
+        records = []
+        for hit in hits:
+            try:
+                geometry = validate_redaction(hit, page_sizes)
+            except RedactionValidationError as exc:
+                errors.append(f"document {doc_id}: {exc}")
+                continue
+            records.append(
+                new_redaction_record(
+                    geometry,
+                    status=APPROVED,
+                    created_by=current_user.get("id"),
+                    created_by_role=current_user.get("role"),
+                    source="bulk_text",
+                    created_by_name=current_user.get("username", "unknown"),
+                    text=search_text,
+                    category=category,
+                    reason=reason,
+                    bulk_operation=True,
+                )
+            )
+        planned[doc_id] = records
+        matches[doc_id] = {
+            "document_id": doc_id,
+            "filename": doc.get("filename"),
+            "count": len(records),
         }
+        if text_count > len(records):
+            _unresolved(
+                f"only {len(records)} of {text_count} occurrences were located on the pages",
+                located=len(records),
+            )
 
-    # Create bulk redactions
-    bulk_redactions = create_bulk_redactions(
-        matches, category, reason, current_user.get("username", "unknown")
-    )
-
-    # Save redactions to documents (as pending, needing coordinate mapping)
-    documents_affected = 0
-    redactions_created = 0
-
-    for doc_id, match_data in matches.items():
-        # Add redactions to document's main redactions array with pending status
-        doc_redactions = [r for r in bulk_redactions if r["document_id"] == doc_id]
-
-        # Mark them as pending approval and needing coordinates
-        for redaction in doc_redactions:
-            redaction["status"] = "pending"
-            redaction["needs_coordinates"] = True
-
-        await db.documents.update_one(
-            {"id": doc_id}, {"$push": {"redactions": {"$each": doc_redactions}}}
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Some redactions could not be placed; nothing was saved.",
+                "errors": errors,
+            },
         )
 
+    documents_affected = 0
+    redactions_created = 0
+    for doc_id, records in planned.items():
+        if not records:
+            continue
+        await db.documents.update_one({"id": doc_id}, {"$push": {"redactions": {"$each": records}}})
         documents_affected += 1
-        redactions_created += len(doc_redactions)
+        redactions_created += len(records)
 
     # Log in case audit trail
     case = await db.cases.find_one({"id": case_id})
@@ -334,16 +416,27 @@ async def apply_bulk_redaction_endpoint(
                 "category": category,
                 "documents_affected": documents_affected,
                 "redactions_created": redactions_created,
+                "unresolved_documents": len(unresolved),
             },
         }
 
         await db.cases.update_one({"id": case_id}, {"$push": {"audit_log": audit_entry}})
 
+    if not redactions_created and not unresolved:
+        message = "No matches found"
+    else:
+        message = f"Created {redactions_created} redactions across {documents_affected} documents"
+    if unresolved:
+        message += (
+            f"; {len(unresolved)} document(s) have occurrences that could not be located "
+            "and must be redacted manually"
+        )
     return {
-        "success": True,
-        "message": f"Created {redactions_created} redactions across {documents_affected} documents",
+        "success": not unresolved,
+        "message": message,
         "documents_affected": documents_affected,
         "redactions_created": redactions_created,
+        "unresolved_documents": unresolved,
         "matches": matches,
     }
 
@@ -477,58 +570,118 @@ async def apply_ai_suggestions_bulk_endpoint(
     confidence_levels = {"low": 0, "medium": 1, "high": 2}
     min_confidence = confidence_levels.get(confidence_threshold, 1)
 
-    documents_processed = 0
-    suggestions_applied = 0
+    # Build and validate every record before writing any (DOC-02): the
+    # geometry lives under suggestion["coordinates"]; a suggestion whose box
+    # does not fit its page fails the request with 422.
+    planned: dict[str, list[dict]] = {}
+    errors: list[str] = []
+    skipped_without_coordinates = 0
+    skipped_rejected = 0
 
     for doc in case_documents:
-        # Get AI suggestions for this document
+        doc_id = doc.get("id")
         ai_suggestions = doc.get("ai_suggestions", {}).get("suggestions", [])
-
         if not ai_suggestions:
             continue
+        rejected_texts = {
+            (r.get("text") or "").casefold() for r in doc.get("rejected_ai_suggestions", [])
+        }
 
-        # Filter by category and confidence
         filtered_suggestions = []
         for suggestion in ai_suggestions:
-            # Check category filter
             if category_filter and suggestion.get("category") != category_filter:
                 continue
-
-            # Check confidence
             conf = suggestion.get("confidence", "medium")
             if confidence_levels.get(conf, 1) < min_confidence:
                 continue
-
-            # Check if has coordinates
-            if not suggestion.get("has_coordinates"):
+            if (suggestion.get("text") or "").casefold() in rejected_texts:
+                skipped_rejected += 1
                 continue
-
+            if not suggestion.get("has_coordinates") or not suggestion.get("coordinates"):
+                skipped_without_coordinates += 1
+                continue
             filtered_suggestions.append(suggestion)
 
-        if filtered_suggestions:
-            # Convert suggestions to redactions
-            for suggestion in filtered_suggestions:
-                redaction = {
-                    "page": suggestion.get("page", 1),
-                    "x": suggestion.get("x", 0),
-                    "y": suggestion.get("y", 0),
-                    "width": suggestion.get("width", 0),
-                    "height": suggestion.get("height", 0),
-                    "category": suggestion.get("section", suggestion.get("category", "S22")),
-                    "reason": suggestion.get("reason", "AI suggested"),
-                    "text": suggestion.get("text", ""),
-                    "created_by": current_user.get("username", "unknown"),
-                    "created_at": datetime.utcnow(),
-                    "source": "ai_bulk_apply",
-                }
+        if not filtered_suggestions:
+            continue
 
-                await db.documents.update_one(
-                    {"id": doc.get("id")}, {"$push": {"redactions": redaction}}
+        if doc.get("conversion_failed") or doc.get("status") == "conversion_failed":
+            errors.append(f"document {doc_id}: failed conversion to PDF")
+            continue
+        pdf_content = await load_document_pdf(doc, db)
+        if not pdf_content:
+            errors.append(f"document {doc_id}: content is not available")
+            continue
+        try:
+            page_sizes, rotations = await asyncio.to_thread(pdf_page_geometry, pdf_content)
+        except Exception as exc:
+            errors.append(f"document {doc_id}: {exc}")
+            continue
+
+        records: list[dict] = []
+        relocated: set[tuple[int, str]] = set()
+        for index, suggestion in enumerate(filtered_suggestions):
+            text = suggestion.get("text") or ""
+            page = suggestion.get("page")
+            coords = suggestion.get("coordinates") or {}
+            candidates = [
+                {"page": page, **{k: coords.get(k) for k in ("x", "y", "width", "height")}}
+            ]
+            # Text-search coordinates are in unrotated page space; on a
+            # rotated page re-locate the text in displayed space (DOC-04).
+            if (
+                isinstance(page, int)
+                and 1 <= page <= len(rotations)
+                and rotations[page - 1]
+                and text.strip()
+            ):
+                key = (page, text.casefold())
+                if key in relocated:
+                    continue
+                hits, _, _ = await asyncio.to_thread(locate_text_in_pdf, pdf_content, text, {page})
+                if hits:
+                    candidates = hits
+                    relocated.add(key)
+
+            for candidate in candidates:
+                try:
+                    geometry = validate_redaction(candidate, page_sizes)
+                except RedactionValidationError as exc:
+                    errors.append(f"document {doc_id}, suggestion {index}: {exc}")
+                    continue
+                records.append(
+                    new_redaction_record(
+                        geometry,
+                        status=APPROVED,
+                        created_by=current_user.get("id"),
+                        created_by_role=current_user.get("role"),
+                        source="ai_bulk_apply",
+                        created_by_name=current_user.get("username", "unknown"),
+                        text=text,
+                        category=suggestion.get("section", suggestion.get("category", "S22")),
+                        reason=suggestion.get("reason", "AI suggested"),
+                        confidence=suggestion.get("confidence"),
+                    )
                 )
+        planned[doc_id] = records
 
-                suggestions_applied += 1
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Some AI suggestions could not be applied; nothing was saved.",
+                "errors": errors,
+            },
+        )
 
-            documents_processed += 1
+    documents_processed = 0
+    suggestions_applied = 0
+    for doc_id, records in planned.items():
+        if not records:
+            continue
+        await db.documents.update_one({"id": doc_id}, {"$push": {"redactions": {"$each": records}}})
+        documents_processed += 1
+        suggestions_applied += len(records)
 
     # Log in case audit trail
     case = await db.cases.find_one({"id": case_id})
@@ -553,6 +706,8 @@ async def apply_ai_suggestions_bulk_endpoint(
         "message": f"Applied {suggestions_applied} AI suggestions across {documents_processed} documents",
         "documents_processed": documents_processed,
         "suggestions_applied": suggestions_applied,
+        "skipped_without_coordinates": skipped_without_coordinates,
+        "skipped_rejected": skipped_rejected,
     }
 
 

@@ -9,6 +9,8 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from src.utils.redaction_records import find_redaction
+
 from ..cases.permissions import (
     can_contest_redactions,
     can_reject_documents,
@@ -24,9 +26,13 @@ document_rejections = db["document_rejections"]
 
 
 class ContestRedactionRequest(BaseModel):
-    """Request to contest a redaction"""
+    """Request to contest a redaction.
 
-    redaction_index: int
+    The redaction is identified by the path (its stable id). The body's
+    ``redaction_index`` is accepted for backwards compatibility and ignored.
+    """
+
+    redaction_index: int | None = None
     reason: str
 
 
@@ -50,23 +56,26 @@ class AddressRejectionRequest(BaseModel):
     resolution_notes: str
 
 
-@router.post("/{document_id}/redactions/{redaction_index}/contest")
+@router.post("/{document_id}/redactions/{redaction_ref}/contest")
 async def contest_redaction(
     document_id: str,
-    redaction_index: int,
+    redaction_ref: str,
     request: ContestRedactionRequest,
     current_user=Depends(get_current_user),
 ):
     """
     Contest a redaction.
     Legal, reviewers, and third-parties can contest redactions.
+
+    ``redaction_ref`` is the redaction's stable id; a numeric index is only
+    accepted for legacy records that have no id yet (DOC-23).
     """
     # Get document and case
     doc = await db.documents.find_one({"id": document_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    case = await db.cases.find_one({"id": doc["case_id"]})
+    case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -79,10 +88,22 @@ async def contest_redaction(
 
     # Get redaction
     redactions = doc.get("redactions", [])
-    if redaction_index >= len(redactions):
+    found = find_redaction(redactions, redaction_ref)
+    if not found:
         raise HTTPException(status_code=404, detail="Redaction not found")
-
-    redaction = redactions[redaction_index]
+    index, redaction = found
+    redaction_id = redaction.get("id")
+    if not redaction_id:
+        redaction_id = str(uuid.uuid4())
+        assigned = await db.documents.update_one(
+            {"id": document_id, f"redactions.{index}.id": {"$exists": False}},
+            {"$set": {f"redactions.{index}.id": redaction_id}},
+        )
+        if assigned.modified_count == 0:
+            raise HTTPException(
+                status_code=409, detail="Redactions changed concurrently; reload and retry"
+            )
+        redaction = {**redaction, "id": redaction_id}
 
     # Create contest
     contest_id = str(uuid.uuid4())
@@ -90,7 +111,7 @@ async def contest_redaction(
         "id": contest_id,
         "case_id": case["id"],
         "document_id": document_id,
-        "redaction_index": redaction_index,
+        "redaction_id": redaction_id,
         "redaction": redaction,
         "contested_by": current_user["id"],
         "contested_by_role": user_role,
@@ -106,15 +127,15 @@ async def contest_redaction(
 
     await redaction_contests.insert_one(contest)
 
-    # Update redaction to mark as contested
+    # Update redaction to mark as contested (addressed by id, DOC-23)
     await db.documents.update_one(
-        {"id": document_id},
+        {"id": document_id, "redactions.id": redaction_id},
         {
             "$set": {
-                f"redactions.{redaction_index}.is_contested": True,
-                f"redactions.{redaction_index}.status": "contested",
+                "redactions.$.is_contested": True,
+                "redactions.$.status": "contested",
             },
-            "$inc": {f"redactions.{redaction_index}.active_contests": 1},
+            "$inc": {"redactions.$.active_contests": 1},
         },
     )
 
@@ -131,7 +152,7 @@ async def contest_redaction(
                     "details": {
                         "document_id": document_id,
                         "filename": doc.get("filename"),
-                        "redaction_index": redaction_index,
+                        "redaction_id": redaction_id,
                         "reason": request.reason,
                     },
                 }
@@ -139,7 +160,12 @@ async def contest_redaction(
         },
     )
 
-    return {"success": True, "message": "Redaction contested", "contest_id": contest_id}
+    return {
+        "success": True,
+        "message": "Redaction contested",
+        "contest_id": contest_id,
+        "redaction_id": redaction_id,
+    }
 
 
 @router.get("/{document_id}/contests")
@@ -205,20 +231,45 @@ async def resolve_contest(
         },
     )
 
-    # Update redaction based on resolution
+    # Update redaction based on resolution. Contests reference the redaction
+    # by stable id (DOC-23); legacy contests fall back to the snapshot's id,
+    # then to the stored index.
     doc_id = contest["document_id"]
-    redaction_index = contest["redaction_index"]
+    redaction_id = contest.get("redaction_id") or (contest.get("redaction") or {}).get("id")
 
-    if request.resolution == "removed":
-        # Remove the redaction
+    if redaction_id:
+        if request.resolution == "removed":
+            await db.documents.update_one(
+                {"id": doc_id}, {"$pull": {"redactions": {"id": redaction_id}}}
+            )
+        else:
+            doc = await db.documents.find_one({"id": doc_id}) or {}
+            current = next(
+                (r for r in doc.get("redactions", []) if r.get("id") == redaction_id), None
+            )
+            if current is not None:
+                new_contest_count = max(current.get("active_contests", 1) - 1, 0)
+                new_status = "approved" if new_contest_count == 0 else "contested"
+                await db.documents.update_one(
+                    {"id": doc_id, "redactions.id": redaction_id},
+                    {
+                        "$set": {
+                            "redactions.$.active_contests": new_contest_count,
+                            "redactions.$.is_contested": new_contest_count > 0,
+                            "redactions.$.status": new_status,
+                        }
+                    },
+                )
+    elif request.resolution == "removed":
+        # Legacy contest without any id: match the full snapshot.
         await db.documents.update_one(
             {"id": doc_id}, {"$pull": {"redactions": {"$eq": contest["redaction"]}}}
         )
     else:
-        # Decrement active contests, update status if no more contests
-        doc = await db.documents.find_one({"id": doc_id})
+        redaction_index = contest.get("redaction_index")
+        doc = await db.documents.find_one({"id": doc_id}) or {}
         redactions = doc.get("redactions", [])
-        if redaction_index < len(redactions):
+        if isinstance(redaction_index, int) and 0 <= redaction_index < len(redactions):
             new_contest_count = redactions[redaction_index].get("active_contests", 1) - 1
             new_status = "approved" if new_contest_count == 0 else "contested"
 

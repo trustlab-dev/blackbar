@@ -473,7 +473,7 @@ class TestGetDocumentMetadata:
 
 
 class TestExportDocumentWithRedactions:
-    async def test_export_no_redactions_returns_original(
+    async def test_export_no_redactions_returns_sanitised_copy(
         self,
         db: AsyncIOMotorDatabase,
         authed_client_factory,
@@ -486,7 +486,10 @@ class TestExportDocumentWithRedactions:
         r = await client.get(f"/api/v1/documents/{doc['id']}/export")
         assert r.status_code == 200, r.text
         assert r.headers["content-type"] == "application/pdf"
-        assert r.content == pdf
+        # Never the original bytes: the export is sanitised even with no
+        # redactions (DOC-05), but the page content is unchanged.
+        assert r.content.startswith(b"%PDF") and r.content != pdf
+        assert "no-store" in r.headers["cache-control"]
         # Filename contains NOREDACTIONS marker + first-8 of doc id
         cd = r.headers["content-disposition"]
         assert "NOREDACTIONS" in cd
@@ -526,15 +529,6 @@ class TestExportDocumentWithRedactions:
                     "height": 10,
                     "status": "rejected",
                 },
-                # Out-of-range page should be SKIPPED
-                {
-                    "page": 999,
-                    "x": 0,
-                    "y": 0,
-                    "width": 10,
-                    "height": 10,
-                    "status": "approved",
-                },
             ],
         )
         await db.documents.insert_one(doc)
@@ -547,6 +541,26 @@ class TestExportDocumentWithRedactions:
         assert doc["id"][:8] in cd
         # The export rewrote the PDF: different bytes from input
         assert r.content != pdf
+
+    async def test_export_out_of_range_page_is_rejected_not_skipped(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """DOC-07: a redaction on a page that does not exist fails the
+        export (422) instead of being silently skipped."""
+        client = await authed_client_factory(role="admin")
+        doc = make_document(
+            content=_make_minimal_pdf_bytes(),
+            redactions=[
+                {"page": 999, "x": 0, "y": 0, "width": 10, "height": 10, "status": "approved"}
+            ],
+        )
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/export")
+        assert r.status_code == 422, r.text
+        assert "page 999" in r.text
 
     async def test_export_not_found(
         self,
@@ -619,7 +633,7 @@ class TestExportDocumentWithRedactions:
 
         r = await client.get(f"/api/v1/documents/{doc['id']}/export")
         assert r.status_code == 200, r.text
-        assert r.content == pdf
+        assert r.content.startswith(b"%PDF")
 
 
 # ---------------------------------------------------------------------------

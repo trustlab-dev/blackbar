@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Statuses that put a document into a release package.
+_RELEASE_STATUSES = frozenset({DocumentStatus.APPROVED.value, DocumentStatus.RELEASED.value})
+
+
+def _is_conversion_failed(doc: dict) -> bool:
+    return bool(doc.get("conversion_failed")) or doc.get("status") == "conversion_failed"
+
 
 # Helper to get database from request
 async def get_db(request: Request):
@@ -43,6 +50,26 @@ async def bulk_update_document_status(
     current_user=Depends(get_current_user),
 ):
     """Bulk update document statuses"""
+    # A document whose conversion to PDF failed holds native bytes only; it
+    # must never be approved into a release (ingest follow-up to DOC-19).
+    # Checked for the whole batch first so nothing is half-applied.
+    if status.value in _RELEASE_STATUSES:
+        blocked = await db.documents.find(
+            {
+                "id": {"$in": document_ids},
+                "$or": [{"conversion_failed": True}, {"status": "conversion_failed"}],
+            },
+            {"id": 1},
+        ).to_list(None)
+        if blocked:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Documents that failed conversion to PDF cannot be approved or released.",
+                    "document_ids": [d["id"] for d in blocked],
+                },
+            )
+
     updated_count = 0
 
     for doc_id in document_ids:
@@ -114,6 +141,12 @@ async def update_document_status(
         raise HTTPException(status_code=404, detail="Document not found")
 
     old_status = doc.get("status", "new")
+
+    if status.value in _RELEASE_STATUSES and _is_conversion_failed(doc):
+        raise HTTPException(
+            status_code=409,
+            detail="Documents that failed conversion to PDF cannot be approved or released.",
+        )
 
     # Update document status
     await db.documents.update_one(

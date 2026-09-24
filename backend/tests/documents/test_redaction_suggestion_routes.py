@@ -113,6 +113,19 @@ async def _seed_case(db: AsyncIOMotorDatabase, **overrides: Any) -> str:
     return case["id"]
 
 
+COORDS = {"x": 72.0, "y": 90.0, "width": 40.0, "height": 14.0}
+
+
+def _text_pdf(text: str) -> bytes:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 100), text, fontsize=12)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
 async def _seed_document(db: AsyncIOMotorDatabase, **overrides: Any) -> str:
     doc = make_document(**overrides)
     await db.documents.insert_one(doc)
@@ -817,7 +830,12 @@ class TestApplyBulkRedaction:
     ) -> None:
         client = await authed_client_factory(role="admin")
         case_id = await _seed_case(db)
-        doc_id = await _seed_document(db, case_id=case_id, extracted_text="bob met alice and alice")
+        doc_id = await _seed_document(
+            db,
+            case_id=case_id,
+            extracted_text="bob met alice and alice",
+            content=_text_pdf("bob met alice and alice"),
+        )
         r = await client.post(
             "/api/v1/documents/bulk/apply-redaction",
             json={
@@ -832,11 +850,15 @@ class TestApplyBulkRedaction:
         assert body["success"] is True
         assert body["documents_affected"] == 1
         assert body["redactions_created"] == 2  # "alice" appears twice
-        # Persisted redactions with pending status
+        # Each occurrence is located on the page and stored as a real box
+        # (DOC-02: previously these were coordinate-less "needs_coordinates"
+        # records that released nothing).
         doc = await db.documents.find_one({"id": doc_id})
         assert len(doc["redactions"]) == 2
-        assert all(r["status"] == "pending" for r in doc["redactions"])
-        assert all(r["needs_coordinates"] for r in doc["redactions"])
+        for red in doc["redactions"]:
+            assert red["status"] == "approved" and red["source"] == "bulk_text"
+            assert red["page"] == 1 and red["width"] > 0 and red["height"] > 0
+            assert red["id"] and "needs_coordinates" not in red
         # Case audit log
         case = await db.cases.find_one({"id": case_id})
         assert any(e.get("action") == "bulk_redaction_applied" for e in case["audit_log"])
@@ -908,7 +930,9 @@ class TestApplyBulkRedaction:
         `if case:` audit-log block is skipped (branch 283->302)."""
         client = await authed_client_factory(role="admin")
         case_id = "ghost-case-bulk"
-        await _seed_document(db, case_id=case_id, extracted_text="alice")
+        await _seed_document(
+            db, case_id=case_id, extracted_text="alice", content=_text_pdf("alice")
+        )
         r = await client.post(
             "/api/v1/documents/bulk/apply-redaction",
             json={
@@ -1110,6 +1134,7 @@ class TestApplyAISuggestionsBulk:
         doc_id_1 = await _seed_document(
             db,
             case_id=case_id,
+            content=_text_pdf("alice bob charlie x y"),
             ai_suggestions={
                 "suggestions": [
                     {
@@ -1118,10 +1143,8 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "high",
                         "has_coordinates": True,
                         "page": 1,
-                        "x": 1,
-                        "y": 2,
-                        "width": 3,
-                        "height": 4,
+                        # The stored (enriched) shape: geometry is nested.
+                        "coordinates": COORDS,
                         "reason": "name",
                     },
                     {
@@ -1131,6 +1154,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "low",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     },
                     {
                         # Filtered out by missing coordinates
@@ -1159,7 +1183,12 @@ class TestApplyAISuggestionsBulk:
         # Verify redaction added to doc_id_1
         doc = await db.documents.find_one({"id": doc_id_1})
         assert len(doc["redactions"]) == 1
-        assert doc["redactions"][0]["source"] == "ai_bulk_apply"
+        red = doc["redactions"][0]
+        assert red["source"] == "ai_bulk_apply" and red["status"] == "approved"
+        assert (red["x"], red["y"], red["width"], red["height"]) == (72.0, 90.0, 40.0, 14.0)
+        assert red["id"]
+        # The suggestion without coordinates is reported, not silently dropped.
+        assert body["skipped_without_coordinates"] == 1
 
     async def test_apply_category_filter(
         self,
@@ -1173,6 +1202,7 @@ class TestApplyAISuggestionsBulk:
         await _seed_document(
             db,
             case_id=case_id,
+            content=_text_pdf("alice bob charlie x y"),
             ai_suggestions={
                 "suggestions": [
                     {
@@ -1181,6 +1211,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "high",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     },
                     {
                         "text": "y",
@@ -1188,6 +1219,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "high",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     },
                 ]
             },
@@ -1213,6 +1245,7 @@ class TestApplyAISuggestionsBulk:
         await _seed_document(
             db,
             case_id=case_id,
+            content=_text_pdf("alice bob charlie x y"),
             ai_suggestions={
                 "suggestions": [
                     {
@@ -1221,6 +1254,7 @@ class TestApplyAISuggestionsBulk:
                         "confidence": "medium",
                         "has_coordinates": True,
                         "page": 1,
+                        "coordinates": COORDS,
                     }
                 ]
             },

@@ -9,8 +9,17 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from src.utils.redaction_records import (
+    APPROVED,
+    GEOMETRY_FIELDS,
+    effective_status,
+    find_redaction,
+    new_redaction_record,
+)
+
 from ..cases.permissions import (
     can_approve_proposed_redactions,
+    can_create_redactions,
     can_propose_redactions,
     get_user_role_on_case,
     is_case_team_member,
@@ -18,6 +27,7 @@ from ..cases.permissions import (
 from ..core.authz import assert_document_access, check_document_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
+from .redaction_store import get_page_sizes, validate_or_422
 
 # check_document_access / assert_document_access are imported from
 # ..core.authz (single canonical implementation).
@@ -47,6 +57,58 @@ _CLIENT_REDACTION_FIELDS = frozenset(
 
 async def get_db(request: Request):
     return await get_database_from_request(request)
+
+
+# System roles that may create, move and delete professional redactions on
+# any document they can access (mirrors core/authz global access).
+_REDACTION_MANAGER_ROLES = frozenset({"owner", "admin", "analyst"})
+
+
+def can_manage_redactions(current_user: dict, case: dict | None) -> bool:
+    """Owner/admin/analyst, or a case-team manager/analyst (DOC-16)."""
+    if current_user.get("role") in _REDACTION_MANAGER_ROLES:
+        return True
+    if not case:
+        return False
+    case_role = get_user_role_on_case(case.get("case_team", []), current_user["id"])
+    return bool(case_role) and can_create_redactions(case_role)
+
+
+def assert_can_modify_redaction(redaction: dict, current_user: dict, case: dict | None) -> None:
+    """Managers may change any redaction. Everyone else only their own
+    redaction while it is still a proposal; approved (and rejected)
+    redactions are out of reach for plain case-team members (DOC-16)."""
+    if can_manage_redactions(current_user, case):
+        return
+    own = redaction.get("created_by") == current_user["id"]
+    still_proposed = str(redaction.get("status") or "").lower() in ("proposed", "pending")
+    if own and still_proposed and effective_status(redaction) != APPROVED:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Only analysts can change or delete this redaction",
+    )
+
+
+async def _redaction_id_for_ref(db, document_id: str, redactions: list[dict], ref: str):
+    """Resolve a path reference (stable id, or legacy index for records
+    without an id) to (redaction_id, redaction). Legacy records get an id."""
+    found = find_redaction(redactions, ref)
+    if not found:
+        raise HTTPException(status_code=404, detail="Redaction not found")
+    index, redaction = found
+    if not redaction.get("id"):
+        new_id = str(uuid.uuid4())
+        result = await db.documents.update_one(
+            {"id": document_id, f"redactions.{index}.id": {"$exists": False}},
+            {"$set": {f"redactions.{index}.id": new_id}},
+        )
+        if result.modified_count == 0:
+            raise HTTPException(
+                status_code=409, detail="Redactions changed concurrently; reload and retry"
+            )
+        redaction = {**redaction, "id": new_id}
+    return redaction["id"], redaction
 
 
 class ProposeRedactionRequest(BaseModel):
@@ -89,20 +151,23 @@ async def propose_redaction(
             status_code=403, detail="You don't have permission to propose redactions"
         )
 
-    redaction = {
-        **data.dict(exclude={"reason"}),
-        "type": "proposed",
-        "status": "proposed",
-        "created_by": current_user["id"],
-        "created_by_role": user_role,
-        "created_at": datetime.utcnow(),
-        "proposed_by": current_user["id"],
-        "proposed_by_role": user_role,
-        "proposed_reason": data.reason,
-        "approval_status": "pending",
-        "is_contested": False,
-        "active_contests": 0,
-    }
+    page_sizes = await get_page_sizes(doc, db)
+    geometry = validate_or_422(data.model_dump(), page_sizes)
+    redaction = new_redaction_record(
+        geometry,
+        status="proposed",
+        created_by=current_user["id"],
+        created_by_role=user_role,
+        source="proposal",
+        category=data.category,
+        type="proposed",
+        proposed_by=current_user["id"],
+        proposed_by_role=user_role,
+        proposed_reason=data.reason,
+        approval_status="pending",
+        is_contested=False,
+        active_contests=0,
+    )
 
     await db.documents.update_one({"id": document_id}, {"$push": {"redactions": redaction}})
 
@@ -154,21 +219,25 @@ async def get_proposed_redactions(
     return {"document_id": document_id, "proposed_redactions": proposed, "count": len(proposed)}
 
 
-@router.put("/{document_id}/redactions/{redaction_index}/approve")
+@router.put("/{document_id}/redactions/{redaction_ref}/approve")
 async def approve_or_reject_proposed_redaction(
     document_id: str,
-    redaction_index: int,
+    redaction_ref: str,
     request: Request,
     data: ApproveProposedRedactionRequest,
     current_user=Depends(get_current_user),
     db=Depends(get_db),
 ):
-    """Approve or reject a proposed redaction."""
+    """Approve or reject a proposed redaction.
+
+    ``redaction_ref`` is the redaction's stable id. A numeric index is only
+    accepted for legacy records that have no id yet (DOC-23).
+    """
     doc = await db.documents.find_one({"id": document_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    case = await db.cases.find_one({"id": doc["case_id"]})
+    case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -176,37 +245,49 @@ async def approve_or_reject_proposed_redaction(
     if not user_role or not can_approve_proposed_redactions(user_role):
         raise HTTPException(status_code=403, detail="Only analysts and managers can approve/reject")
 
-    redactions = doc.get("redactions", [])
-    if redaction_index >= len(redactions):
-        raise HTTPException(status_code=404, detail="Redaction not found")
-
-    redaction = redactions[redaction_index]
+    redaction_id, redaction = await _redaction_id_for_ref(
+        db, document_id, doc.get("redactions", []), redaction_ref
+    )
     if redaction.get("type") != "proposed":
         raise HTTPException(status_code=400, detail="This is not a proposed redaction")
 
+    now = datetime.utcnow()
     if data.action == "approve":
         update_fields = {
-            f"redactions.{redaction_index}.type": "professional",
-            f"redactions.{redaction_index}.status": "approved",
-            f"redactions.{redaction_index}.approval_status": "approved",
-            f"redactions.{redaction_index}.reviewed_by": current_user["id"],
-            f"redactions.{redaction_index}.reviewed_at": datetime.utcnow(),
-            f"redactions.{redaction_index}.review_notes": data.notes,
+            "redactions.$.type": "professional",
+            "redactions.$.status": "approved",
+            "redactions.$.approval_status": "approved",
         }
         message = "Proposed redaction approved"
     elif data.action == "reject":
         update_fields = {
-            f"redactions.{redaction_index}.status": "rejected",
-            f"redactions.{redaction_index}.approval_status": "rejected",
-            f"redactions.{redaction_index}.reviewed_by": current_user["id"],
-            f"redactions.{redaction_index}.reviewed_at": datetime.utcnow(),
-            f"redactions.{redaction_index}.review_notes": data.notes,
+            "redactions.$.status": "rejected",
+            "redactions.$.approval_status": "rejected",
         }
         message = "Proposed redaction rejected"
     else:
         raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
+    update_fields.update(
+        {
+            "redactions.$.reviewed_by": current_user["id"],
+            "redactions.$.reviewed_at": now,
+            "redactions.$.review_notes": data.notes,
+        }
+    )
 
-    await db.documents.update_one({"id": document_id}, {"$set": update_fields})
+    # The filter pins the redaction by id AND its current state, so a stale
+    # or concurrent request cannot write onto a different redaction.
+    result = await db.documents.update_one(
+        {
+            "id": document_id,
+            "redactions": {"$elemMatch": {"id": redaction_id, "type": "proposed"}},
+        },
+        {"$set": update_fields},
+    )
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=409, detail="Redaction changed concurrently; reload and retry"
+        )
 
     # Phase 4 Batch 4.4 (audit B26): map approve -> approved, reject ->
     # rejected. The prior `f"redaction_proposal_{data.action}d"` form
@@ -222,11 +303,11 @@ async def approve_or_reject_proposed_redaction(
                     "action": audit_action,
                     "user_id": current_user["id"],
                     "username": current_user.get("username"),
-                    "timestamp": datetime.utcnow(),
+                    "timestamp": now,
                     "details": {
                         "document_id": document_id,
                         "filename": doc.get("filename"),
-                        "redaction_index": redaction_index,
+                        "redaction_id": redaction_id,
                         "notes": data.notes,
                     },
                 }
@@ -234,7 +315,7 @@ async def approve_or_reject_proposed_redaction(
         },
     )
 
-    return {"success": True, "message": message}
+    return {"success": True, "message": message, "redaction_id": redaction_id}
 
 
 # GET DOCUMENT REDACTIONS (Fixed to be a GET)
@@ -296,19 +377,43 @@ async def add_redaction(
     case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
     assert_document_access(doc, current_user, case)
 
+    # Geometry is validated against the document's real pages (DOC-02/07).
+    if not isinstance(redaction, dict):
+        raise HTTPException(status_code=422, detail="Invalid redaction: expected an object")
+    page_sizes = await get_page_sizes(doc, db)
+    geometry = validate_or_422(redaction, page_sizes)
+
     # Only client-editable fields survive; the id and every workflow/status
     # field are set here (no mass assignment, no id collisions).
-    from datetime import datetime
-
-    redaction = {k: v for k, v in redaction.items() if k in _CLIENT_REDACTION_FIELDS}
-    redaction["id"] = str(uuid.uuid4())
-
-    # Add creator information
-    redaction["created_by"] = current_user["id"]
-    redaction["created_by_role"] = current_user.get("role", "user")
-    redaction["created_by_name"] = current_user.get("username", "Unknown")
-    redaction["created_at"] = datetime.utcnow()
-    redaction["status"] = "pending"
+    extra = {
+        k: v
+        for k, v in redaction.items()
+        if k in _CLIENT_REDACTION_FIELDS and k not in GEOMETRY_FIELDS
+    }
+    # Analysts (system or case role) create professional redactions that are
+    # approved immediately; anyone else creates a proposal that an analyst
+    # must approve before it is applied (DOC-13, DOC-16).
+    if can_manage_redactions(current_user, case):
+        extra.update(type="professional")
+        status = "approved"
+    else:
+        extra.update(
+            type="proposed",
+            proposed_by=current_user["id"],
+            approval_status="pending",
+            is_contested=False,
+            active_contests=0,
+        )
+        status = "proposed"
+    redaction = new_redaction_record(
+        geometry,
+        status=status,
+        created_by=current_user["id"],
+        created_by_role=current_user.get("role", "user"),
+        source="manual",
+        created_by_name=current_user.get("username", "Unknown"),
+        **extra,
+    )
 
     result = await db.documents.update_one(
         {"id": document_id}, {"$push": {"redactions": redaction}}
@@ -339,7 +444,8 @@ async def add_redaction(
             },
         )
 
-    return {"message": "Redaction added for review", "id": redaction["id"]}
+    message = "Redaction added" if status == "approved" else "Redaction proposed for review"
+    return {"message": message, "id": redaction["id"], "status": status}
 
 
 # APPROVE OR REJECT REDACTION (New)
@@ -351,8 +457,11 @@ async def update_redaction_status(
     request: Request, document_id: str, redaction_id: str, status: str, db=Depends(get_db)
 ):
     """Reviewers can approve/reject redactions."""
-    if status not in ["accepted", "rejected"]:
+    if status not in ["accepted", "approved", "rejected"]:
         raise HTTPException(status_code=400, detail="Invalid status")
+    # "accepted" is the legacy spelling; store the one status the release
+    # rule recognises.
+    status = "approved" if status == "accepted" else status
 
     # Phase 4 Batch 4.4 (audit B27): the filter previously used
     # `redactions._id` but `add_redaction` writes the field as
@@ -362,7 +471,7 @@ async def update_redaction_status(
         {"id": document_id, "redactions.id": redaction_id},
         {"$set": {"redactions.$.status": status}},
     )
-    if result.modified_count == 0:
+    if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Redaction not found")
 
     return {"message": f"Redaction {redaction_id} marked as {status}"}
@@ -393,37 +502,31 @@ async def update_redaction(
     if not check_document_access(doc, current_user, case):
         raise HTTPException(status_code=403, detail="You don't have access to this document")
 
-    # Find and update the redaction
+    if not isinstance(updates, dict):
+        raise HTTPException(status_code=422, detail="Invalid update: expected an object")
+
+    # Find the redaction by stable id
     redactions = doc.get("redactions", [])
-    found = False
-    updated_redaction = None
-
-    for redaction in redactions:
-        if redaction.get("id") == redaction_id:
-            # Update allowed fields
-            if "reason" in updates:
-                redaction["reason"] = updates["reason"]
-            if "notes" in updates:
-                redaction["notes"] = updates["notes"]
-            # Update coordinates if provided
-            if "x" in updates:
-                redaction["x"] = float(updates["x"])
-            if "y" in updates:
-                redaction["y"] = float(updates["y"])
-            if "width" in updates:
-                redaction["width"] = float(updates["width"])
-            if "height" in updates:
-                redaction["height"] = float(updates["height"])
-            found = True
-            updated_redaction = redaction
-            break
-
-    if not found:
+    updated_redaction = next((r for r in redactions if r.get("id") == redaction_id), None)
+    if updated_redaction is None:
         raise HTTPException(status_code=404, detail="Redaction not found")
+    assert_can_modify_redaction(updated_redaction, current_user, case)
 
-    result = await db.documents.update_one(
-        {"id": document_id}, {"$set": {"redactions": redactions}}
-    )
+    set_fields: dict = {}
+    for field in ("reason", "notes"):
+        if field in updates:
+            set_fields[f"redactions.$.{field}"] = updates[field]
+    moved = {k: updates[k] for k in ("x", "y", "width", "height") if k in updates}
+    if moved:
+        # A moved or resized box is re-validated against the page.
+        page_sizes = await get_page_sizes(doc, db)
+        geometry = validate_or_422({**updated_redaction, **moved}, page_sizes)
+        for field in ("x", "y", "width", "height"):
+            set_fields[f"redactions.$.{field}"] = getattr(geometry, field)
+    if set_fields:
+        await db.documents.update_one(
+            {"id": document_id, "redactions.id": redaction_id}, {"$set": set_fields}
+        )
 
     # Add to case audit log
     if case:
@@ -473,21 +576,14 @@ async def delete_redaction(
     case = await db.cases.find_one({"id": doc["case_id"]}) if doc.get("case_id") else None
     assert_document_access(doc, current_user, case)
 
-    # Filter out the redaction with matching id
     redactions = doc.get("redactions", [])
-    deleted_redaction = None
-    updated_redactions = []
-    for r in redactions:
-        if r.get("id") == redaction_id:
-            deleted_redaction = r
-        else:
-            updated_redactions.append(r)
-
+    deleted_redaction = next((r for r in redactions if r.get("id") == redaction_id), None)
     if not deleted_redaction:
         raise HTTPException(status_code=404, detail="Redaction not found")
+    assert_can_modify_redaction(deleted_redaction, current_user, case)
 
-    result = await db.documents.update_one(
-        {"id": document_id}, {"$set": {"redactions": updated_redactions}}
+    await db.documents.update_one(
+        {"id": document_id}, {"$pull": {"redactions": {"id": redaction_id}}}
     )
 
     # Add to case audit log

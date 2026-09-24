@@ -1,13 +1,27 @@
+import asyncio
 import logging
 
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 
+from src.utils import pdf_limits
+
 logger = logging.getLogger(__name__)
 
 
 async def extract_text_with_coordinates(pdf_content: bytes) -> dict:
+    """Async entry point: parsing and OCR are CPU-bound, so they run in a
+    worker thread instead of blocking the event loop (DOC-09).
+
+    Raises pdf_limits.PdfLimitExceeded when the document has too many pages
+    or a page too large to render. An OCR timeout on one page is recorded in
+    ``page["ocr_error"]`` and ``result["ocr_errors"]`` instead.
+    """
+    return await asyncio.to_thread(_extract_text_with_coordinates_sync, pdf_content)
+
+
+def _extract_text_with_coordinates_sync(pdf_content: bytes) -> dict:
     """
     Extract text from PDF with page and coordinate information.
     Enhanced to return word-level and line-level data for text selection.
@@ -33,6 +47,14 @@ async def extract_text_with_coordinates(pdf_content: bytes) -> dict:
     }
     """
     pdf_document = fitz.open("pdf", pdf_content)
+    try:
+        pdf_limits.check_page_count(pdf_document.page_count)
+        return _extract_pages(pdf_document)
+    finally:
+        pdf_document.close()
+
+
+def _extract_pages(pdf_document: fitz.Document) -> dict:
     result = {"pages": [], "full_text": ""}
 
     for page_num, page in enumerate(pdf_document, 1):
@@ -144,19 +166,32 @@ async def extract_text_with_coordinates(pdf_content: bytes) -> dict:
             pdf_width = page_rect.width
             pdf_height = page_rect.height
 
-            # Render at 300 DPI for better OCR
-            pix = page.get_pixmap(dpi=300)
+            # Render at 300 DPI for better OCR, lowered for large pages so
+            # the raster stays inside the pixel budget (DOC-09). Raises
+            # PdfLimitExceeded for pages too large to render at all.
+            dpi = pdf_limits.render_dpi_for_page(pdf_width, pdf_height)
+            pix = page.get_pixmap(dpi=dpi)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
             # Calculate scale factor to convert OCR coords back to PDF points
-            # OCR coordinates are in pixels at 300 DPI, PDF is at 72 DPI
             scale_x = pdf_width / pix.width
             scale_y = pdf_height / pix.height
 
-            # OCR with detailed output
-            ocr_data = pytesseract.image_to_data(
-                img, output_type=pytesseract.Output.DICT, lang="eng"
-            )
+            # OCR with detailed output, bounded in time per page
+            try:
+                ocr_data = pytesseract.image_to_data(
+                    img,
+                    output_type=pytesseract.Output.DICT,
+                    lang="eng",
+                    timeout=pdf_limits.OCR_PAGE_TIMEOUT_SECONDS,
+                )
+            except RuntimeError as exc:
+                logger.warning(f"OCR failed on page {page_num}: {exc}")
+                page_data["ocr_error"] = str(exc) or "OCR failed"
+                result.setdefault("ocr_errors", []).append(page_num)
+                result["pages"].append(page_data)
+                result["full_text"] += "\n"
+                continue
 
             # Group OCR results by line
             current_line_num = None
@@ -243,7 +278,6 @@ async def extract_text_with_coordinates(pdf_content: bytes) -> dict:
         result["pages"].append(page_data)
         result["full_text"] += page_data["text"] + "\n"
 
-    pdf_document.close()
     return result
 
 
