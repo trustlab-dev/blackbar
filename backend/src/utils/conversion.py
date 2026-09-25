@@ -241,8 +241,12 @@ def _email_text_header(
     return text + "\n"
 
 
-def _dropped_attachment_marker(display_name: str, reason: str) -> str:
+def _drop_attachment(dropped: list[dict], display_name: str, reason: str) -> str:
+    """Record an attachment the converter could not extract and return the
+    marker line for the rendered email. The caller reports ``dropped`` to
+    the uploader (issue #80); the marker is for readers of the email."""
     logger.warning(f"Attachment not extracted: {display_name!r} ({reason})")
+    dropped.append({"filename": display_name, "error": reason})
     return f"\n[ATTACHMENT NOT EXTRACTED: {display_name} ({reason})]\n"
 
 
@@ -462,7 +466,9 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     Also extracts any attachments and returns their paths.
 
     Returns:
-        tuple: (pdf_path, [attachment_paths], extracted_text)
+        tuple: (pdf_path, attachment_info, extracted_text, message_id,
+        dropped_attachments), dropped_attachments being {filename, error}
+        for each attachment that could not be extracted (issue #80)
     """
     from html.parser import HTMLParser
 
@@ -542,6 +548,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
 
     # Extract attachments and inline images
     attachment_info = []
+    dropped: list[dict] = []
     inline_images = {}  # Map Content-ID to image data
     output_dir = os.path.dirname(output_file)
     body_found = False
@@ -593,7 +600,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
                     save_attachment(display, inner.as_bytes(), "message/rfc822")
                     text += f"\n[ATTACHMENT: {display}]\n"
                 except Exception as e:
-                    text += _dropped_attachment_marker(display, str(e))
+                    text += _drop_attachment(dropped, display, str(e))
                 continue
 
             # Handle text/plain parts (email body)
@@ -651,7 +658,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
                 )
                 data = part.get_payload(decode=True)
                 if data is None:
-                    text += _dropped_attachment_marker(display, "no decodable content")
+                    text += _drop_attachment(dropped, display, "no decodable content")
                     continue
                 save_attachment(display, data, content_type)
 
@@ -757,8 +764,8 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     if not os.path.exists(output_file):
         raise Exception("EML to PDF conversion failed.")
 
-    # Return PDF path, attachments, extracted text, and message_id
-    return (output_file, attachment_info, text, message_id)
+    # PDF path, attachments, extracted text, message_id, dropped attachments
+    return (output_file, attachment_info, text, message_id, dropped)
 
 
 # First-pass OCR renders at 2x (144 dpi); ocr.py does the precise 300 dpi
@@ -835,7 +842,9 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
     Also extracts any attachments and returns their paths.
 
     Returns:
-        tuple: (pdf_path, [attachment_paths], extracted_text)
+        tuple: (pdf_path, attachment_info, extracted_text, message_id,
+        dropped_attachments), dropped_attachments being {filename, error}
+        for each attachment that could not be extracted (issue #80)
     """
     try:
         import extract_msg
@@ -938,6 +947,7 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
         # Extract attachments. The sender-supplied name is display metadata
         # only; bytes are written under a generated name (DOC-01).
         attachment_info = []
+        dropped: list[dict] = []
         output_dir = os.path.dirname(output_file)
 
         for attachment in msg.attachments:
@@ -965,7 +975,7 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
                         ) + ".msg"
                     mime = "application/vnd.ms-outlook"
                 else:
-                    text += _dropped_attachment_marker(display, "no extractable data")
+                    text += _drop_attachment(dropped, display, "no extractable data")
                     continue
 
                 attachment_path = write_attachment(output_dir, display, payload, mime)
@@ -982,7 +992,7 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
                 text += f"\n[ATTACHMENT: {display}]\n"
             except Exception as e:
                 logger.error(f"Error extracting attachment from MSG: {str(e)}")
-                text += _dropped_attachment_marker(display, "extraction error")
+                text += _drop_attachment(dropped, display, "extraction error")
                 continue
 
         msg.close()
@@ -1006,8 +1016,8 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
             if os.path.getsize(output_file) < 100:
                 raise Exception("MSG to PDF conversion failed - output file too small")
 
-            # Return PDF path, attachments, extracted text, and message_id
-            return (output_file, attachment_info, text, message_id)
+            # PDF path, attachments, extracted text, message_id, dropped
+            return (output_file, attachment_info, text, message_id, dropped)
         except Exception as pdf_error:
             logger.error(f"Error creating PDF from MSG: {str(pdf_error)}")
             raise Exception(f"Failed to create PDF from MSG file: {str(pdf_error)}")
@@ -1043,6 +1053,7 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
             "pdf_path": str,
             "original_format": str,
             "attachments": list,
+            "dropped_attachments": list,
             "error": str (if failed)
         }
     """
@@ -1058,6 +1069,8 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
         "pdf_path": None,
         "original_format": ext[1:] if ext else "unknown",
         "attachments": [],
+        # Attachments an email converter could not extract: {filename, error}
+        "dropped_attachments": [],
         "extracted_text": None,
         "message_id": None,
         "thread_headers": None,
@@ -1090,12 +1103,13 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
         # Email formats - return text directly from conversion
         if ext == ".eml":
             output_pdf = os.path.join(output_dir, f"{name}.pdf")
-            pdf_path, attachments, extracted_text, message_id = convert_eml_to_pdf(
+            pdf_path, attachments, extracted_text, message_id, dropped = convert_eml_to_pdf(
                 input_file, output_pdf
             )
             result["success"] = True
             result["pdf_path"] = pdf_path
             result["attachments"] = attachments
+            result["dropped_attachments"] = dropped
             result["extracted_text"] = extracted_text
             result["message_id"] = message_id
             result["thread_headers"] = read_thread_headers(input_file)
@@ -1103,12 +1117,13 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
 
         if ext == ".msg":
             output_pdf = os.path.join(output_dir, f"{name}.pdf")
-            pdf_path, attachments, extracted_text, message_id = convert_msg_to_pdf(
+            pdf_path, attachments, extracted_text, message_id, dropped = convert_msg_to_pdf(
                 input_file, output_pdf
             )
             result["success"] = True
             result["pdf_path"] = pdf_path
             result["attachments"] = attachments
+            result["dropped_attachments"] = dropped
             result["extracted_text"] = extracted_text
             result["message_id"] = message_id
             result["thread_headers"] = read_thread_headers(input_file)

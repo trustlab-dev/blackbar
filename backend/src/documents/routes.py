@@ -335,7 +335,19 @@ async def get_document_metadata(
         "conversion_failed": bool(
             doc.get("conversion_failed") or doc.get("status") == "conversion_failed"
         ),
+        # Pages with no text because OCR failed or timed out (#79).
+        "ocr_failed_pages": sorted((text_data or {}).get("ocr_errors") or []),
+        # First page whose text was not stored (storage limit), if any (#78).
+        "text_missing_from_page": _text_missing_from_page(text_data),
     }
+
+
+def _text_missing_from_page(text_data: dict | None) -> int | None:
+    if not text_data or not text_data.get("truncated"):
+        return None
+    recorded = text_data.get("text_missing_from_page")
+    # Records from before #78 only have the flag; their pages list was cut.
+    return recorded if recorded else len(text_data.get("pages") or []) + 1
 
 
 async def _redactions_with_ids(db, doc: dict) -> list[dict]:

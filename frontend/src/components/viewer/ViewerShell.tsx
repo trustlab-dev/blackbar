@@ -95,6 +95,10 @@ interface DocumentMeta {
       lines: any[];
     }>;
   };
+  /** Pages with no text because OCR failed or timed out (#79). */
+  ocr_failed_pages?: number[];
+  /** First page whose text was not stored (storage limit), if any (#78). */
+  text_missing_from_page?: number | null;
 }
 
 interface Redaction {
@@ -1246,6 +1250,22 @@ export const ViewerShell: React.FC<Props> = ({ documentId }) => {
           </Box>
         </Toolbar>
       </AppBar>
+
+      {/* Pages with no text: no suggestions, not searchable (#79) */}
+      {!!documentMeta?.ocr_failed_pages?.length && (
+        <Alert severity="warning" data-testid="ocr-failed-pages" sx={{ borderRadius: 0 }}>
+          {documentMeta.ocr_failed_pages.length === 1
+            ? `OCR failed on page ${documentMeta.ocr_failed_pages[0]}. It has no text, so it gets no redaction suggestions and cannot be searched; review it by eye.`
+            : `OCR failed on pages ${documentMeta.ocr_failed_pages.join(', ')}. They have no text, so they get no redaction suggestions and cannot be searched; review them by eye.`}
+        </Alert>
+      )}
+
+      {/* Text kept only for the first pages (storage limit, #78) */}
+      {!!documentMeta?.text_missing_from_page && (
+        <Alert severity="warning" data-testid="text-not-stored" sx={{ borderRadius: 0 }}>
+          {`This document is too long for all of its text to be stored. From page ${documentMeta.text_missing_from_page} on, pages get no redaction suggestions and cannot be searched; review them by eye.`}
+        </Alert>
+      )}
 
       {/* Redactions that block export/release, with approve/reject */}
       <BlockingRedactionsBanner

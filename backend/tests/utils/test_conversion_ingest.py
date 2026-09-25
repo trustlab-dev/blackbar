@@ -96,7 +96,7 @@ class TestAttachmentPathTraversal:
         in_file = work / "in.eml"
         in_file.write_bytes(_eml_with_attachment(name))
 
-        _, attachments, text, _ = convert_eml_to_pdf(str(in_file), str(work / "out.pdf"))
+        _, attachments, text, _, _ = convert_eml_to_pdf(str(in_file), str(work / "out.pdf"))
 
         assert len(attachments) == 1
         att = attachments[0]
@@ -123,7 +123,7 @@ class TestAttachmentPathTraversal:
         module = _fake_msg(attachments=[_fake_msg_attachment(name, b"%PDF-1.4 hostile")])
 
         with patch.dict("sys.modules", {"extract_msg": module}):
-            _, attachments, text, _ = convert_msg_to_pdf(str(in_file), str(work / "out.pdf"))
+            _, attachments, text, _, _ = convert_msg_to_pdf(str(in_file), str(work / "out.pdf"))
 
         assert len(attachments) == 1
         att = attachments[0]
@@ -148,7 +148,7 @@ class TestAttachmentPathTraversal:
         )
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(raw.encode())
-        _, attachments, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        _, attachments, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         display = attachments[0]["filename"]
         assert not any(ord(c) < 32 for c in display)
         assert len(display) <= 255
@@ -159,11 +159,11 @@ class TestAttachmentPathTraversal:
         can still be converted; anything else gets a neutral one."""
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(_eml_with_attachment("report.PDF"))
-        _, attachments, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        _, attachments, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         assert attachments[0]["path"].endswith(".pdf")
 
         in_file.write_bytes(_eml_with_attachment("run.sh"))
-        _, attachments, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        _, attachments, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         assert not attachments[0]["path"].endswith(".sh")
 
 
@@ -182,7 +182,7 @@ class TestAttachmentsNotDropped:
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(bytes(msg))
 
-        _, attachments, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        _, attachments, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
 
         assert [a["filename"] for a in attachments] == ["a.pdf", "a.pdf"]
         assert [Path(a["path"]).read_bytes() for a in attachments] == [b"FIRST", b"SECOND"]
@@ -197,7 +197,7 @@ class TestAttachmentsNotDropped:
             ]
         )
         with patch.dict("sys.modules", {"extract_msg": module}):
-            _, attachments, _, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+            _, attachments, _, _, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         assert [a["filename"] for a in attachments] == ["a.pdf", "a.pdf"]
         assert [Path(a["path"]).read_bytes() for a in attachments] == [b"FIRST", b"SECOND"]
 
@@ -237,7 +237,7 @@ class TestAttachmentsNotDropped:
         module = _fake_msg(attachments=[att])
 
         with patch.dict("sys.modules", {"extract_msg": module}):
-            _, attachments, text, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+            _, attachments, text, _, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
 
         assert len(attachments) == 1
         assert attachments[0]["path"].endswith(".msg")
@@ -252,12 +252,76 @@ class TestAttachmentsNotDropped:
         module = _fake_msg(attachments=[_fake_msg_attachment("link.url", None)])
         with caplog.at_level(logging.WARNING, logger="src.utils.conversion"):
             with patch.dict("sys.modules", {"extract_msg": module}):
-                _, attachments, text, _ = convert_msg_to_pdf(
+                _, attachments, text, _, _ = convert_msg_to_pdf(
                     str(in_file), str(tmp_path / "out.pdf")
                 )
         assert attachments == []
         assert "link.url" in text and "NOT EXTRACTED" in text
         assert any("link.url" in r.getMessage() for r in caplog.records)
+
+
+class TestDroppedAttachmentsReturned:
+    """Attachments the converter cannot extract are returned to the caller,
+    not only written into the email text (issue #80)."""
+
+    def test_msg_attachment_without_data(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "in.msg"
+        in_file.write_bytes(b"x")
+        module = _fake_msg(attachments=[_fake_msg_attachment("link.url", None)])
+        with patch.dict("sys.modules", {"extract_msg": module}):
+            *_, dropped = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        assert dropped == [{"filename": "link.url", "error": "no extractable data"}]
+
+    def test_msg_attachment_that_raises(self, tmp_path: Path) -> None:
+        broken = _fake_msg_attachment("broken.pdf", None)
+        type(broken).data = property(lambda self: (_ for _ in ()).throw(OSError("bad stream")))
+        in_file = tmp_path / "in.msg"
+        in_file.write_bytes(b"x")
+        module = _fake_msg(attachments=[broken, _fake_msg_attachment("ok.pdf", b"OK")])
+        with patch.dict("sys.modules", {"extract_msg": module}):
+            _, attachments, text, _, dropped = convert_msg_to_pdf(
+                str(in_file), str(tmp_path / "out.pdf")
+            )
+        assert [a["filename"] for a in attachments] == ["ok.pdf"]
+        assert dropped == [{"filename": "broken.pdf", "error": "extraction error"}]
+        assert "NOT EXTRACTED: broken.pdf" in text
+
+    def test_eml_attachment_with_no_decodable_content(self, tmp_path: Path) -> None:
+        # A multipart part marked as an attachment has no single payload
+        # to decode.
+        raw = (
+            b"From: a@example.test\r\nTo: b@example.test\r\nSubject: s\r\n"
+            b"MIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="OUTER"\r\n\r\n'
+            b"--OUTER\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+            b'--OUTER\r\nContent-Type: multipart/mixed; boundary="INNER"\r\n'
+            b'Content-Disposition: attachment; filename="bundle.bin"\r\n\r\n'
+            b"--INNER\r\nContent-Type: text/plain\r\n\r\ninner\r\n--INNER--\r\n"
+            b"--OUTER--\r\n"
+        )
+        in_file = tmp_path / "in.eml"
+        in_file.write_bytes(raw)
+
+        *_, dropped = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+
+        assert dropped == [{"filename": "bundle.bin", "error": "no decodable content"}]
+
+    def test_eml_without_problems_drops_nothing(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "in.eml"
+        in_file.write_bytes(_eml_with_attachment("a.pdf"))
+        *_, dropped = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        assert dropped == []
+
+    def test_convert_to_pdf_passes_them_through(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "in.msg"
+        in_file.write_bytes(b"x")
+        module = _fake_msg(attachments=[_fake_msg_attachment("link.url", None)])
+        with patch.dict("sys.modules", {"extract_msg": module}):
+            result = convert_to_pdf(str(in_file), str(tmp_path))
+        assert result["success"], result["error"]
+        assert result["dropped_attachments"] == [
+            {"filename": "link.url", "error": "no extractable data"}
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +364,7 @@ class TestRendererStaysOnPage:
     def test_eml_long_unbroken_line(self, tmp_path: Path) -> None:
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(f"From: a@x\nTo: b@x\nSubject: Long\n\n{LONG_LINE}\n".encode())
-        pdf, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        pdf, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         text, blocks = _all_text_and_blocks(pdf)
         assert LONG_LINE in _squash(text)
         _assert_on_page(blocks)
@@ -309,7 +373,7 @@ class TestRendererStaysOnPage:
         to = ", ".join(f"person{i}@example.test" for i in range(30))
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(f"From: a@x\nTo: {to}\nSubject: S\n\nbody\n".encode())
-        pdf, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        pdf, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         text, blocks = _all_text_and_blocks(pdf)
         assert "person29@example.test" in text
         _assert_on_page(blocks)
@@ -318,7 +382,7 @@ class TestRendererStaysOnPage:
         body = "\n".join(BODY_LINES)
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(f"From: a@x\nTo: b@x\nSubject: Many\n\n{body}\n".encode())
-        pdf, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        pdf, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         text, blocks = _all_text_and_blocks(pdf)
         for line in BODY_LINES:
             assert line in text
@@ -334,7 +398,7 @@ class TestRendererStaysOnPage:
             filler = "\n".join(f"filler {i}" for i in range(n_filler))
             in_file = tmp_path / f"in{n_filler}.eml"
             in_file.write_bytes(f"From: a@x\nTo: b@x\nSubject: P\n\n{filler}\n{para}\n".encode())
-            pdf, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / f"o{n_filler}.pdf"))
+            pdf, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / f"o{n_filler}.pdf"))
             text, blocks = _all_text_and_blocks(pdf)
             assert "word0399" in text
             _assert_on_page(blocks)
@@ -359,7 +423,7 @@ class TestRendererStaysOnPage:
             b"Content-Type: text/html\n\n" + html.encode()
         )
         with patch("src.utils.conversion.pytesseract.image_to_string", return_value=""):
-            pdf, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+            pdf, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         text, blocks = _all_text_and_blocks(pdf)
         assert LONG_LINE in _squash(text)
         assert "END199" in text
@@ -370,7 +434,7 @@ class TestRendererStaysOnPage:
         in_file.write_bytes(b"x")
         module = _fake_msg(body=LONG_LINE + "\n" + "\n".join(BODY_LINES))
         with patch.dict("sys.modules", {"extract_msg": module}):
-            pdf, _, _, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+            pdf, _, _, _, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         text, blocks = _all_text_and_blocks(pdf)
         assert LONG_LINE in _squash(text)
         for line in BODY_LINES:
@@ -383,7 +447,7 @@ class TestRendererStaysOnPage:
         in_file.write_bytes(b"x")
         module = _fake_msg(subject=subject)
         with patch.dict("sys.modules", {"extract_msg": module}):
-            pdf, _, _, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+            pdf, _, _, _, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         text, blocks = _all_text_and_blocks(pdf)
         assert "TAIL" in text
         _assert_on_page(blocks)
@@ -407,7 +471,7 @@ class TestThreadHeadersExtracted:
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(raw)
 
-        _, _, text, message_id = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        _, _, text, message_id, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         ids = extract_thread_identifiers(text, message_id)
         assert ids["in_reply_to"] == "<b@example.test>"
         assert ids["references"] == ["<a@example.test>", "<b@example.test>"]
@@ -423,7 +487,7 @@ class TestThreadHeadersExtracted:
         in_file = tmp_path / "in.msg"
         in_file.write_bytes(b"x")
         with patch.dict("sys.modules", {"extract_msg": module}):
-            _, _, text, message_id = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+            _, _, text, message_id, _ = convert_msg_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         ids = extract_thread_identifiers(text, message_id)
         assert ids["in_reply_to"] == "<b@example.test>"
         assert ids["references"] == ["<a@example.test>", "<b@example.test>"]
@@ -431,7 +495,7 @@ class TestThreadHeadersExtracted:
     def test_absent_headers_add_no_lines(self, tmp_path: Path) -> None:
         in_file = tmp_path / "in.eml"
         in_file.write_bytes(b"From: a@x\nTo: b@x\nSubject: S\n\nbody\n")
-        _, _, text, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
+        _, _, text, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "out.pdf"))
         assert "In-Reply-To:" not in text
         assert "References:" not in text
 

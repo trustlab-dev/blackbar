@@ -339,6 +339,42 @@ class TestExtractText:
             data, _ = await service._extract_text(b"%PDF", "big.pdf")
         assert len(data["pages"]) == 50
         assert data["truncated"] is True
+        # Issue #78: which pages lost their text is recorded and reported.
+        assert data["text_missing_from_page"] == 51
+        (warning,) = service.text_warnings
+        assert "big.pdf" in warning and "pages 1-50 of 60" in warning
+        assert "Pages 51-60" in warning
+
+    async def test_text_truncation_mid_document_names_the_page(self, service) -> None:
+        """The 500,000-character cut lands in page 2: pages 2 onward are
+        reported, not only the 50-page cap (issue #78)."""
+        pages = [{"text": "a" * 300_000, "page_num": n} for n in (1, 2, 3)]
+        text_data = {"full_text": "".join(p["text"] + "\n" for p in pages), "pages": pages}
+        with (
+            patch(
+                "src.documents.routes.extract_text_with_coordinates",
+                AsyncMock(return_value=text_data),
+            ),
+            patch("src.documents.routes.get_text_summary", return_value="sum"),
+        ):
+            data, _ = await service._extract_text(b"%PDF", "long.pdf")
+        assert data["text_missing_from_page"] == 2
+        (warning,) = service.text_warnings
+        assert "pages 1-1 of 3" not in warning
+        assert "page 1 of 3" in warning and "Pages 2-3" in warning
+
+    async def test_no_truncation_no_warning(self, service) -> None:
+        text_data = {"full_text": "x\n", "pages": [{"text": "x", "page_num": 1}]}
+        with (
+            patch(
+                "src.documents.routes.extract_text_with_coordinates",
+                AsyncMock(return_value=text_data),
+            ),
+            patch("src.documents.routes.get_text_summary", return_value="sum"),
+        ):
+            data, _ = await service._extract_text(b"%PDF", "small.pdf")
+        assert "truncated" not in data and "text_missing_from_page" not in data
+        assert service.text_warnings == []
 
     async def test_text_truncation(self, service) -> None:
         big_text = "x" * 600_000
@@ -356,6 +392,8 @@ class TestExtractText:
             data, _ = await service._extract_text(b"%PDF", "big.pdf")
         assert len(data["full_text"]) == 500_000
         assert data["truncated"] is True
+        (warning,) = service.text_warnings
+        assert "first 500,000 characters" in warning
 
     async def test_limit_exceeded_is_not_swallowed(self, service) -> None:
         from src.utils.pdf_limits import PdfLimitExceeded
@@ -898,24 +936,67 @@ class TestMergeAttachmentsIntoEmail:
         assert email["has_attachments"] is True
 
     async def test_skips_duplicate_attachment(self, service, db, tmp_path) -> None:
-        # Pre-existing attachment with matching filename + size.
+        """A stored attachment record carries the converted PDF's size and
+        the original bytes' hash; re-uploading the email must match it on
+        the hash, not the size (issue #77)."""
+        from src.utils.conversion import calculate_file_hash
+
         att = tmp_path / "dup.docx"
-        att.write_bytes(b"abcdefgh")  # 8 bytes.
+        att.write_bytes(b"abcdefgh")
 
         await db.documents.insert_one(
-            {"id": "exist-att", "original_filename": "dup.docx", "size": 8}
+            {
+                "id": "exist-att",
+                "original_filename": "dup.docx",
+                "size": 51234,  # the converted PDF, not the DOCX
+                "content_hash": calculate_file_hash(b"abcdefgh"),
+            }
         )
 
         existing_email = {"id": "email-1", "attachment_ids": ["exist-att"]}
 
         from src.documents.processing_service import UploadContext
 
-        merged = await service._merge_attachments_into_email(
-            existing_email,
-            [{"filename": "dup.docx", "path": str(att)}],
-            UploadContext(),
-        )
+        process = AsyncMock(return_value=[{"id": "new-att", "parent_document_id": "email-1"}])
+        with patch.object(service, "_process_attachments", process):
+            merged = await service._merge_attachments_into_email(
+                existing_email,
+                [{"filename": "dup.docx", "path": str(att)}],
+                UploadContext(),
+            )
         assert merged == 0
+        process.assert_not_awaited()
+
+    async def test_changed_attachment_with_same_name_and_size_is_added(
+        self, service, db, tmp_path
+    ) -> None:
+        """Same name and size but different bytes is a different attachment
+        (issue #77)."""
+        from src.utils.conversion import calculate_file_hash
+
+        att = tmp_path / "report.docx"
+        att.write_bytes(b"version2")
+
+        await db.documents.insert_one({"id": "email-1", "attachment_ids": ["exist-att"]})
+        await db.documents.insert_one(
+            {
+                "id": "exist-att",
+                "original_filename": "report.docx",
+                "size": 8,
+                "content_hash": calculate_file_hash(b"version1"),
+            }
+        )
+
+        from src.documents.processing_service import UploadContext
+
+        new_doc = {"id": "new-att", "parent_document_id": "email-1"}
+        with patch.object(service, "_process_attachments", AsyncMock(return_value=[new_doc])):
+            merged = await service._merge_attachments_into_email(
+                {"id": "email-1", "attachment_ids": ["exist-att"]},
+                [{"filename": "report.docx", "path": str(att)}],
+                UploadContext(),
+            )
+        assert merged == 1
 
     async def test_skips_missing_file(self, service) -> None:
         from src.documents.processing_service import UploadContext
@@ -2013,6 +2094,129 @@ class TestAttachmentErrorsSurfaced:
         doc = await db.documents.find_one({"id": result.document_id})
         assert doc["attachment_errors"][0]["filename"] == "weird.zip"
         assert "Unsupported" in doc["attachment_errors"][0]["error"]
+
+    async def test_attachment_the_converter_dropped_is_reported(
+        self, service, db, tmp_path, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        """An attachment the EML/MSG converter could not extract reaches
+        attachment_errors and the warnings too (issue #80)."""
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        email_pdf = tmp_path / "e.pdf"
+        email_pdf.write_bytes(b"%PDF")
+
+        def fake_convert(inp, outd):
+            return {
+                "success": True,
+                "pdf_path": str(email_pdf),
+                "extracted_text": None,
+                "attachments": [],
+                "dropped_attachments": [
+                    {"filename": "link.url", "error": "no extractable data"}
+                ],
+            }
+
+        monkeypatch.setattr("src.documents.processing_service.convert_to_pdf", fake_convert)
+        result = await service.process_upload(
+            file_content=b"From: a@x\n\nbody",
+            filename="m.msg",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        assert result.status == ProcessingStatus.SUCCESS, result.error
+        assert any("link.url" in w and "no extractable data" in w for w in result.warnings)
+        doc = await db.documents.find_one({"id": result.document_id})
+        assert doc["attachment_errors"] == [
+            {"filename": "link.url", "error": "no extractable data"}
+        ]
+
+    async def test_pages_whose_ocr_failed_are_reported(
+        self, service, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        """A page whose OCR failed or timed out has no text: the uploader
+        is told which pages (issue #79)."""
+        from src.documents.processing_service import ProcessingStatus, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        monkeypatch.setattr(
+            "src.documents.routes.extract_text_with_coordinates",
+            AsyncMock(return_value={"full_text": "x", "pages": [], "ocr_errors": [2, 5]}),
+        )
+        result = await service.process_upload(
+            file_content=_make_minimal_pdf_bytes(),
+            filename="scan.pdf",
+            content_type="application/pdf",
+            context=UploadContext(case_id="c1"),
+        )
+        assert result.status == ProcessingStatus.SUCCESS, result.error
+        (warning,) = result.warnings
+        assert "scan.pdf" in warning and "pages 2, 5" in warning
+
+    async def test_attachment_pages_whose_ocr_failed_are_reported(
+        self, service, tmp_path, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from src.documents.processing_service import UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        email_pdf = tmp_path / "e.pdf"
+        email_pdf.write_bytes(_make_minimal_pdf_bytes())
+        att = tmp_path / "scan.pdf"
+        att.write_bytes(_make_minimal_pdf_bytes())
+        att_pdf = str(att)
+
+        def fake_convert(inp, outd):
+            if inp == att_pdf:
+                return {"success": True, "pdf_path": att_pdf, "attachments": []}
+            return {
+                "success": True,
+                "pdf_path": str(email_pdf),
+                "attachments": [{"filename": "scan.pdf", "path": att_pdf}],
+            }
+
+        async def fake_extract(pdf_content):
+            return {"full_text": "x", "pages": [], "ocr_errors": [3]}
+
+        monkeypatch.setattr("src.documents.processing_service.convert_to_pdf", fake_convert)
+        monkeypatch.setattr("src.documents.routes.extract_text_with_coordinates", fake_extract)
+        result = await service.process_upload(
+            file_content=b"From: a@x\n\nbody",
+            filename="m.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        assert any("m.eml" in w and "page 3" in w for w in result.warnings), result.warnings
+        assert any("scan.pdf" in w and "page 3" in w for w in result.warnings), result.warnings
+
+    async def test_forwarded_message_attachment_the_converter_dropped_is_reported(
+        self, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        """Dropped by the converter one level down, inside a forwarded
+        message: reported with its path (issue #80)."""
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        from src.documents.processing_service import DocumentProcessingService, UploadContext
+
+        _mock_pipeline_libs(monkeypatch)
+        inner = _email_with("Inner", [])
+        bundle = MIMEMultipart()
+        bundle.add_header("Content-Disposition", "attachment", filename="bundle.bin")
+        bundle.attach(MIMEText("inside"))
+        inner.attach(bundle)
+        outer = _email_with("Outer", [inner])
+
+        result = await DocumentProcessingService(db).process_upload(
+            file_content=outer.as_bytes(),
+            filename="outer.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+        top = await db.documents.find_one({"id": result.document_id})
+        assert top["attachment_errors"] == [
+            {"filename": "Inner.eml / bundle.bin", "error": "no decodable content"}
+        ]
+        assert any("bundle.bin" in w for w in result.warnings)
 
 
 class TestThreadConsolidationWiring:

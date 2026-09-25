@@ -269,6 +269,33 @@ describe('ViewerShell', () => {
     await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
   });
 
+  it('names the pages whose OCR failed (issue #79)', async () => {
+    server.use(
+      http.get(META_URL, () => HttpResponse.json(metaResponse({ ocr_failed_pages: [2, 7] }))),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    const alert = await screen.findByTestId('ocr-failed-pages');
+    expect(alert).toHaveTextContent('OCR failed on pages 2, 7');
+    expect(alert).toHaveTextContent('no redaction suggestions');
+  });
+
+  it('says from which page text was not stored (issue #78)', async () => {
+    server.use(
+      http.get(META_URL, () => HttpResponse.json(metaResponse({ text_missing_from_page: 51 }))),
+    );
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    const alert = await screen.findByTestId('text-not-stored');
+    expect(alert).toHaveTextContent('From page 51 on');
+    expect(alert).toHaveTextContent('no redaction suggestions');
+  });
+
+  it('shows no OCR warning when every page has text', async () => {
+    renderWithProviders(<ViewerShell documentId="doc-1" />);
+    await waitFor(() => expect(screen.getByText('sample.pdf')).toBeInTheDocument());
+    expect(screen.queryByTestId('ocr-failed-pages')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('text-not-stored')).not.toBeInTheDocument();
+  });
+
   it('shows "Loading..." before metadata arrives', () => {
     server.use(http.get(META_URL, () => new Promise(() => {}) as any));
     renderWithProviders(<ViewerShell documentId="doc-1" />);

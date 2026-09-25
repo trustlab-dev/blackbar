@@ -213,7 +213,7 @@ class TestConvertEmlToPdf:
         in_file.write_bytes(SIMPLE_EML)
         out_pdf = tmp_path / "msg.pdf"
 
-        pdf_path, attachments, text, message_id = convert_eml_to_pdf(str(in_file), str(out_pdf))
+        pdf_path, attachments, text, message_id, _ = convert_eml_to_pdf(str(in_file), str(out_pdf))
         assert Path(pdf_path).exists()
         assert attachments == []
         assert "Test Subject" in text
@@ -225,7 +225,7 @@ class TestConvertEmlToPdf:
         in_file.write_bytes(MULTIPART_EML)
         out_pdf = tmp_path / "msg.pdf"
 
-        pdf_path, attachments, text, message_id = convert_eml_to_pdf(str(in_file), str(out_pdf))
+        pdf_path, attachments, text, message_id, _ = convert_eml_to_pdf(str(in_file), str(out_pdf))
         assert Path(pdf_path).exists()
         assert len(attachments) == 1
         assert attachments[0]["filename"] == "attachment.pdf"
@@ -238,7 +238,7 @@ class TestConvertEmlToPdf:
         in_file.write_bytes(HTML_EML)
         out_pdf = tmp_path / "msg.pdf"
 
-        pdf_path, _, text, _ = convert_eml_to_pdf(str(in_file), str(out_pdf))
+        pdf_path, _, text, _, _ = convert_eml_to_pdf(str(in_file), str(out_pdf))
         # Tags stripped — only text content remains
         assert "Hello" in text
         # The <b>HTML</b> markup should be gone
@@ -252,7 +252,7 @@ class TestConvertEmlToPdf:
         in_file = tmp_path / "msg.eml"
         in_file.write_bytes(eml_bytes)
         out = tmp_path / "msg.pdf"
-        pdf_path, _, text, _ = convert_eml_to_pdf(str(in_file), str(out))
+        pdf_path, _, text, _, _ = convert_eml_to_pdf(str(in_file), str(out))
         assert long_line in text
 
     def test_eml_with_inline_base64_image(self, tmp_path: Path) -> None:
@@ -285,7 +285,7 @@ class TestConvertEmlToPdf:
             "src.utils.conversion.pytesseract.image_to_string",
             return_value="",
         ):
-            pdf_path, _, _, _ = convert_eml_to_pdf(str(in_file), str(out))
+            pdf_path, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(out))
         assert Path(pdf_path).exists()
 
     def test_eml_with_inline_image_cid_and_multipart_related(self, tmp_path: Path) -> None:
@@ -315,7 +315,7 @@ class TestConvertEmlToPdf:
             "src.utils.conversion.pytesseract.image_to_string",
             return_value="",
         ):
-            pdf_path, _, _, _ = convert_eml_to_pdf(str(in_file), str(out))
+            pdf_path, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(out))
         assert Path(pdf_path).exists()
 
     def test_eml_with_unnamed_attachment_falls_back_to_uuid_name(self, tmp_path: Path) -> None:
@@ -332,7 +332,7 @@ class TestConvertEmlToPdf:
         in_file = tmp_path / "msg.eml"
         in_file.write_bytes(eml)
         out = tmp_path / "msg.pdf"
-        _, attachments, _, _ = convert_eml_to_pdf(str(in_file), str(out))
+        _, attachments, _, _, _ = convert_eml_to_pdf(str(in_file), str(out))
         assert len(attachments) == 1
         assert attachments[0]["filename"].startswith("unknown_attachment_")
 
@@ -539,7 +539,7 @@ class TestConvertMsgToPdf:
         fake_module.Message.return_value = fake_msg
 
         with patch.dict("sys.modules", {"extract_msg": fake_module}):
-            pdf_path, attachments, text, message_id = convert_msg_to_pdf(str(in_file), str(out))
+            pdf_path, attachments, text, message_id, _ = convert_msg_to_pdf(str(in_file), str(out))
         assert Path(pdf_path).exists()
         assert attachments == []
         assert "Hello from MSG" in text
@@ -569,7 +569,7 @@ class TestConvertMsgToPdf:
         fake_module.Message.return_value = fake_msg
 
         with patch.dict("sys.modules", {"extract_msg": fake_module}):
-            _, attachments, text, _ = convert_msg_to_pdf(str(in_file), str(out))
+            _, attachments, text, _, _ = convert_msg_to_pdf(str(in_file), str(out))
         assert len(attachments) == 1
         assert attachments[0]["filename"] == "report.pdf"
         assert "[ATTACHMENT: report.pdf]" in text
@@ -596,7 +596,7 @@ class TestConvertMsgToPdf:
         fake_module.Message.return_value = fake_msg
 
         with patch.dict("sys.modules", {"extract_msg": fake_module}):
-            pdf_path, _, _, _ = convert_msg_to_pdf(str(in_file), str(out))
+            pdf_path, _, _, _, _ = convert_msg_to_pdf(str(in_file), str(out))
         assert Path(pdf_path).exists()
 
     def test_msg_attachment_summary_paginates(self, tmp_path: Path) -> None:
@@ -628,7 +628,7 @@ class TestConvertMsgToPdf:
         fake_module.Message.return_value = fake_msg
 
         with patch.dict("sys.modules", {"extract_msg": fake_module}):
-            _, atts, _, _ = convert_msg_to_pdf(str(in_file), str(out))
+            _, atts, _, _, _ = convert_msg_to_pdf(str(in_file), str(out))
         assert len(atts) == 60
 
     def test_msg_attachment_extraction_error_is_logged_and_skipped(self, tmp_path: Path) -> None:
@@ -661,7 +661,7 @@ class TestConvertMsgToPdf:
         fake_module.Message.return_value = fake_msg
 
         with patch.dict("sys.modules", {"extract_msg": fake_module}):
-            _, atts, _, _ = convert_msg_to_pdf(str(in_file), str(out))
+            _, atts, _, _, _ = convert_msg_to_pdf(str(in_file), str(out))
         # Only the good attachment survived
         assert len(atts) == 1
         assert atts[0]["filename"] == "good.pdf"
@@ -688,7 +688,7 @@ class TestConvertMsgToPdf:
         fake_module.Message.return_value = fake_msg
 
         with patch.dict("sys.modules", {"extract_msg": fake_module}):
-            _, _, text, _ = convert_msg_to_pdf(str(in_file), str(out))
+            _, _, text, _, _ = convert_msg_to_pdf(str(in_file), str(out))
         assert "RTF formatted email" in text
 
     def test_msg_with_html_body_falls_back(self, tmp_path: Path) -> None:
@@ -711,7 +711,7 @@ class TestConvertMsgToPdf:
         fake_module.Message.return_value = fake_msg
 
         with patch.dict("sys.modules", {"extract_msg": fake_module}):
-            pdf_path, _, text, _ = convert_msg_to_pdf(str(in_file), str(out))
+            pdf_path, _, text, _, _ = convert_msg_to_pdf(str(in_file), str(out))
         assert "Hello" in text
         assert "<b>" not in text
 

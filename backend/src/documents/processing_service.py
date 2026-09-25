@@ -317,6 +317,49 @@ class UploadContext:
 # levels deep; deeper attachments are listed in attachment_errors (I8).
 MAX_ATTACHMENT_DEPTH = 5
 
+# Text kept in a document record's text_data, which lives inside the 16 MB
+# MongoDB document; word boxes take up to ~240 KB per dense page (#78).
+MAX_TEXT_DATA_PAGES = 50
+MAX_FULL_TEXT_CHARS = 500_000
+
+
+def _truncation_warning(filename: str, stored_pages: int, total_pages: int) -> str:
+    if stored_pages >= total_pages:
+        return (
+            f"{filename}: only the first {MAX_FULL_TEXT_CHARS:,} characters of text are "
+            "stored (storage limit). The rest gets no redaction suggestions and cannot "
+            "be searched; review it by eye."
+        )
+    if stored_pages == 0:
+        kept = "no page's text is stored"
+    elif stored_pages == 1:
+        kept = f"text is stored for page 1 of {total_pages} only"
+    else:
+        kept = f"text is stored for pages 1-{stored_pages} of {total_pages} only"
+    first_missing = stored_pages + 1
+    missing = (
+        f"Page {total_pages} gets"
+        if first_missing == total_pages
+        else f"Pages {first_missing}-{total_pages} get"
+    )
+    return (
+        f"{filename}: {kept} (storage limit). {missing} no redaction suggestions and "
+        "cannot be searched; review them by eye."
+    )
+
+
+def _ocr_failure_warning(filename: str, pages: list[int]) -> str:
+    listed = ", ".join(str(p) for p in pages)
+    if len(pages) == 1:
+        return (
+            f"{filename}: OCR failed on page {listed}. That page has no text, so it gets "
+            "no redaction suggestions and cannot be searched; review it by eye."
+        )
+    return (
+        f"{filename}: OCR failed on pages {listed}. Those pages have no text, so they get "
+        "no redaction suggestions and cannot be searched; review them by eye."
+    )
+
 
 class DocumentProcessingService:
     """
@@ -337,6 +380,9 @@ class DocumentProcessingService:
         self.db = db
         self.temp_dir = tempfile.mkdtemp(prefix="blackbar_uploads_")
         self.attachment_errors: list[dict[str, str]] = []
+        # Pages left without text (OCR failed #79, not stored #78), per
+        # file, for the upload warnings.
+        self.text_warnings: list[str] = []
 
     def cleanup(self) -> None:
         """Remove the work directory (converted PDFs, extracted attachments)."""
@@ -367,6 +413,7 @@ class DocumentProcessingService:
             # Instance reused after a previous upload cleaned up.
             self.temp_dir = tempfile.mkdtemp(prefix="blackbar_uploads_")
         self.attachment_errors = []
+        self.text_warnings = []
         try:
             return await self._process_upload(
                 file_content, filename, content_type, context, background_tasks
@@ -519,8 +566,12 @@ class DocumentProcessingService:
                 conversion_result=conversion_result,
             )
 
-            # Step 10: Process attachments
+            # Step 10: Process attachments. Those the converter could not
+            # extract are reported alongside the ones that fail here (#80).
             attachment_docs = []
+            if context.process_attachments:
+                for dropped in conversion_result.get("dropped_attachments") or []:
+                    self._record_attachment_error(dropped["filename"], dropped["error"])
             if attachments and context.process_attachments:
                 # Includes attachments of forwarded/embedded messages (I8);
                 # the email lists its direct children.
@@ -540,6 +591,7 @@ class DocumentProcessingService:
                     f"Attachment {e['filename']} was not processed: {e['error']}"
                     for e in self.attachment_errors
                 )
+            result.warnings.extend(self.text_warnings)
 
             # Step 11: Insert document
             await self.db.documents.insert_one(document)
@@ -648,6 +700,7 @@ class DocumentProcessingService:
             "message_id": None,
             "extracted_text": None,
             "attachments": [],
+            "dropped_attachments": [],
             "error": None,
         }
 
@@ -680,6 +733,7 @@ class DocumentProcessingService:
                     result["thread_headers"] = conversion.get("thread_headers")
                     result["extracted_text"] = conversion.get("extracted_text")
                     result["attachments"] = conversion.get("attachments", [])
+                    result["dropped_attachments"] = conversion.get("dropped_attachments") or []
 
                     # Set appropriate MIME type for emails
                     if ext == ".eml":
@@ -720,18 +774,37 @@ class DocumentProcessingService:
             logger.info(
                 f"Extracted {len(text_data.get('full_text', ''))} characters from {filename}"
             )
+            failed_pages = sorted(text_data.get("ocr_errors") or [])
+            if failed_pages:
+                self.text_warnings.append(_ocr_failure_warning(filename, failed_pages))
 
-            # Limit text_data to prevent MongoDB size issues
-            max_pages = 50
-            if len(text_data.get("pages", [])) > max_pages:
-                logger.warning(f"Limiting pages from {len(text_data['pages'])} to {max_pages}")
-                text_data["pages"] = text_data["pages"][:max_pages]
-                text_data["truncated"] = True
+            # text_data is stored inside the document record, which MongoDB
+            # caps at 16 MB, so only the first pages are kept. Pages past the
+            # cut get no suggestions and are not searchable: record the first
+            # such page and warn the uploader (#78).
+            pages = text_data.get("pages") or []
+            total_pages = len(pages)
+            stored_pages = min(total_pages, MAX_TEXT_DATA_PAGES)
+            offset = 0
+            for index, page in enumerate(pages[:stored_pages]):
+                # full_text is each page's text followed by a newline.
+                offset += len(page.get("text") or "") + 1
+                if offset > MAX_FULL_TEXT_CHARS:
+                    stored_pages = index
+                    break
 
-            if len(text_data.get("full_text", "")) > 500000:
-                logger.warning("Truncating full_text to 500000 chars")
-                text_data["full_text"] = text_data["full_text"][:500000]
+            text_truncated = len(text_data.get("full_text", "")) > MAX_FULL_TEXT_CHARS
+            if stored_pages < total_pages:
+                logger.warning(
+                    f"Storing text for {stored_pages} of {total_pages} pages of {filename}"
+                )
+                text_data["pages"] = pages[:stored_pages]
+                text_data["text_missing_from_page"] = stored_pages + 1
+            if text_truncated:
+                text_data["full_text"] = text_data["full_text"][:MAX_FULL_TEXT_CHARS]
+            if stored_pages < total_pages or text_truncated:
                 text_data["truncated"] = True
+                self.text_warnings.append(_truncation_warning(filename, stored_pages, total_pages))
 
             return text_data, text_summary
 
@@ -1043,9 +1116,13 @@ class DocumentProcessingService:
                 logger.info(f"Processed attachment {att_filename} -> {att_id}")
 
                 # A forwarded/embedded message has attachments of its own.
+                nested_path = f"{display_name} / "
+                for dropped in conversion.get("dropped_attachments") or []:
+                    self._record_attachment_error(
+                        nested_path + dropped["filename"], dropped["error"]
+                    )
                 nested = conversion.get("attachments") or []
                 if nested:
-                    nested_path = f"{display_name} / "
                     if depth >= MAX_ATTACHMENT_DEPTH:
                         for inner in nested:
                             self._record_attachment_error(
@@ -1080,30 +1157,26 @@ class DocumentProcessingService:
         # but might have different/additional attachments
         merged_count = 0
 
-        existing_att_ids = existing_email.get("attachment_ids", [])
+        # An attachment the email already has is matched on name and the
+        # hash of its original bytes. The stored "size" is the converted
+        # PDF's, so it never matches a non-PDF original (issue #77).
+        existing_atts = await self.db.documents.find(
+            {"id": {"$in": existing_email.get("attachment_ids", [])}},
+            {"_id": 0, "original_filename": 1, "content_hash": 1},
+        ).to_list(length=None)
+        existing_keys = {(a.get("original_filename"), a.get("content_hash")) for a in existing_atts}
 
         for attachment in new_attachments:
             try:
-                # Check if this attachment already exists (by filename + size)
                 att_filename = attachment.get("filename")
                 att_path = attachment.get("path")
 
                 if not att_path or not os.path.exists(att_path):
                     continue
 
-                att_size = os.path.getsize(att_path)
-
-                # Check existing attachments
-                existing_atts = await self.db.documents.find(
-                    {"id": {"$in": existing_att_ids}}
-                ).to_list(length=1000)
-
-                is_duplicate = any(
-                    a.get("original_filename") == att_filename and a.get("size") == att_size
-                    for a in existing_atts
-                )
-
-                if is_duplicate:
+                with open(att_path, "rb") as f:
+                    att_hash = calculate_file_hash(f.read())
+                if (att_filename, att_hash) in existing_keys:
                     continue
 
                 # Process and add new attachment

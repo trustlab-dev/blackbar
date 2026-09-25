@@ -396,7 +396,11 @@ class TestGetDocumentMetadata:
             "status",
             "conversion_failed",
             "unresolved_redactions",
+            "ocr_failed_pages",
+            "text_missing_from_page",
         }
+        assert body["ocr_failed_pages"] == []
+        assert body["text_missing_from_page"] is None
         assert body["filename"] == "meta.pdf"
         assert len(body["redactions"]) == 1
         red = body["redactions"][0]
@@ -417,6 +421,56 @@ class TestGetDocumentMetadata:
         assert body["text_summary"] == "A short summary"
         assert body["mime_type"] == "application/pdf"
         assert body["size"] == 1234
+
+    async def test_metadata_lists_pages_whose_ocr_failed(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """Pages with no text because OCR failed are named, so the viewer
+        can say so (issue #79)."""
+        client = await authed_client_factory(role="admin")
+        doc = make_document(text_data={"full_text": "", "pages": [], "ocr_errors": [4, 2]})
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        assert r.status_code == 200, r.text
+        assert r.json()["ocr_failed_pages"] == [2, 4]
+
+    @pytest.mark.parametrize(
+        "text_data, expected",
+        [
+            pytest.param(
+                {"full_text": "", "pages": [], "truncated": True, "text_missing_from_page": 7},
+                7,
+                id="recorded",
+            ),
+            pytest.param(
+                {
+                    "full_text": "",
+                    "pages": [{"page_num": n} for n in range(1, 51)],
+                    "truncated": True,
+                },
+                51,
+                id="legacy-record",
+            ),
+        ],
+    )
+    async def test_metadata_names_first_page_without_stored_text(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        text_data,
+        expected,
+    ) -> None:
+        """Pages whose text was not stored are reported (issue #78)."""
+        client = await authed_client_factory(role="admin")
+        doc = make_document(text_data=text_data)
+        await db.documents.insert_one(doc)
+        r = await client.get(f"/api/v1/documents/{doc['id']}/metadata")
+        assert r.status_code == 200, r.text
+        assert r.json()["text_missing_from_page"] == expected
 
     async def test_metadata_synthesizes_text_data_from_extracted_text(
         self,
