@@ -125,6 +125,28 @@ def _split_system(messages: list[dict]) -> tuple[str, list[dict]]:
 # ---------------------------------------------------------------------------
 
 
+def _openai_message_text(content: Any) -> str:
+    """Text of an OpenAI-format message. Some compatible servers send a list of
+    parts (`[{"type": "text", "text": ...}]`); the text parts are joined and other
+    part types ignored. Any other shape is rejected (the caller maps it to
+    LLMProviderError)."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise TypeError("content is neither text nor a list of parts")
+    texts = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise TypeError("a content part is not an object")
+        if part.get("type") == "text":
+            if not isinstance(part.get("text"), str):
+                raise TypeError("a text part has no text")
+            texts.append(part["text"])
+    return "".join(texts)
+
+
 def extract_completion(
     request_format: RequestFormat | str, response: dict[str, Any]
 ) -> tuple[str, str | None]:
@@ -136,7 +158,9 @@ def extract_completion(
     try:
         if fmt == "openai":
             choice = response["choices"][0]
-            return (choice["message"].get("content") or ""), choice.get("finish_reason")
+            return _openai_message_text(choice["message"].get("content")), choice.get(
+                "finish_reason"
+            )
         if fmt == "anthropic":
             blocks = response["content"]
             text = "".join(b.get("text", "") for b in blocks if b.get("type", "text") == "text")

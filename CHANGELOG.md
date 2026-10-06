@@ -71,6 +71,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `error.details`, not a Python repr.
 - PDFs over `BLACKBAR_MAX_PDF_PAGES` are rejected at upload (413) instead of
   being stored without text.
+- OpenAI-compatible responses whose message `content` is a list of text parts are
+  read (text parts joined); any other non-text shape is reported as a provider
+  response error.
 - Attachment downloads read GridFS content and use RFC 6266 filenames.
 
 ### Changed
