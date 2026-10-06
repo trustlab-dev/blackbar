@@ -38,6 +38,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Email processing: a Message-ID with non-ASCII bytes is now handled as text; an
+  inline image referenced several times in an email is OCRed once, within the
+  per-page OCR time limit; and re-uploading a duplicate email no longer re-adds
+  its non-PDF attachments (they are matched by content hash).
 - AI bulk apply stored zero-area redactions, so released PDFs kept the text.
   Redactions now carry validated geometry (422 on invalid boxes).
 - Rotated pages: AI suggestion boxes and native-text word boxes were in

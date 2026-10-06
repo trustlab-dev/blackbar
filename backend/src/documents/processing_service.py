@@ -1084,14 +1084,16 @@ class DocumentProcessingService:
 
         for attachment in new_attachments:
             try:
-                # Check if this attachment already exists (by filename + size)
+                # Check if this attachment already exists (by filename + content hash;
+                # the stored size is the converted PDF's, so it cannot be compared)
                 att_filename = attachment.get("filename")
                 att_path = attachment.get("path")
 
                 if not att_path or not os.path.exists(att_path):
                     continue
 
-                att_size = os.path.getsize(att_path)
+                with open(att_path, "rb") as att_f:
+                    att_hash = calculate_file_hash(att_f.read())
 
                 # Check existing attachments
                 existing_atts = await self.db.documents.find(
@@ -1099,7 +1101,7 @@ class DocumentProcessingService:
                 ).to_list(length=1000)
 
                 is_duplicate = any(
-                    a.get("original_filename") == att_filename and a.get("size") == att_size
+                    a.get("original_filename") == att_filename and a.get("content_hash") == att_hash
                     for a in existing_atts
                 )
 

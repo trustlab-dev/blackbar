@@ -898,24 +898,33 @@ class TestMergeAttachmentsIntoEmail:
         assert email["has_attachments"] is True
 
     async def test_skips_duplicate_attachment(self, service, db, tmp_path) -> None:
-        # Pre-existing attachment with matching filename + size.
+        # Pre-existing attachment stored as a converted PDF: its size is the PDF's
+        # length, and its content_hash is the hash of the original attachment bytes.
+        from src.documents.processing_service import UploadContext
+        from src.utils.conversion import calculate_file_hash
+
         att = tmp_path / "dup.docx"
         att.write_bytes(b"abcdefgh")  # 8 bytes.
 
         await db.documents.insert_one(
-            {"id": "exist-att", "original_filename": "dup.docx", "size": 8}
+            {
+                "id": "exist-att",
+                "original_filename": "dup.docx",
+                "content_hash": calculate_file_hash(b"abcdefgh"),
+                "size": 12345,  # converted PDF length, unrelated to the original's 8
+            }
         )
 
         existing_email = {"id": "email-1", "attachment_ids": ["exist-att"]}
 
-        from src.documents.processing_service import UploadContext
-
-        merged = await service._merge_attachments_into_email(
-            existing_email,
-            [{"filename": "dup.docx", "path": str(att)}],
-            UploadContext(),
-        )
+        with patch.object(service, "_process_attachments", AsyncMock(return_value=[])) as proc:
+            merged = await service._merge_attachments_into_email(
+                existing_email,
+                [{"filename": "dup.docx", "path": str(att)}],
+                UploadContext(),
+            )
         assert merged == 0
+        proc.assert_not_called()
 
     async def test_skips_missing_file(self, service) -> None:
         from src.documents.processing_service import UploadContext

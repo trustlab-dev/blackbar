@@ -355,9 +355,7 @@ class TestConvertEmlToPdf:
         in_file = tmp_path / "msg.eml"
         in_file.write_bytes(eml)
 
-        with patch(
-            "src.utils.conversion.pytesseract.image_to_string", return_value="hello"
-        ) as ocr:
+        with patch("src.utils.conversion.pytesseract.image_to_string", return_value="hello") as ocr:
             _, _, text, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
 
         assert ocr.call_count == 1
