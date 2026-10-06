@@ -155,7 +155,10 @@ flowchart LR
 
 Dispatch lives in `backend/src/utils/conversion.py`
 (`convert_to_pdf`). For office documents the service shells out to a
-LibreOffice headless instance bundled in the backend container. EML
+LibreOffice headless instance bundled in the backend container. Each
+conversion gets an isolated, temporary LibreOffice profile (removed
+afterwards), and a conversion that exceeds its 60-second timeout is
+stopped together with every process LibreOffice started. EML
 and MSG conversion extracts attachments as a side product; those flow
 into step 8 of the pipeline.
 
@@ -245,6 +248,10 @@ GridFS) and stored as its own document with:
 
 The parent email's `attachment_ids`, `has_attachments`, and
 `total_attachments` are then populated.
+
+Attachments are content-checked like uploads before conversion: an
+attachment whose leading bytes do not match its file type is not
+converted and is listed in the parent's `attachment_errors`.
 
 A separate `_merge_attachments_into_email` path runs when a duplicate
 email is uploaded with *new* attachments: only the new attachments are
