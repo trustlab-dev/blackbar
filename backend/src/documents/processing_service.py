@@ -959,6 +959,18 @@ class DocumentProcessingService:
 
                 logger.info(f"Processing attachment: {att_filename}")
 
+                with open(att_path, "rb") as att_f:
+                    att_original_bytes = att_f.read()
+
+                # Content-check attachments like uploads (read_verified_upload),
+                # against the extension of the extracted file, which is what
+                # convert_to_pdf goes by.
+                if content_matches_extension(att_path, att_original_bytes) is False:
+                    self._record_attachment_error(
+                        display_name, "File content does not match its file type."
+                    )
+                    continue
+
                 # Convert attachment to PDF, off the event loop (DOC-09)
                 conversion = await asyncio.to_thread(convert_to_pdf, att_path, self.temp_dir)
 
@@ -987,13 +999,7 @@ class DocumentProcessingService:
                     att_pdf_content, att_filename, "application/pdf", att_extracted_text
                 )
 
-                # Store in GridFS. Phase 4 Batch 4.4 (audit B25/B58):
-                # open() in a `with` block to release the file handle
-                # eagerly; the prior `open(att_path, "rb").read()`
-                # without a `with` left the FD open until GC.
-                with open(att_path, "rb") as att_f:
-                    att_original_bytes = att_f.read()
-
+                # Store in GridFS (original bytes read above).
                 att_gridfs = await self._store_in_gridfs(
                     att_original_bytes,
                     att_pdf_content,
