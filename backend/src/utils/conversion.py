@@ -529,6 +529,9 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     subject = msg.get("Subject", "No Subject")
     date = msg.get("Date", "Unknown")
     message_id = msg.get("Message-ID", None)  # For deduplication
+    if message_id is not None and not isinstance(message_id, str):
+        # Raw 8-bit header bytes parse to an email.header.Header; callers need text.
+        message_id = str(message_id)
 
     # Start with email metadata
     text = _email_text_header(

@@ -220,6 +220,17 @@ class TestConvertEmlToPdf:
         assert "alice@example.test" in text
         assert message_id == "<abc@example.test>"
 
+    def test_non_ascii_message_id_is_returned_as_text(self, tmp_path: Path) -> None:
+        """A Message-ID holding raw 8-bit bytes parses to an email.header.Header;
+        callers store and query it, so it must come back as a plain str."""
+        in_file = tmp_path / "msg.eml"
+        in_file.write_bytes(b"Message-ID: <abc\xe9@x>\nSubject: hi\n\nbody\n")
+
+        _, _, _, message_id = convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+        assert type(message_id) is str
+        assert message_id == "<abc\ufffd@x>"
+
     def test_multipart_eml_extracts_attachment(self, tmp_path: Path) -> None:
         in_file = tmp_path / "msg.eml"
         in_file.write_bytes(MULTIPART_EML)
