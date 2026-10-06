@@ -249,9 +249,10 @@ GridFS) and stored as its own document with:
 The parent email's `attachment_ids`, `has_attachments`, and
 `total_attachments` are then populated.
 
-Attachments are content-checked like uploads before conversion: an
-attachment whose leading bytes do not match its file type is not
-converted and is listed in the parent's `attachment_errors`.
+Office-format attachments (the ones LibreOffice converts) are
+content-checked like uploads before conversion: one whose leading
+bytes do not match its file type is not converted and is listed in
+the parent's `attachment_errors`.
 
 A separate `_merge_attachments_into_email` path runs when a duplicate
 email is uploaded with *new* attachments: only the new attachments are

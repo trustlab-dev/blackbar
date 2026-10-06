@@ -192,6 +192,14 @@ _CONTENT_SNIFFERS = {
 }
 
 
+CONTENT_MISMATCH_ERROR = "File content does not match its file type."
+
+# Attachments with these extensions go to LibreOffice, which picks its import
+# filter from the content, so they are content-checked before conversion.
+# Images and PDFs are decoded by Pillow and PyMuPDF from their content.
+_LIBREOFFICE_EXTENSIONS = frozenset({".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"})
+
+
 def content_matches_extension(filename: str, content: bytes) -> bool | None:
     """Check the file's leading bytes against the type its extension claims.
 
@@ -235,7 +243,7 @@ async def read_verified_upload(upload: UploadFile) -> bytes:
     if content_matches_extension(upload.filename or "", content) is False:
         raise HTTPException(
             status_code=415,
-            detail="File content does not match its file type.",
+            detail=CONTENT_MISMATCH_ERROR,
         )
     return content
 
@@ -962,13 +970,14 @@ class DocumentProcessingService:
                 with open(att_path, "rb") as att_f:
                     att_original_bytes = att_f.read()
 
-                # Content-check attachments like uploads (read_verified_upload),
-                # against the extension of the extracted file, which is what
-                # convert_to_pdf goes by.
-                if content_matches_extension(att_path, att_original_bytes) is False:
-                    self._record_attachment_error(
-                        display_name, "File content does not match its file type."
-                    )
+                # Content-check attachments bound for LibreOffice like uploads
+                # (read_verified_upload), against the extension of the
+                # extracted file, which is what convert_to_pdf goes by.
+                if (
+                    Path(att_path).suffix.lower() in _LIBREOFFICE_EXTENSIONS
+                    and content_matches_extension(att_path, att_original_bytes) is False
+                ):
+                    self._record_attachment_error(display_name, CONTENT_MISMATCH_ERROR)
                     continue
 
                 # Convert attachment to PDF, off the event loop (DOC-09)

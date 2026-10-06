@@ -29,8 +29,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carries password hashes.
 - Email attachment names can no longer write outside the work directory; uploads
   are size-capped while streaming (413) and must match their file type (415).
-- Email attachments are content-checked like uploads; one whose content does
-  not match its file type is listed in `attachment_errors`, not converted.
+- Office-format email attachments (converted by LibreOffice) are
+  content-checked like uploads; one whose content does not match its file
+  type is listed in `attachment_errors`, not converted.
 - Each Office conversion runs LibreOffice with an isolated, temporary
   profile that blocks linked content from untrusted locations and never
   updates links on load.
