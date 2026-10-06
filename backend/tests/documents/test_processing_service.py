@@ -926,6 +926,33 @@ class TestMergeAttachmentsIntoEmail:
         assert merged == 0
         proc.assert_not_called()
 
+    async def test_reprocesses_attachment_whose_record_lacks_content_hash(
+        self, service, db, tmp_path
+    ) -> None:
+        # Legacy record: same name, no content_hash. It cannot be matched, so the
+        # attachment is processed again rather than dropped.
+        from src.documents.processing_service import UploadContext
+
+        att = tmp_path / "old.docx"
+        att.write_bytes(b"abcdefgh")
+        await db.documents.insert_one({"id": "exist-att", "original_filename": "old.docx"})
+        await db.documents.insert_one(
+            {"id": "email-1", "attachment_ids": ["exist-att"], "filename": "e.eml"}
+        )
+        existing_email = {"id": "email-1", "attachment_ids": ["exist-att"]}
+        att_doc = {"id": "att-2", "filename": "old.pdf", "original_filename": "old.docx"}
+
+        with patch.object(
+            service, "_process_attachments", AsyncMock(return_value=[att_doc])
+        ) as proc:
+            merged = await service._merge_attachments_into_email(
+                existing_email,
+                [{"filename": "old.docx", "path": str(att)}],
+                UploadContext(),
+            )
+        assert merged == 1
+        proc.assert_called_once()
+
     async def test_skips_missing_file(self, service) -> None:
         from src.documents.processing_service import UploadContext
 
