@@ -229,6 +229,50 @@ class TestConvertOfficeToPdf:
         with pytest.raises(Exception, match="Office to PDF conversion failed"):
             convert_office_to_pdf(str(in_file), str(tmp_path))
 
+    @pytest.mark.parametrize("exit_code", ["", "1"], ids=["success", "failure"])
+    def test_profile_cleanup_error_is_logged_not_raised(
+        self,
+        tmp_path: Path,
+        fake_libreoffice: FakeLibreOffice,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        exit_code: str,
+    ) -> None:
+        """A profile folder that cannot be removed never replaces the
+        conversion's own result or error; it is logged instead."""
+        in_file = tmp_path / "doc.docx"
+        in_file.write_bytes(b"x")
+        temp = tmp_path / "temp"
+        temp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(temp))
+        if exit_code:
+            monkeypatch.setenv("FAKE_LO_EXIT", exit_code)
+
+        def failing_rmtree(path, onexc=None, onerror=None, **kwargs):  # type: ignore[no-untyped-def]
+            try:
+                raise OSError("device busy")
+            except OSError as e:
+                if onexc is not None:
+                    onexc(os.rmdir, path, e)
+                elif onerror is not None:
+                    onerror(os.rmdir, path, sys.exc_info())
+                else:
+                    raise
+
+        monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+
+        with caplog.at_level("WARNING", logger="src.utils.conversion"):
+            if exit_code:
+                with pytest.raises(subprocess.CalledProcessError):
+                    convert_office_to_pdf(str(in_file), str(tmp_path))
+            else:
+                assert convert_office_to_pdf(str(in_file), str(tmp_path)) == str(
+                    tmp_path / "doc.pdf"
+                )
+
+        [leftover] = temp.iterdir()
+        assert any(str(leftover) in r.getMessage() for r in caplog.records)
+
     @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX only")
     def test_timeout_stops_libreoffice_and_its_children(
         self,
@@ -934,21 +978,35 @@ def test_real_libreoffice_docx_roundtrip(tmp_path: Path, fixtures_dir: Path) -> 
 def test_real_libreoffice_uses_and_removes_an_isolated_profile(
     tmp_path: Path, fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """LibreOffice starts with the seeded per-conversion profile, and the
+    """LibreOffice fills the per-conversion profile it is given, and the
     profile folder is gone once the conversion returns."""
     sample = fixtures_dir / "FOIPPA_Test_Document.docx"
     if not sample.exists():
         pytest.skip("FOIPPA_Test_Document.docx fixture not available")
-    temp = tmp_path / "temp"
-    temp.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    profiles: list[tuple[Path, list[str]]] = []
+
+    class SpyTemporaryDirectory(tempfile.TemporaryDirectory):
+        """Records what is in each profile's user folder just before removal."""
+
+        def cleanup(self) -> None:
+            user = Path(self.name) / "user"
+            if user.is_dir():
+                profiles.append((Path(self.name), sorted(p.name for p in user.iterdir())))
+            super().cleanup()
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", SpyTemporaryDirectory)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
     pdf = convert_office_to_pdf(str(sample), str(out_dir))
 
     assert fitz.open(pdf).page_count > 0
-    assert list(temp.iterdir()) == []
+    [(profile, contents)] = profiles
+    assert profile.name.startswith("blackbar-libreoffice-")
+    # LibreOffice wrote its own configuration next to the seeded settings.
+    assert "registrymodifications.xcu" in contents
+    assert "config" in contents
+    assert not profile.exists()
 
 
 class TestFirstPassOcrBudget:

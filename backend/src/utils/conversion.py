@@ -439,8 +439,9 @@ def _run_libreoffice(args: list[str], timeout: float) -> subprocess.CompletedPro
     timeout (or any other interruption) the whole process group is killed,
     not just the launcher.
     """
-    with tempfile.TemporaryDirectory(prefix="blackbar-libreoffice-") as folder:
-        profile = Path(folder)
+    folder = tempfile.TemporaryDirectory(prefix="blackbar-libreoffice-", ignore_cleanup_errors=True)
+    profile = Path(folder.name)
+    try:
         _write_libreoffice_profile(profile)
         command = ["libreoffice", f"-env:UserInstallation={profile.as_uri()}", *args]
         env = {**os.environ, "TMPDIR": str(profile / "tmp")}
@@ -460,6 +461,11 @@ def _run_libreoffice(args: list[str], timeout: float) -> subprocess.CompletedPro
         if process.returncode:
             raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        # A cleanup error never replaces the conversion's own result or error.
+        folder.cleanup()
+        if profile.exists():
+            logger.warning(f"LibreOffice profile not fully removed: {profile}")
 
 
 def convert_office_to_pdf(input_file: str, output_dir: str) -> str:
