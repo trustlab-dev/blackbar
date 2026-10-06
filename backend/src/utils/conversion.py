@@ -691,6 +691,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
 
         # Split by image markers and insert text + images
         parts = re.split(r"\[\[IMAGE:([^\]]+)\]\]", text_with_markers)
+        ocr_cache: dict[str, str | None] = {}
 
         for i, part in enumerate(parts):
             if i % 2 == 0:
@@ -710,9 +711,15 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
                             img = img.convert("RGB")
 
                         # Run OCR on the image to extract text
+                        # Each distinct image is OCRed once, however often it is referenced
                         try:
-                            img_text = pytesseract.image_to_string(img)
-                            if img_text.strip():
+                            if img_id not in ocr_cache:
+                                ocr_cache[img_id] = None  # a failure is not retried
+                                ocr_cache[img_id] = pytesseract.image_to_string(
+                                    img, timeout=pdf_limits.OCR_PAGE_TIMEOUT_SECONDS
+                                )
+                            img_text = ocr_cache[img_id]
+                            if img_text and img_text.strip():
                                 logger.info(
                                     f"Extracted {len(img_text)} characters from inline image {img_id}"
                                 )

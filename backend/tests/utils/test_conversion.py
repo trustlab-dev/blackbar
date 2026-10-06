@@ -329,6 +329,41 @@ class TestConvertEmlToPdf:
             pdf_path, _, _, _ = convert_eml_to_pdf(str(in_file), str(out))
         assert Path(pdf_path).exists()
 
+    def test_inline_image_referenced_repeatedly_is_ocred_once_with_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        """Each distinct inline image is OCRed once per email, within the per-page
+        time limit, however many times the body refers to it."""
+        import base64
+
+        from src.utils import pdf_limits
+
+        png_1x1 = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00"
+            b"\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT"
+            b"\x08\x99c\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xdc\xccY\xe7\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        b64 = base64.b64encode(png_1x1).decode()
+        refs = b'<img src="cid:image1@x"/><p>between</p>' * 5
+        eml = (
+            b"MIME-Version: 1.0\nFrom: a@x\nTo: b@x\nSubject: cid-test\n"
+            b'Content-Type: multipart/related; boundary="b"\n\n'
+            b"--b\nContent-Type: text/html\n\n<html><body>" + refs + b"</body></html>\n"
+            b"--b\nContent-Type: image/png\nContent-ID: <image1@x>\n"
+            b"Content-Transfer-Encoding: base64\n\n" + b64.encode() + b"\n" + b"--b--\n"
+        )
+        in_file = tmp_path / "msg.eml"
+        in_file.write_bytes(eml)
+
+        with patch(
+            "src.utils.conversion.pytesseract.image_to_string", return_value="hello"
+        ) as ocr:
+            _, _, text, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+        assert ocr.call_count == 1
+        assert ocr.call_args.kwargs["timeout"] == pdf_limits.OCR_PAGE_TIMEOUT_SECONDS
+        assert "[Image text: hello]" in text
+
     def test_eml_with_unnamed_attachment_falls_back_to_uuid_name(self, tmp_path: Path) -> None:
         """An attachment without a filename gets a uuid-based one."""
         eml = (
