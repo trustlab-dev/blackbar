@@ -74,6 +74,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - OpenAI-compatible responses whose message `content` is a list of text parts are
   read (text parts joined); any other non-text shape is reported as a provider
   response error.
+- AI redaction suggestions beyond `LLM_MAX_SUGGESTIONS` are counted in a new
+  `dropped_suggestions` result field and noted in the summary, instead of being
+  dropped without a trace.
 - Attachment downloads read GridFS content and use RFC 6266 filenames.
 
 ### Changed

@@ -397,7 +397,8 @@ async def get_redaction_suggestions(document_text: str, context: str | None = No
     ``total_chars`` rather than silently ignored (LLM-03).
 
     Model output is schema-validated (LLM-06/07): malformed items are
-    dropped and counted in ``invalid_suggestions``; partial output is
+    dropped and counted in ``invalid_suggestions``; suggestions past
+    LLM_MAX_SUGGESTIONS are counted in ``dropped_suggestions``; partial output is
     flagged with ``output_truncated``; model-supplied geometry is discarded.
 
     Errors never carry raw exception or provider text (LLM-02): the result
@@ -487,6 +488,7 @@ async def get_redaction_suggestions(document_text: str, context: str | None = No
     seen: set[tuple[str, str]] = set()
     model_summaries: list[str] = []
     invalid = disclosed = 0
+    dropped_keys: set[tuple[str, str]] = set()
     output_truncated = False
     analysed_chars = 0
     covered_until = 0
@@ -543,7 +545,10 @@ async def get_redaction_suggestions(document_text: str, context: str | None = No
         disclosed += disc
         for suggestion in valid:
             key = _suggestion_key(suggestion)
-            if key in seen or len(suggestions) >= max_suggestions:
+            if key in seen or key in dropped_keys:
+                continue
+            if len(suggestions) >= max_suggestions:
+                dropped_keys.add(key)
                 continue
             seen.add(key)
             suggestions.append(suggestion)
@@ -560,6 +565,7 @@ async def get_redaction_suggestions(document_text: str, context: str | None = No
         "chunks": len(spans),
         "output_truncated": output_truncated,
         "invalid_suggestions": invalid,
+        "dropped_suggestions": len(dropped_keys),
         "disclosed_count": disclosed,
         **provenance,
     }
@@ -621,6 +627,11 @@ async def get_redaction_suggestions(document_text: str, context: str | None = No
         notes.append("The AI response was cut off, so some suggestions may be missing.")
     if invalid:
         notes.append(f"{invalid} malformed suggestion(s) were discarded.")
+    if dropped_keys:
+        notes.append(
+            f"{len(dropped_keys)} suggestion(s) beyond the limit of {max_suggestions} "
+            "were not kept."
+        )
     if notes:
         summary = f"{summary}. {' '.join(notes)}"
     result["summary"] = summary
@@ -630,9 +641,10 @@ async def get_redaction_suggestions(document_text: str, context: str | None = No
         result["reference"] = getattr(error, "reference", None) or new_error_reference()
 
     logger.info(
-        "Generated %d AI redaction suggestions (invalid=%d, disclosed=%d, truncated=%s)",
+        "Generated %d AI redaction suggestions (invalid=%d, dropped=%d, disclosed=%d, truncated=%s)",
         len(suggestions),
         invalid,
+        len(dropped_keys),
         disclosed,
         analysis_truncated or output_truncated,
     )

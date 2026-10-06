@@ -728,6 +728,31 @@ class TestChunkingAndTruncation:
         assert "600 of 5,000" in result["summary"]
 
     @pytest.mark.asyncio
+    async def test_suggestions_past_the_cap_are_counted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_MAX_SUGGESTIONS", "200")
+        items = [{"text": f"Person {i}", "category": "S22"} for i in range(201)]
+        # A repeat of a dropped suggestion is not counted twice.
+        items.append({"text": "Person 200", "category": "S22"})
+        client = _client_returning(json.dumps(items))
+        p1, p2, p3 = _patched(client, categories=BC_CATEGORIES)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("Person text")
+        assert len(result["suggestions"]) == 200
+        assert result["dropped_suggestions"] == 1
+        assert "1 suggestion(s) beyond the limit of 200 were not kept" in result["summary"]
+
+    @pytest.mark.asyncio
+    async def test_no_dropped_suggestions_under_the_cap(self) -> None:
+        client = _client_returning(json.dumps([{"text": "Alice", "category": "S22"}] * 2))
+        p1, p2, p3 = _patched(client, categories=BC_CATEGORIES)
+        with p1, p2, p3:
+            result = await get_redaction_suggestions("Alice")
+        assert result["dropped_suggestions"] == 0
+        assert "beyond the limit" not in result["summary"]
+
+    @pytest.mark.asyncio
     async def test_provenance_recorded(self) -> None:
         client = _client_returning(json.dumps([]))
         p1, p2, p3 = _patched(client)
