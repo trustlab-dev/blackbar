@@ -870,6 +870,46 @@ class TestConvertMsgToPdf:
         assert "<b>" not in text
 
 
+class _Interrupt(BaseException):
+    """Not an ``Exception``: stands in for KeyboardInterrupt or SystemExit."""
+
+
+class TestStripHtmlLetsInterruptsThrough:
+    """strip_html falls back to the raw HTML on a parser error but must not
+    swallow BaseExceptions such as KeyboardInterrupt."""
+
+    def test_eml(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "msg.eml"
+        in_file.write_bytes(HTML_EML)
+
+        with patch("html.parser.HTMLParser.feed", side_effect=_Interrupt):
+            with pytest.raises(_Interrupt):
+                convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+    def test_msg(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "msg.msg"
+        in_file.write_bytes(b"x")
+        fake_msg = MagicMock()
+        fake_msg.sender = "a@x"
+        fake_msg.to = "b@x"
+        fake_msg.subject = "S"
+        fake_msg.date = None
+        fake_msg.body = None
+        fake_msg.htmlBody = b"<p>Hello <b>HTML</b></p>"
+        fake_msg.rtfBody = None
+        fake_msg.attachments = []
+        fake_msg.messageId = None
+        fake_module = MagicMock()
+        fake_module.Message.return_value = fake_msg
+
+        with (
+            patch.dict("sys.modules", {"extract_msg": fake_module}),
+            patch("html.parser.HTMLParser.feed", side_effect=_Interrupt),
+        ):
+            with pytest.raises(_Interrupt):
+                convert_msg_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+
 # ---------------------------------------------------------------------------
 # Slow integration tests (skip if tooling absent)
 # ---------------------------------------------------------------------------

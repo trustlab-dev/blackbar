@@ -607,7 +607,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
         try:
             s.feed(html_text)
             return s.get_data()
-        except:
+        except Exception:
             return html_text
 
     with open(input_file, "rb") as f:
@@ -978,7 +978,7 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
         try:
             s.feed(html_text)
             return s.get_data()
-        except:
+        except Exception:
             return html_text
 
     try:
