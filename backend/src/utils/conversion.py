@@ -6,8 +6,10 @@ import logging
 import mimetypes
 import os
 import re
+import signal
 import subprocess
 import tempfile
+import time
 import unicodedata
 import uuid
 from datetime import datetime
@@ -15,6 +17,7 @@ from email.header import Header, decode_header, make_header
 from email.message import Message
 from email.parser import BytesHeaderParser
 from email.utils import format_datetime
+from pathlib import Path
 from typing import Any
 
 import fitz  # PyMuPDF
@@ -372,28 +375,121 @@ def _write_attachment_summary(writer: EmailPdfWriter, attachment_info: list[dict
         )
 
 
+LIBREOFFICE_TIMEOUT_SECONDS = 60
+
+# How long the processes of a killed LibreOffice may take to exit.
+_LIBREOFFICE_KILL_WAIT_SECONDS = 10
+
+# Settings seeded into each conversion's LibreOffice profile, as
+# registrymodifications.xcu entries (path, property, value). Writer counts
+# link-update modes 0 never, 1 on request, 2 always; Calc counts them
+# 0 always, 1 never, 2 on request.
+_LIBREOFFICE_PROFILE_SETTINGS = (
+    # Linked content from locations outside the document is not loaded.
+    ("/org.openoffice.Office.Common/Security/Scripting", "BlockUntrustedRefererLinks", "true"),
+    # Links in a document are never updated when it is loaded.
+    ("/org.openoffice.Office.Writer/Content/Update", "Link", "0"),
+    ("/org.openoffice.Office.Calc/Content/Update", "Link", "1"),
+)
+
+
+def _write_libreoffice_profile(profile_dir: Path) -> None:
+    """Create a LibreOffice user profile in `profile_dir`, seeded with
+    _LIBREOFFICE_PROFILE_SETTINGS, plus a `tmp` folder for its temporary files."""
+    (profile_dir / "user").mkdir()
+    (profile_dir / "tmp").mkdir()
+    items = "".join(
+        f'<item oor:path="{path}"><prop oor:name="{name}" oor:op="fuse">'
+        f"<value>{value}</value></prop></item>\n"
+        for path, name, value in _LIBREOFFICE_PROFILE_SETTINGS
+    )
+    (profile_dir / "user" / "registrymodifications.xcu").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<oor:items xmlns:oor="http://openoffice.org/2001/registry" '
+        'xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
+        f"{items}</oor:items>\n",
+        encoding="utf-8",
+    )
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    """Kill every process in `process`'s group (it leads one) and wait for
+    them to exit. Without process groups, only `process` itself is killed."""
+    if not hasattr(os, "killpg"):
+        process.kill()
+        process.wait()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+    deadline = time.monotonic() + _LIBREOFFICE_KILL_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return  # gone, or the ID now belongs to someone else's processes
+        time.sleep(0.05)
+
+
+def _run_libreoffice(args: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run `libreoffice <args>` with a profile of its own, removed afterwards.
+
+    Concurrent conversions do not share a profile, and none uses the
+    service account's default one. LibreOffice starts in a session of its
+    own: `libreoffice` is a launcher that starts soffice.bin, so on a
+    timeout (or any other interruption) the whole process group is killed,
+    not just the launcher.
+    """
+    folder = tempfile.TemporaryDirectory(prefix="blackbar-libreoffice-", ignore_cleanup_errors=True)
+    profile = Path(folder.name)
+    try:
+        _write_libreoffice_profile(profile)
+        command = ["libreoffice", f"-env:UserInstallation={profile.as_uri()}", *args]
+        env = {**os.environ, "TMPDIR": str(profile / "tmp")}
+        with subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except BaseException:
+                _kill_process_group(process)
+                raise
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        # A cleanup error never replaces the conversion's own result or error.
+        folder.cleanup()
+        if profile.exists():
+            logger.warning(f"LibreOffice profile not fully removed: {profile}")
+
+
 def convert_office_to_pdf(input_file: str, output_dir: str) -> str:
     """
     Converts Office files (DOCX, PPTX, XLSX, DOC, PPT, XLS) to PDF using LibreOffice in headless mode.
     """
     try:
-        command = [
-            "libreoffice",
-            "--headless",
-            "--convert-to",
-            "pdf",
-            input_file,
-            "--outdir",
-            output_dir,
-        ]
-        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)
+        result = _run_libreoffice(
+            ["--headless", "--convert-to", "pdf", input_file, "--outdir", output_dir],
+            timeout=LIBREOFFICE_TIMEOUT_SECONDS,
+        )
         base = os.path.splitext(os.path.basename(input_file))[0]
         pdf_path = os.path.join(output_dir, base + ".pdf")
         if not os.path.exists(pdf_path):
             raise Exception(f"Office to PDF conversion failed. Output: {result.stderr}")
         return pdf_path
     except subprocess.TimeoutExpired:
-        raise Exception("Office to PDF conversion timed out after 60 seconds")
+        raise Exception(
+            f"Office to PDF conversion timed out after {LIBREOFFICE_TIMEOUT_SECONDS} seconds"
+        )
     except Exception as e:
         logger.error(f"Error converting Office file to PDF: {str(e)}")
         raise
@@ -523,7 +619,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
         try:
             s.feed(html_text)
             return s.get_data()
-        except:
+        except Exception:
             return html_text
 
     with open(input_file, "rb") as f:
@@ -897,7 +993,7 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
         try:
             s.feed(html_text)
             return s.get_data()
-        except:
+        except Exception:
             return html_text
 
     try:

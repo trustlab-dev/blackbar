@@ -16,12 +16,16 @@ have been removed.
 from __future__ import annotations
 
 import io
+import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from xml.etree import ElementTree
 
 import fitz  # PyMuPDF
 import pytest
@@ -65,64 +69,261 @@ class TestConfigureTesseract:
 
 
 # ---------------------------------------------------------------------------
-# convert_office_to_pdf (mocked subprocess)
+# convert_office_to_pdf (a fake ``libreoffice`` script on PATH)
 # ---------------------------------------------------------------------------
+
+# Stands in for the ``libreoffice`` binary. It records its argv and the
+# profile it was given, then writes ``<stem>.pdf`` into ``--outdir``.
+# FAKE_LO_EXIT makes it exit with that code without writing a PDF;
+# FAKE_LO_HANG makes it start a child process, write the child's PID to
+# that path, and hang.
+_FAKE_LIBREOFFICE = """#!{python}
+import json, os, subprocess, sys, time
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+argv = sys.argv[1:]
+record = {{"argv": argv, "tmpdir": os.environ.get("TMPDIR")}}
+for arg in argv:
+    if arg.startswith("-env:UserInstallation="):
+        profile = Path(unquote(urlparse(arg.split("=", 1)[1]).path))
+        record["profile"] = str(profile)
+        xcu = profile / "user" / "registrymodifications.xcu"
+        record["xcu"] = xcu.read_text() if xcu.exists() else None
+with open(os.environ["FAKE_LO_LOG"], "a") as log:
+    log.write(json.dumps(record) + "\\n")
+if os.environ.get("FAKE_LO_HANG"):
+    child = subprocess.Popen(["sleep", "300"])
+    Path(os.environ["FAKE_LO_HANG"]).write_text(str(child.pid))
+    time.sleep(300)
+if os.environ.get("FAKE_LO_EXIT"):
+    sys.exit(int(os.environ["FAKE_LO_EXIT"]))
+source = Path(argv[argv.index("--convert-to") + 2])
+outdir = Path(argv[argv.index("--outdir") + 1])
+(outdir / (source.stem + ".pdf")).write_bytes(Path(os.environ["FAKE_LO_PDF"]).read_bytes())
+"""
+
+# What each conversion's LibreOffice profile sets. Writer counts link-update
+# modes as 0 never, 1 on request, 2 always; Calc as 0 always, 1 never,
+# 2 on request.
+_PROFILE_SETTINGS = {
+    ("/org.openoffice.Office.Common/Security/Scripting", "BlockUntrustedRefererLinks"): "true",
+    ("/org.openoffice.Office.Writer/Content/Update", "Link"): "0",
+    ("/org.openoffice.Office.Calc/Content/Update", "Link"): "1",
+}
+
+
+class FakeLibreOffice:
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        script = bin_dir / "libreoffice"
+        script.write_text(_FAKE_LIBREOFFICE.format(python=sys.executable))
+        script.chmod(0o755)
+        self.log = tmp_path / "libreoffice-calls.jsonl"
+        pdf = tmp_path / "fake-converted.pdf"
+        pdf.write_bytes(_build_text_pdf("Converted by the fake LibreOffice"))
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setenv("FAKE_LO_LOG", str(self.log))
+        monkeypatch.setenv("FAKE_LO_PDF", str(pdf))
+
+    @property
+    def calls(self) -> list[dict]:
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+
+@pytest.fixture
+def fake_libreoffice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeLibreOffice:
+    return FakeLibreOffice(tmp_path, monkeypatch)
+
+
+def _profile_settings(xcu: str) -> dict[tuple[str, str], str | None]:
+    oor = "{http://openoffice.org/2001/registry}"
+    return {
+        (item.get(f"{oor}path"), prop.get(f"{oor}name")): prop.findtext("value")
+        for item in ElementTree.fromstring(xcu).findall("item")
+        for prop in item.findall("prop")
+    }
+
+
+def _kill_leftover(child_pid: Path) -> None:
+    """Leave no fake LibreOffice child behind if the code under test did not
+    kill it."""
+    try:
+        os.killpg(os.getpgid(int(child_pid.read_text())), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
 
 
 class TestConvertOfficeToPdf:
-    def test_invokes_libreoffice_and_returns_output_path(self, tmp_path: Path) -> None:
+    def test_invokes_libreoffice_and_returns_output_path(
+        self, tmp_path: Path, fake_libreoffice: FakeLibreOffice
+    ) -> None:
         in_file = tmp_path / "doc.docx"
         in_file.write_bytes(b"fake docx")
-        out_dir = tmp_path
-        expected_pdf = out_dir / "doc.pdf"
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
 
-        def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
-            assert cmd[0] == "libreoffice"
-            # Simulate LibreOffice creating the PDF
-            expected_pdf.write_bytes(b"%PDF-1.4 fake")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        result = convert_office_to_pdf(str(in_file), str(out_dir))
 
-        with patch("src.utils.conversion.subprocess.run", side_effect=_fake_run):
-            result = convert_office_to_pdf(str(in_file), str(out_dir))
-        assert result == str(expected_pdf)
+        assert result == str(out_dir / "doc.pdf")
+        assert Path(result).read_bytes().startswith(b"%PDF")
+        [call] = fake_libreoffice.calls
+        assert call["argv"][1:] == [
+            "--headless",
+            "--convert-to",
+            "pdf",
+            str(in_file),
+            "--outdir",
+            str(out_dir),
+        ]
 
-    def test_missing_output_file_raises(self, tmp_path: Path) -> None:
+    def test_each_conversion_gets_an_isolated_profile_removed_afterwards(
+        self, tmp_path: Path, fake_libreoffice: FakeLibreOffice
+    ) -> None:
+        in_file = tmp_path / "doc.docx"
+        in_file.write_bytes(b"fake docx")
+
+        convert_office_to_pdf(str(in_file), str(tmp_path))
+        convert_office_to_pdf(str(in_file), str(tmp_path))
+
+        first, second = fake_libreoffice.calls
+        for call in (first, second):
+            profile = Path(call["profile"])
+            assert call["argv"][0] == f"-env:UserInstallation={profile.as_uri()}"
+            assert _profile_settings(call["xcu"]) == _PROFILE_SETTINGS
+            # LibreOffice's own temporary files go inside the profile folder.
+            assert Path(call["tmpdir"]).is_relative_to(profile)
+            assert not profile.exists()
+        assert first["profile"] != second["profile"]
+
+    def test_failed_conversion_removes_its_profile(
+        self,
+        tmp_path: Path,
+        fake_libreoffice: FakeLibreOffice,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         in_file = tmp_path / "doc.docx"
         in_file.write_bytes(b"x")
+        monkeypatch.setenv("FAKE_LO_EXIT", "1")
 
-        def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
-            # Don't create the expected output file
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="boom")
+        with pytest.raises(subprocess.CalledProcessError):
+            convert_office_to_pdf(str(in_file), str(tmp_path))
 
-        with patch("src.utils.conversion.subprocess.run", side_effect=_fake_run):
-            with pytest.raises(Exception, match="Office to PDF conversion failed"):
-                convert_office_to_pdf(str(in_file), str(tmp_path))
+        [call] = fake_libreoffice.calls
+        assert not Path(call["profile"]).exists()
 
-    def test_subprocess_timeout_raises(self, tmp_path: Path) -> None:
+    def test_missing_output_file_raises(
+        self,
+        tmp_path: Path,
+        fake_libreoffice: FakeLibreOffice,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         in_file = tmp_path / "doc.docx"
         in_file.write_bytes(b"x")
+        # Exits 0 without writing the expected output file.
+        monkeypatch.setenv("FAKE_LO_EXIT", "0")
 
-        with patch(
-            "src.utils.conversion.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="libreoffice", timeout=60),
-        ):
-            with pytest.raises(Exception, match="timed out"):
+        with pytest.raises(Exception, match="Office to PDF conversion failed"):
+            convert_office_to_pdf(str(in_file), str(tmp_path))
+
+    @pytest.mark.parametrize("exit_code", ["", "1"], ids=["success", "failure"])
+    def test_profile_cleanup_error_is_logged_not_raised(
+        self,
+        tmp_path: Path,
+        fake_libreoffice: FakeLibreOffice,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        exit_code: str,
+    ) -> None:
+        """A profile folder that cannot be removed never replaces the
+        conversion's own result or error; it is logged instead."""
+        in_file = tmp_path / "doc.docx"
+        in_file.write_bytes(b"x")
+        temp = tmp_path / "temp"
+        temp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(temp))
+        if exit_code:
+            monkeypatch.setenv("FAKE_LO_EXIT", exit_code)
+
+        def failing_rmtree(path, onexc=None, onerror=None, **kwargs):  # type: ignore[no-untyped-def]
+            try:
+                raise OSError("device busy")
+            except OSError as e:
+                if onexc is not None:
+                    onexc(os.rmdir, path, e)
+                elif onerror is not None:
+                    onerror(os.rmdir, path, sys.exc_info())
+                else:
+                    raise
+
+        monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+
+        with caplog.at_level("WARNING", logger="src.utils.conversion"):
+            if exit_code:
+                with pytest.raises(subprocess.CalledProcessError):
+                    convert_office_to_pdf(str(in_file), str(tmp_path))
+            else:
+                assert convert_office_to_pdf(str(in_file), str(tmp_path)) == str(
+                    tmp_path / "doc.pdf"
+                )
+
+        [leftover] = temp.iterdir()
+        assert any(str(leftover) in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX only")
+    def test_timeout_stops_libreoffice_and_its_children(
+        self,
+        tmp_path: Path,
+        fake_libreoffice: FakeLibreOffice,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.utils import conversion
+
+        in_file = tmp_path / "doc.docx"
+        in_file.write_bytes(b"x")
+        child_pid = tmp_path / "child.pid"
+        monkeypatch.setenv("FAKE_LO_HANG", str(child_pid))
+        monkeypatch.setattr(conversion, "LIBREOFFICE_TIMEOUT_SECONDS", 2)
+
+        try:
+            with pytest.raises(Exception, match="timed out after 2 seconds"):
                 convert_office_to_pdf(str(in_file), str(tmp_path))
 
-    def test_docx_wrapper_calls_office(self, tmp_path: Path) -> None:
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(child_pid.read_text()), 0)
+            [call] = fake_libreoffice.calls
+            assert not Path(call["profile"]).exists()
+        finally:
+            _kill_leftover(child_pid)
+
+    def test_without_process_groups_a_timeout_kills_the_process_itself(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.utils import conversion
+
+        monkeypatch.delattr(os, "killpg", raising=False)
+        process = subprocess.Popen(["sleep", "300"])
+        try:
+            conversion._kill_process_group(process)
+
+            assert process.poll() is not None
+        finally:
+            process.kill()
+            process.wait()
+
+    def test_docx_wrapper_calls_office(
+        self, tmp_path: Path, fake_libreoffice: FakeLibreOffice
+    ) -> None:
         """``convert_docx_to_pdf`` is the legacy alias for
         convert_office_to_pdf."""
         in_file = tmp_path / "doc.docx"
         in_file.write_bytes(b"x")
-        expected = tmp_path / "doc.pdf"
 
-        def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
-            expected.write_bytes(b"%PDF")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        with patch("src.utils.conversion.subprocess.run", side_effect=_fake_run):
-            r = convert_docx_to_pdf(str(in_file), str(tmp_path))
-        assert r == str(expected)
+        r = convert_docx_to_pdf(str(in_file), str(tmp_path))
+        assert r == str(tmp_path / "doc.pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -462,18 +663,15 @@ class TestConvertToPdf:
         assert result["original_format"] == "msg"
         assert result["message_id"] == "<m@x>"
 
-    def test_office_input_uses_office_pipeline(self, tmp_path: Path) -> None:
+    def test_office_input_uses_office_pipeline(
+        self, tmp_path: Path, fake_libreoffice: FakeLibreOffice
+    ) -> None:
         docx = tmp_path / "file.docx"
         docx.write_bytes(b"x")
-        expected_pdf = tmp_path / "file.pdf"
 
-        def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
-            expected_pdf.write_bytes(_build_text_pdf("DOCX content"))
-            return subprocess.CompletedProcess(cmd, 0)
-
-        with patch("src.utils.conversion.subprocess.run", side_effect=_fake_run):
-            result = convert_to_pdf(str(docx), str(tmp_path))
+        result = convert_to_pdf(str(docx), str(tmp_path))
         assert result["success"] is True
+        assert len(fake_libreoffice.calls) == 1
         assert result["original_format"] == "docx"
 
     def test_no_output_dir_uses_temp(self) -> None:
@@ -716,6 +914,46 @@ class TestConvertMsgToPdf:
         assert "<b>" not in text
 
 
+class _Interrupt(BaseException):
+    """Not an ``Exception``: stands in for KeyboardInterrupt or SystemExit."""
+
+
+class TestStripHtmlLetsInterruptsThrough:
+    """strip_html falls back to the raw HTML on a parser error but must not
+    swallow BaseExceptions such as KeyboardInterrupt."""
+
+    def test_eml(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "msg.eml"
+        in_file.write_bytes(HTML_EML)
+
+        with patch("html.parser.HTMLParser.feed", side_effect=_Interrupt):
+            with pytest.raises(_Interrupt):
+                convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+    def test_msg(self, tmp_path: Path) -> None:
+        in_file = tmp_path / "msg.msg"
+        in_file.write_bytes(b"x")
+        fake_msg = MagicMock()
+        fake_msg.sender = "a@x"
+        fake_msg.to = "b@x"
+        fake_msg.subject = "S"
+        fake_msg.date = None
+        fake_msg.body = None
+        fake_msg.htmlBody = b"<p>Hello <b>HTML</b></p>"
+        fake_msg.rtfBody = None
+        fake_msg.attachments = []
+        fake_msg.messageId = None
+        fake_module = MagicMock()
+        fake_module.Message.return_value = fake_msg
+
+        with (
+            patch.dict("sys.modules", {"extract_msg": fake_module}),
+            patch("html.parser.HTMLParser.feed", side_effect=_Interrupt),
+        ):
+            with pytest.raises(_Interrupt):
+                convert_msg_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+
 # ---------------------------------------------------------------------------
 # Slow integration tests (skip if tooling absent)
 # ---------------------------------------------------------------------------
@@ -733,6 +971,42 @@ def test_real_libreoffice_docx_roundtrip(tmp_path: Path, fixtures_dir: Path) -> 
         pytest.skip("FOIPPA_Test_Document.docx fixture not available")
     pdf = convert_office_to_pdf(str(sample), str(tmp_path))
     assert Path(pdf).exists()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _HAS_LIBREOFFICE, reason="libreoffice not installed")
+def test_real_libreoffice_uses_and_removes_an_isolated_profile(
+    tmp_path: Path, fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LibreOffice fills the per-conversion profile it is given, and the
+    profile folder is gone once the conversion returns."""
+    sample = fixtures_dir / "FOIPPA_Test_Document.docx"
+    if not sample.exists():
+        pytest.skip("FOIPPA_Test_Document.docx fixture not available")
+    profiles: list[tuple[Path, list[str]]] = []
+
+    class SpyTemporaryDirectory(tempfile.TemporaryDirectory):
+        """Records what is in each profile's user folder just before removal."""
+
+        def cleanup(self) -> None:
+            user = Path(self.name) / "user"
+            if user.is_dir():
+                profiles.append((Path(self.name), sorted(p.name for p in user.iterdir())))
+            super().cleanup()
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", SpyTemporaryDirectory)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    pdf = convert_office_to_pdf(str(sample), str(out_dir))
+
+    assert fitz.open(pdf).page_count > 0
+    [(profile, contents)] = profiles
+    assert profile.name.startswith("blackbar-libreoffice-")
+    # LibreOffice wrote its own configuration next to the seeded settings.
+    assert "registrymodifications.xcu" in contents
+    assert "config" in contents
+    assert not profile.exists()
 
 
 class TestFirstPassOcrBudget:

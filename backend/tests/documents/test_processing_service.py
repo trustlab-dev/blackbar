@@ -796,7 +796,7 @@ class TestProcessAttachments:
         # `_process_attachments`. The source now uses a `with` block
         # so the warnings no longer fire and the markers can go.
         att_input = tmp_path / "attachment.docx"
-        att_input.write_bytes(b"raw-docx-bytes")
+        att_input.write_bytes(b"PK\x03\x04raw-docx-bytes")
         att_pdf = tmp_path / "out.pdf"
         att_pdf.write_bytes(b"%PDF-attached")
 
@@ -855,7 +855,7 @@ class TestProcessAttachments:
 
     async def test_conversion_failure_skipped(self, service, tmp_path) -> None:
         att = tmp_path / "att.docx"
-        att.write_bytes(b"x")
+        att.write_bytes(b"PK\x03\x04x")
         with patch(
             "src.documents.processing_service.convert_to_pdf",
             return_value={"success": False, "error": "bad"},
@@ -871,7 +871,7 @@ class TestProcessAttachments:
 
     async def test_inner_exception_continues(self, service, tmp_path) -> None:
         att = tmp_path / "att.docx"
-        att.write_bytes(b"x")
+        att.write_bytes(b"PK\x03\x04x")
         att_pdf = tmp_path / "att.pdf"
         att_pdf.write_bytes(b"%PDF")
         from src.documents.processing_service import UploadContext
@@ -895,6 +895,77 @@ class TestProcessAttachments:
                 UploadContext(),
             )
         assert docs == []
+
+    async def test_content_mismatch_recorded_not_converted(self, service, tmp_path) -> None:
+        """Attachments bound for LibreOffice are content-checked like
+        uploads: RTF bytes in a ``.doc`` are reported, not converted."""
+        from src.documents.processing_service import CONTENT_MISMATCH_ERROR, UploadContext
+
+        att = tmp_path / "0123abcd.doc"
+        att.write_bytes(b"{\\rtf1\\ansi plain rtf, not a doc}")
+        convert = MagicMock()
+        with patch("src.documents.processing_service.convert_to_pdf", convert):
+            docs = await service._process_attachments(
+                [{"filename": "notes.doc", "path": str(att)}],
+                "parent-1",
+                UploadContext(),
+            )
+        assert docs == []
+        convert.assert_not_called()
+        assert service.attachment_errors == [
+            {"filename": "notes.doc", "error": CONTENT_MISMATCH_ERROR}
+        ]
+
+    async def test_check_uses_the_extracted_files_extension(self, service, tmp_path) -> None:
+        """The extension of the extracted file (what convert_to_pdf goes by)
+        decides the check, not the sender's filename: PDF bytes extracted
+        as ``.docx`` are a mismatch even though the sender called them
+        ``report.pdf``."""
+        from src.documents.processing_service import CONTENT_MISMATCH_ERROR, UploadContext
+
+        att = tmp_path / "0123abcd.docx"
+        att.write_bytes(_make_minimal_pdf_bytes())
+        convert = MagicMock()
+        with patch("src.documents.processing_service.convert_to_pdf", convert):
+            docs = await service._process_attachments(
+                [{"filename": "report.pdf", "path": str(att)}], "parent-1", UploadContext()
+            )
+        assert docs == []
+        convert.assert_not_called()
+        assert service.attachment_errors == [
+            {"filename": "report.pdf", "error": CONTENT_MISMATCH_ERROR}
+        ]
+
+    async def test_image_with_another_image_extension_still_converts(
+        self, service, tmp_path
+    ) -> None:
+        """Images and PDFs are decoded from their content, not handed to
+        LibreOffice, so a PNG named ``.jpg`` converts as before."""
+        import io
+
+        from PIL import Image
+
+        from src.documents.processing_service import UploadContext
+
+        png = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(png, format="PNG")
+        att = tmp_path / "0123abcd.jpg"
+        att.write_bytes(png.getvalue())
+        att_pdf = tmp_path / "out.pdf"
+        att_pdf.write_bytes(_make_minimal_pdf_bytes())
+        convert = MagicMock(return_value={"success": True, "pdf_path": str(att_pdf)})
+        with (
+            patch("src.documents.processing_service.convert_to_pdf", convert),
+            patch.object(service, "_extract_text", AsyncMock(return_value=(None, None))),
+            patch.object(service, "_generate_summary", AsyncMock(return_value=None)),
+            patch.object(service, "_store_in_gridfs", AsyncMock(return_value={})),
+        ):
+            docs = await service._process_attachments(
+                [{"filename": "photo.jpg", "path": str(att)}], "parent-1", UploadContext()
+            )
+        assert len(docs) == 1
+        convert.assert_called_once()
+        assert service.attachment_errors == []
 
 
 # ===========================================================================
@@ -1999,7 +2070,7 @@ class TestExtractedTextPopulated:
         from src.documents.processing_service import UploadContext
 
         att_input = tmp_path / "a.docx"
-        att_input.write_bytes(b"raw")
+        att_input.write_bytes(b"PK\x03\x04raw")
         att_pdf = tmp_path / "a.pdf"
         att_pdf.write_bytes(b"%PDF-att")
         with (
@@ -2029,7 +2100,7 @@ class TestExtractedTextPopulated:
         from src.documents.processing_service import UploadContext
 
         att_input = tmp_path / "a.eml"
-        att_input.write_bytes(b"raw")
+        att_input.write_bytes(b"From: a@x\nSubject: S\n\nbody")
         att_pdf = tmp_path / "a.pdf"
         att_pdf.write_bytes(b"%PDF-att")
         with (
@@ -2219,6 +2290,42 @@ class TestAttachmentErrorsSurfaced:
         assert any("bundle.bin" in w for w in result.warnings)
 
 
+class TestAttachmentContentCheck:
+    async def test_attachment_whose_content_does_not_match_is_reported(
+        self, db, patch_gridfs_stack, monkeypatch
+    ) -> None:
+        from email.mime.application import MIMEApplication
+
+        from src.documents.processing_service import (
+            CONTENT_MISMATCH_ERROR,
+            DocumentProcessingService,
+            ProcessingStatus,
+            UploadContext,
+        )
+
+        _mock_pipeline_libs(monkeypatch)
+        email = _email_with("Figures", [("real.pdf", _pdf_bytes("real"))])
+        html = MIMEApplication(b"<html><body>a table</body></html>", _subtype="vnd.ms-excel")
+        html.add_header("Content-Disposition", "attachment", filename="figures.xls")
+        email.attach(html)
+
+        result = await DocumentProcessingService(db).process_upload(
+            file_content=email.as_bytes(),
+            filename="figures.eml",
+            content_type=None,
+            context=UploadContext(case_id="c1"),
+        )
+
+        assert result.status == ProcessingStatus.SUCCESS, result.error
+        top = await db.documents.find_one({"id": result.document_id})
+        assert top["attachment_errors"] == [
+            {"filename": "figures.xls", "error": CONTENT_MISMATCH_ERROR}
+        ]
+        children = await db.documents.find({"parent_document_id": top["id"]}).to_list(None)
+        assert [c["original_filename"] for c in children] == ["real.pdf"]
+        assert any("figures.xls" in w for w in result.warnings)
+
+
 class TestThreadConsolidationWiring:
     """#71 / #75 on the service side."""
 
@@ -2342,7 +2449,7 @@ class TestConversionOffEventLoop:
         from src.documents.processing_service import UploadContext
 
         att = tmp_path / "a.docx"
-        att.write_bytes(b"docx")
+        att.write_bytes(b"PK\x03\x04docx")
         seen: list[bool] = []
         with (
             patch(

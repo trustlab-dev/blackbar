@@ -29,6 +29,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carries password hashes.
 - Email attachment names can no longer write outside the work directory; uploads
   are size-capped while streaming (413) and must match their file type (415).
+- Office-format email attachments (converted by LibreOffice) are
+  content-checked like uploads; one whose content does not match its file
+  type is listed in `attachment_errors`, not converted.
+- Each Office conversion runs LibreOffice with an isolated, temporary
+  profile that blocks linked content from untrusted locations and never
+  updates links on load.
 - Released and exported PDFs are sanitised (metadata, attachments, annotations,
   links, JavaScript) and re-checked for text left under redaction boxes.
 - LLM provider keys no longer leak through URLs, errors or logs; disabled
@@ -59,6 +65,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   packages list every blocking redaction with its reason.
 - Office conversion, first-pass OCR and the summary's text extraction run off
   the event loop, within the page, pixel and per-page timeout limits.
+- An Office conversion that times out stops LibreOffice with all its child
+  processes, not only the launcher.
 - Attachments of forwarded or embedded emails become records (up to 5 levels
   deep); deeper ones are listed in `attachment_errors`.
 - Email threading reads Message-ID, In-Reply-To, References, Date, Subject,
