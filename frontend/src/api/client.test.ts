@@ -12,6 +12,12 @@ import { server } from '../test-utils/msw-handlers';
 // Helpers
 // ---------------------------------------------------------------------------
 
+// jsdom's document origin (http://localhost:3000). Relative requests resolve
+// against the document, not against a stubbed `window.location`, while MSW
+// resolves relative handler paths against `location.href`. Stubs must keep
+// this origin or the handlers stop matching the requests.
+const DOCUMENT_ORIGIN = window.location.origin;
+
 /**
  * Replace window.location with a writable stub for the duration of a test.
  * jsdom's default window.location is non-configurable, so we have to use
@@ -22,9 +28,9 @@ import { server } from '../test-utils/msw-handlers';
 function stubLocation(overrides: Partial<Location> = {}): () => void {
   const original = Object.getOwnPropertyDescriptor(window, 'location');
   const fake = {
-    href: 'http://localhost/',
+    href: `${DOCUMENT_ORIGIN}/`,
     protocol: 'http:',
-    host: 'localhost',
+    host: new URL(DOCUMENT_ORIGIN).host,
     pathname: '/',
     search: '',
     assign: vi.fn(),
@@ -115,9 +121,11 @@ describe('client.ts — publicApi', () => {
           () => new HttpResponse(null, { status: 401 }),
         ),
       );
-      await expect(publicApi.get('/public/ping')).rejects.toThrow();
+      await expect(publicApi.get('/public/ping')).rejects.toMatchObject({
+        response: { status: 401 },
+      });
       // publicApi has no interceptor, so href is unchanged.
-      expect(window.location.href).toBe('http://localhost/');
+      expect(window.location.href).toBe(`${DOCUMENT_ORIGIN}/`);
     } finally {
       restore();
     }
@@ -238,7 +246,10 @@ describe('client.ts — response interceptor (401 redirect)', () => {
   });
 
   it('does NOT redirect when already on a /login path (short-circuit)', async () => {
-    const restore = stubLocation({ pathname: '/login', href: 'orig-href' });
+    const restore = stubLocation({
+      pathname: '/login',
+      href: `${DOCUMENT_ORIGIN}/login`,
+    });
     try {
       const { default: api } = await import('./client');
       server.use(
@@ -247,9 +258,11 @@ describe('client.ts — response interceptor (401 redirect)', () => {
           () => new HttpResponse(null, { status: 401 }),
         ),
       );
-      await expect(api.get('/whoami')).rejects.toThrow();
+      await expect(api.get('/whoami')).rejects.toMatchObject({
+        response: { status: 401 },
+      });
       // href is unchanged because the short-circuit branch was taken
-      expect(window.location.href).toBe('orig-href');
+      expect(window.location.href).toBe(`${DOCUMENT_ORIGIN}/login`);
       // But localStorage was still cleared
       // (no token was set anyway, but we double-check no crash happened)
       expect(localStorage.getItem('token')).toBeNull();
@@ -261,7 +274,7 @@ describe('client.ts — response interceptor (401 redirect)', () => {
   it('short-circuit also fires when on a public login path (pathname includes /login)', async () => {
     const restore = stubLocation({
       pathname: '/public/login',
-      href: 'orig-href',
+      href: `${DOCUMENT_ORIGIN}/public/login`,
     });
     try {
       const { default: api } = await import('./client');
@@ -271,8 +284,10 @@ describe('client.ts — response interceptor (401 redirect)', () => {
           () => new HttpResponse(null, { status: 401 }),
         ),
       );
-      await expect(api.get('/whoami')).rejects.toThrow();
-      expect(window.location.href).toBe('orig-href');
+      await expect(api.get('/whoami')).rejects.toMatchObject({
+        response: { status: 401 },
+      });
+      expect(window.location.href).toBe(`${DOCUMENT_ORIGIN}/public/login`);
     } finally {
       restore();
     }
@@ -289,9 +304,11 @@ describe('client.ts — response interceptor (401 redirect)', () => {
           () => new HttpResponse(null, { status: 500 }),
         ),
       );
-      await expect(api.get('/whoami')).rejects.toThrow();
+      await expect(api.get('/whoami')).rejects.toMatchObject({
+        response: { status: 500 },
+      });
       // No navigation
-      expect(window.location.href).toBe('http://localhost/');
+      expect(window.location.href).toBe(`${DOCUMENT_ORIGIN}/`);
       // Token retained
       expect(localStorage.getItem('token')).toBe('still-good');
     } finally {
@@ -355,7 +372,7 @@ describe('client.ts — session-ended 401s and public-token 403s', () => {
         ),
       );
       const hrefSet = vi.fn();
-      let href = 'http://localhost/';
+      let href = `${DOCUMENT_ORIGIN}/`;
       Object.defineProperty(window.location, 'href', {
         configurable: true,
         get: () => href,
@@ -386,7 +403,7 @@ describe('client.ts — session-ended 401s and public-token 403s', () => {
         ),
       );
       await expect(api.get('/cases')).rejects.toMatchObject({ response: { status: 403 } });
-      expect(window.location.href).toBe('http://localhost/');
+      expect(window.location.href).toBe(`${DOCUMENT_ORIGIN}/`);
       expect(localStorage.getItem('token')).toBe('public-tok');
       expect(localStorage.getItem('user_type')).toBe('public');
     } finally {

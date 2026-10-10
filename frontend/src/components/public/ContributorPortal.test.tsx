@@ -90,16 +90,23 @@ afterEach(() => {
 });
 
 describe('ContributorPortal — initial render', () => {
-  it('renders loading spinner before info loads', () => {
+  it('renders loading spinner before info loads', async () => {
+    let requested = false;
     server.use(
-      http.get(
-        `${API_BASE}/contribute/c-1`,
-        () => new Promise(() => {}),
-      ),
+      http.get(`${API_BASE}/contribute/c-1`, () => {
+        requested = true;
+        return new Promise(() => {});
+      }),
     );
     renderWithProviders(<Harness />, {
       route: '/contribute/c-1?token=tok',
     });
+    expect(
+      document.querySelector('.MuiCircularProgress-root'),
+    ).toBeInTheDocument();
+    // Hold the test open until the request reaches this handler. Otherwise it
+    // can reach MSW after the handlers are reset and fail as unhandled.
+    await waitFor(() => expect(requested).toBe(true));
     expect(
       document.querySelector('.MuiCircularProgress-root'),
     ).toBeInTheDocument();

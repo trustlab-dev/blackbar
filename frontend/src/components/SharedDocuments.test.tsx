@@ -120,13 +120,16 @@ describe('SharedDocuments', () => {
   it('leaves a 401 to the api client, keeping reason and return path', async () => {
     const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')!;
     const assignments: string[] = [];
-    let href = 'http://localhost/shared';
+    // Keep jsdom's document origin: requests resolve against the document,
+    // MSW resolves relative handler paths against this stubbed href.
+    const { origin, host } = window.location;
+    let href = `${origin}/shared`;
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: {
-        origin: 'http://localhost',
+        origin,
         protocol: 'http:',
-        host: 'localhost',
+        host,
         hostname: 'localhost',
         pathname: '/shared',
         search: '',
