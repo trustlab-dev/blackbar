@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Any
 
 import fitz  # PyMuPDF
 import pytesseract
@@ -164,13 +165,13 @@ def native_page_data(page: fitz.Page) -> dict | None:
 
 def _extract_pages(pdf_document: fitz.Document) -> dict:
     # Every box in the result is in displayed (viewer) space (C1).
-    result = {"pages": [], "full_text": "", "coord_space": "displayed"}
+    result: dict[str, Any] = {"pages": [], "full_text": "", "coord_space": "displayed"}
 
     for page_num, page in enumerate(pdf_document, 1):
         # Get page dimensions
         page_rect = page.rect
 
-        page_data = {
+        page_data: dict[str, Any] = {
             "page_num": page_num,
             "text": "",
             "width": float(page_rect.width),
@@ -210,7 +211,7 @@ def _extract_pages(pdf_document: fitz.Document) -> dict:
             # PdfLimitExceeded for pages too large to render at all.
             dpi = pdf_limits.render_dpi_for_page(pdf_width, pdf_height)
             pix = page.get_pixmap(dpi=dpi)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
             # Calculate scale factor to convert OCR coords back to PDF points
             scale_x = pdf_width / pix.width
@@ -234,9 +235,9 @@ def _extract_pages(pdf_document: fitz.Document) -> dict:
 
             # Group OCR results by line
             current_line_num = None
-            line_words = []
+            line_words: list[dict[str, Any]] = []
             line_text = ""
-            line_bbox = None
+            line_bbox: list[float] | None = None
             line_num = 0
             word_num = 0
 

@@ -154,7 +154,7 @@ def create_bulk_redactions(
 
 
 def create_redaction_template(
-    name: str, pattern: str, category: str, reason: str, description: str = None
+    name: str, pattern: str, category: str, reason: str, description: str | None = None
 ) -> dict:
     """
     Create a reusable redaction template.

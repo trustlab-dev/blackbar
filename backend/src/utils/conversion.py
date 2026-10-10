@@ -18,7 +18,7 @@ from email.message import Message
 from email.parser import BytesHeaderParser
 from email.utils import format_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import fitz  # PyMuPDF
 import pytesseract
@@ -517,7 +517,8 @@ def convert_image_to_pdf(input_file: str, output_dir: str) -> str:
         # instead of relying on GC. Only the dimensions are needed
         # outside the block since `c.drawImage(input_file, ...)` below
         # reads from the path directly.
-        with Image.open(input_file) as img:
+        with Image.open(input_file) as opened:
+            img: Image.Image = opened
             # Convert to RGB if necessary (for PNG with transparency, etc.)
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
@@ -648,7 +649,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     # Extract attachments and inline images
     attachment_info = []
     dropped: list[dict] = []
-    inline_images = {}  # Map Content-ID to image data
+    inline_images: dict[str, dict[str, Any]] = {}  # Map Content-ID to image data
     output_dir = os.path.dirname(output_file)
     body_found = False
     html_body = None
@@ -766,7 +767,10 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
     else:
         # Non-multipart email - just get the body
         charset = msg.get_content_charset() or "utf-8"
-        body_text = msg.get_payload(decode=True).decode(charset, errors="ignore")
+        # A non-multipart payload decodes to bytes; typeshed can't express
+        # that, so its return type also allows Message.
+        payload = cast(bytes, msg.get_payload(decode=True))
+        body_text = payload.decode(charset, errors="ignore")
         # Check if it's HTML and strip tags
         if msg.get_content_type() == "text/html":
             body_text = strip_html(body_text)
@@ -807,7 +811,7 @@ def convert_eml_to_pdf(input_file: str, output_file: str) -> tuple:
                 if img_id in inline_images:
                     try:
                         img_bytes = io.BytesIO(inline_images[img_id]["data"])
-                        img = Image.open(img_bytes)
+                        img: Image.Image = Image.open(img_bytes)
 
                         # Convert to RGB if necessary
                         if img.mode not in ("RGB", "L"):
@@ -1035,7 +1039,7 @@ def convert_msg_to_pdf(input_file: str, output_file: str) -> tuple:
         elif hasattr(msg, "htmlBody") and msg.htmlBody:
             # htmlBody is bytes, need to decode it first
             try:
-                html_content = msg.htmlBody
+                html_content: bytes | str = msg.htmlBody
                 if isinstance(html_content, bytes):
                     html_content = html_content.decode("utf-8", errors="ignore")
                 # Strip HTML tags from HTML body
@@ -1138,7 +1142,7 @@ def calculate_file_hash(file_content: bytes) -> str:
     return hashlib.sha256(file_content).hexdigest()
 
 
-def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
+def convert_to_pdf(input_file: str, output_dir: str | None = None) -> dict:
     """
     Universal converter - automatically detects file type and converts to PDF.
     Stores both original and converted PDF.
@@ -1170,7 +1174,7 @@ def convert_to_pdf(input_file: str, output_dir: str = None) -> dict:
     name, ext = os.path.splitext(filename)
     ext = ext.lower()
 
-    result = {
+    result: dict[str, Any] = {
         "success": False,
         "pdf_path": None,
         "original_format": ext[1:] if ext else "unknown",

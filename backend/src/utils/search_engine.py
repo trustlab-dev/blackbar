@@ -65,7 +65,7 @@ def highlight_text(text: str, query: str, context_chars: int = 100) -> list[dict
     return matches
 
 
-def build_search_query(query: str, fields: list[str] = None) -> dict:
+def build_search_query(query: str, fields: list[str] | None = None) -> dict:
     """
     Build MongoDB text search query.
 
@@ -90,7 +90,7 @@ def build_search_query(query: str, fields: list[str] = None) -> dict:
     return {"$text": {"$search": query}}
 
 
-def search_documents(query: str, filters: dict = None, limit: int = 50) -> dict:
+def search_documents(query: str, filters: dict | None = None, limit: int = 50) -> dict:
     """
     Build search query for documents.
 
@@ -114,7 +114,7 @@ def search_documents(query: str, filters: dict = None, limit: int = 50) -> dict:
     return {"query": base_query, "limit": limit, "sort": [("uploaded_at", -1)]}  # Most recent first
 
 
-def search_cases(query: str, filters: dict = None, limit: int = 50) -> dict:
+def search_cases(query: str, filters: dict | None = None, limit: int = 50) -> dict:
     """
     Build search query for cases.
 

@@ -55,7 +55,7 @@ def calculate_business_days(start_date: datetime, num_days: int) -> datetime:
     return current_date
 
 
-def get_deadline_status(due_date: datetime, current_date: datetime = None) -> DeadlineStatus:
+def get_deadline_status(due_date: datetime, current_date: datetime | None = None) -> DeadlineStatus:
     """
     Determine the status of a deadline.
 
@@ -83,7 +83,9 @@ def get_deadline_status(due_date: datetime, current_date: datetime = None) -> De
 
 
 def calculate_sla_deadline(
-    request_date: datetime, sla_type: SLAType = SLAType.STANDARD, extensions: list[int] = None
+    request_date: datetime,
+    sla_type: SLAType = SLAType.STANDARD,
+    extensions: list[int] | None = None,
 ) -> dict:
     """
     Calculate SLA deadline for a case.
@@ -166,7 +168,9 @@ def get_deadline_color(status: DeadlineStatus) -> str:
     return colors.get(status, "#6c757d")
 
 
-def should_send_notification(deadline_info: dict, last_notification: datetime = None) -> bool:
+def should_send_notification(
+    deadline_info: dict, last_notification: datetime | None = None
+) -> bool:
     """
     Determine if a notification should be sent.
 
@@ -214,7 +218,7 @@ def generate_deadline_summary(cases: list[dict]) -> dict:
     Returns:
         Summary statistics
     """
-    summary = {
+    summary: dict[str, int | float] = {
         "total_cases": len(cases),
         "on_track": 0,
         "warning": 0,
