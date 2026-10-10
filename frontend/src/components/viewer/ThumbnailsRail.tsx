@@ -55,7 +55,8 @@ const ThumbnailsRail: React.FC<Props> = ({ documentId, numPages, currentPage, on
           }
         }
 
-        if (!cancelled) pdf.destroy();
+        // pdf.js 6 removed PDFDocumentProxy.destroy(); destroy the task.
+        if (!cancelled) loadingTask.destroy();
       } catch (error: any) {
         if (!cancelled && error?.name !== 'MissingPDFException') {
           console.error('Error loading thumbnails:', error);

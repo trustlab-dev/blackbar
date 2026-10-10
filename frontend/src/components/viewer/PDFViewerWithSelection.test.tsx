@@ -99,7 +99,7 @@ afterEach(() => {
 });
 
 describe('PDFViewerWithSelection — pdf.js hardening and blob lifecycle', () => {
-  it('passes a stable options object with isEvalSupported disabled', async () => {
+  it('passes a stable, hardened options object', async () => {
     documentOptionsSeen.length = 0;
     server.use(http.get(META_URL, () => HttpResponse.json({})));
     const { rerender } = renderWithProviders(
@@ -124,7 +124,7 @@ describe('PDFViewerWithSelection — pdf.js hardening and blob lifecycle', () =>
       />,
     );
     expect(documentOptionsSeen.length).toBeGreaterThan(1);
-    expect(documentOptionsSeen[0]).toEqual({ isEvalSupported: false });
+    expect(documentOptionsSeen[0]).toEqual({ enableXfa: false });
     // Same identity across renders, or react-pdf would reload the document.
     expect(new Set(documentOptionsSeen).size).toBe(1);
   });
