@@ -21,12 +21,13 @@
     "noFallthroughCasesInSwitch": true,
     "noImplicitAny": false,
 
-    /* `vitest/globals` is referenced from src/vite-env.d.ts instead of here:
-       entries in `types` are resolved against `typeRoots` below, which cannot
-       reach a package subpath export, so listing it here fails with
-       "Cannot find type definition file for 'vitest/globals'". */
-    "types": ["vite/client", "node"],
-    "typeRoots": ["./node_modules/@types", "./src/types"],
+    /* Do not set `typeRoots`. With a custom `typeRoots`, entries in `types`
+       are only looked up inside those roots and never in node_modules, so
+       package subpaths such as `vite/client` and `vitest/globals` fail with
+       TS2688. TypeScript 6 hid this by reusing a cached resolution from a
+       triple-slash reference; TypeScript 7 does not. Local declarations in
+       src/types are picked up through `include` instead. */
+    "types": ["vite/client", "vitest/globals", "node"],
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true
