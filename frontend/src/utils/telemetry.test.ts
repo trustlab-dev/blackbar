@@ -17,7 +17,6 @@ const sentryMock = vi.hoisted(() => ({
   startInactiveSpan: vi.fn(() => ({ end: vi.fn() })),
   addEventProcessor: vi.fn(),
   getReplay: vi.fn(() => undefined as undefined | { stop: () => Promise<void> }),
-  breadcrumbsIntegration: vi.fn(() => 'breadcrumbs'),
   browserTracingIntegration: vi.fn(() => 'browser-tracing'),
   replayIntegration: vi.fn(() => 'replay'),
   ErrorBoundary: 'ErrorBoundary',
@@ -40,6 +39,31 @@ vi.mock('web-vitals', () => vitalsMock);
  * Re-import telemetry.ts with a given env so the module-level SENTRY_DSN /
  * ENVIRONMENT constants are recomputed. Returns the fresh module namespace.
  */
+// The defaults @sentry/browser 11.6 passes to an `integrations` function,
+// plus one standing in for a default added by a later release.
+const SDK_DEFAULTS = [
+  'EventFilters',
+  'FunctionToString',
+  'ConversationId',
+  'BrowserApiErrors',
+  'Breadcrumbs',
+  'Console',
+  'GlobalHandlers',
+  'LinkedErrors',
+  'Dedupe',
+  'HttpContext',
+  'CultureContext',
+  'BrowserSession',
+  'SomeFutureDefault',
+].map((name) => ({ name }));
+
+/** Resolve the `integrations` option the way the SDK does. */
+function resolveIntegrations(cfg: any): unknown[] {
+  return typeof cfg.integrations === 'function'
+    ? cfg.integrations(SDK_DEFAULTS)
+    : cfg.integrations;
+}
+
 async function loadTelemetry(env: Record<string, string>, prodBuild = false) {
   vi.resetModules();
   vi.stubEnv('PROD', prodBuild);
@@ -124,19 +148,71 @@ describe('initTelemetry — DSN configured', () => {
     const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
     t.initTelemetry();
     const cfg = sentryMock.init.mock.calls[0][0];
-    expect(cfg.sendDefaultPii).toBe(false);
+    // dataCollection replaced sendDefaultPii in 11.x; every category is pinned.
+    expect(cfg.sendDefaultPii).toBeUndefined();
+    expect(cfg.dataCollection).toBe(t.SAFE_DATA_COLLECTION);
     expect(cfg.beforeBreadcrumb).toBe(t.scrubBreadcrumb);
     expect(cfg.beforeSend).toBe(t.scrubEvent);
-    expect(cfg.beforeSendTransaction).toBe(t.scrubEvent);
-    expect(sentryMock.breadcrumbsIntegration).toHaveBeenCalledWith({ console: false });
+    // Spans are streamed in 11.x, so beforeSendTransaction would never run;
+    // beforeSendSpan only runs with the stream lifecycle.
+    expect(cfg.beforeSendSpan).toBe(t.scrubSpan);
+    expect(cfg.traceLifecycle).toBe('stream');
+    expect(cfg.beforeSendTransaction).toBeUndefined();
+    // Console breadcrumbs come from the Console default integration in 11.x.
+    const names = resolveIntegrations(cfg)
+      .filter((i): i is { name: string } => typeof i === 'object' && i !== null)
+      .map((i) => i.name);
+    expect(names).not.toContain('Console');
     expect(sentryMock.replayIntegration).toHaveBeenCalledWith(
       expect.objectContaining({
         maskAllText: true,
+        maskAllInputs: true,
         blockAllMedia: true,
+        networkDetailAllowUrls: [],
         beforeAddRecordingEvent: t.scrubRecordingEvent,
       }),
     );
     expect(sentryMock.addEventProcessor).toHaveBeenCalledWith(t.scrubEvent);
+  });
+
+  it('pins every dataCollection category to the restrictive setting', async () => {
+    const t = await loadTelemetry({});
+    expect(t.SAFE_DATA_COLLECTION).toEqual({
+      userInfo: false,
+      cookies: false,
+      httpHeaders: { request: { allow: ['user-agent'] }, response: false },
+      httpBodies: [],
+      urlQueryParams: {
+        deny: ['token', 'key', 'secret', 'passw', 'code', 'sig', 'auth', 'email', 'session'],
+      },
+      graphQL: { document: false, variables: false },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      queues: false,
+      stackFrameVariables: false,
+    });
+  });
+
+  it('keeps only allowlisted default integrations', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
+    t.initTelemetry();
+    const resolved = resolveIntegrations(sentryMock.init.mock.calls[0][0]);
+    const defaults = resolved
+      .filter((i): i is { name: string } => typeof i === 'object' && i !== null)
+      .map((i) => i.name);
+    expect(defaults).toEqual([
+      'EventFilters',
+      'FunctionToString',
+      'BrowserApiErrors',
+      'Breadcrumbs',
+      'GlobalHandlers',
+      'LinkedErrors',
+      'Dedupe',
+      'HttpContext',
+      'BrowserSession',
+    ]);
+    expect(resolved).toContain('browser-tracing');
   });
 
   it('uses low sample rates for a production build even when VITE_ENVIRONMENT is unset', async () => {
@@ -208,9 +284,9 @@ describe('replay gating on public and capability-token routes', () => {
     t.initTelemetry();
     const cfg = sentryMock.init.mock.calls[0][0];
     expect(sentryMock.replayIntegration).not.toHaveBeenCalled();
-    expect(cfg.integrations).not.toContain('replay');
+    expect(resolveIntegrations(cfg)).not.toContain('replay');
     // Tracing and scrubbing are unaffected.
-    expect(cfg.integrations).toContain('browser-tracing');
+    expect(resolveIntegrations(cfg)).toContain('browser-tracing');
     expect(cfg.beforeSend).toBe(t.scrubEvent);
   });
 
@@ -219,7 +295,7 @@ describe('replay gating on public and capability-token routes', () => {
     setPath('/cases');
     const t = await loadTelemetry({ VITE_SENTRY_DSN: 'https://key@sentry.io/1' });
     t.initTelemetry();
-    expect(sentryMock.init.mock.calls[0][0].integrations).toContain('replay');
+    expect(resolveIntegrations(sentryMock.init.mock.calls[0][0])).toContain('replay');
     expect(sentryMock.replayIntegration).toHaveBeenCalledWith(
       expect.objectContaining({ maskAllText: true, blockAllMedia: true }),
     );
@@ -595,7 +671,11 @@ describe('scrubbing helpers', () => {
         request: {
           url: 'https://app.example/contribute/c-1?token=abc',
           query_string: 'token=abc&x=1',
-          headers: { authorization: 'Bearer x', 'User-Agent': 'ua' },
+          headers: {
+            authorization: 'Bearer x',
+            'User-Agent': 'ua',
+            Referer: 'https://app.example/public/verify/magic-prev',
+          },
           cookies: { s: '1' },
         },
         exception: { values: [{ value: 'GET /api/v1/cases/public/release/rel-1 failed' }] },
@@ -614,7 +694,10 @@ describe('scrubbing helpers', () => {
         'https://app.example/contribute/[FILTERED]?token=[FILTERED]',
       );
       expect(out.request.query_string).toBe('token=[FILTERED]&x=1');
-      expect(out.request.headers).toEqual({ 'User-Agent': 'ua' });
+      expect(out.request.headers).toEqual({
+        'User-Agent': 'ua',
+        Referer: 'https://app.example/public/verify/[FILTERED]',
+      });
       expect(out.request.cookies).toBeUndefined();
       expect(out.exception.values[0].value).toBe(
         'GET /api/v1/cases/public/release/[FILTERED] failed',
@@ -634,6 +717,50 @@ describe('scrubbing helpers', () => {
       } as any);
       expect(out.request.query_string).toBeUndefined();
       expect(out.urls).toEqual(['https://app.example/public/verify/[FILTERED]']);
+    });
+  });
+
+  describe('scrubSpan', () => {
+    it('scrubs the segment span name, URL attributes, referer and user email', async () => {
+      const t = await load();
+      const span: any = {
+        name: '/public/verify/magic-xyz',
+        is_segment: true,
+        attributes: {
+          'sentry.op': 'pageload',
+          'sentry.segment.name': '/public/verify/magic-xyz',
+          'url.full': 'https://app.example/contribute/c-1?token=abc&x=1',
+          'url.query': 'token=abc&x=1',
+          'url.fragment': 'access_token=jwt.abc&state=1',
+          'http.query': '?code=123',
+          'http.request.header.referer': ['https://app.example/collect/tok-9'],
+          'user.id': 'u-1',
+          'user.email': 'a@b.com',
+          'http.response.status_code': 200,
+        },
+      };
+      const out = t.scrubSpan(span);
+      expect(out.name).toBe('/public/verify/[FILTERED]');
+      expect(out.attributes).toEqual({
+        'sentry.op': 'pageload',
+        'sentry.segment.name': '/public/verify/[FILTERED]',
+        'url.full': 'https://app.example/contribute/[FILTERED]?token=[FILTERED]&x=1',
+        'url.query': 'token=[FILTERED]&x=1',
+        'url.fragment': 'access_token=[FILTERED]&state=1',
+        'http.query': '?code=[FILTERED]',
+        'http.request.header.referer': ['https://app.example/collect/[FILTERED]'],
+        'user.id': 'u-1',
+        'user.email': '[FILTERED]',
+        'http.response.status_code': 200,
+      });
+    });
+
+    it('scrubs request URLs in fetch span names and leaves staff routes alone', async () => {
+      const t = await load();
+      expect(
+        t.scrubSpan({ name: 'GET /api/v1/cases/collect/tok-3/upload', attributes: {} } as any).name,
+      ).toBe('GET /api/v1/cases/collect/[FILTERED]/upload');
+      expect(t.scrubSpan({ name: '/cases/:id', attributes: {} } as any).name).toBe('/cases/:id');
     });
   });
 

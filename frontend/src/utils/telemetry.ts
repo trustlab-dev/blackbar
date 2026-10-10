@@ -9,7 +9,7 @@
 
 import React from 'react';
 import * as Sentry from '@sentry/react';
-import type { Breadcrumb, Event } from '@sentry/react';
+import type { Breadcrumb, BrowserOptions, Event } from '@sentry/react';
 import { onCLS, onFCP, onINP, onLCP, onTTFB } from 'web-vitals';
 import type { Metric } from 'web-vitals';
 
@@ -44,8 +44,9 @@ export const FILTERED = '[FILTERED]';
 // public tracking (/track/<number>, /cases/public/track/<number>): the
 // tracking number's random suffix is the only credential for that lookup.
 const TOKEN_PATH_SEGMENT = /(\/(?:verify|collect|contribute|release|track)\/)[^/?#\s"']+/gi;
-// Query/fragment parameters whose values must never be sent.
-const SENSITIVE_PARAM_NAME = /token|key|secret|passw|code|sig|auth|email|session/i;
+// Query/fragment parameters whose values must never be sent (substring match).
+const SENSITIVE_PARAM_TERMS = ['token', 'key', 'secret', 'passw', 'code', 'sig', 'auth', 'email', 'session'];
+const SENSITIVE_PARAM_NAME = new RegExp(SENSITIVE_PARAM_TERMS.join('|'), 'i');
 const QUERY_PAIR = /([?&#;])([^=&#?\s"']+)=([^&#\s"']*)/g;
 const SENSITIVE_HEADERS = /^(authorization|cookie|set-cookie|x-contributor-token|x-api-key)$/i;
 
@@ -61,13 +62,25 @@ export function scrubUrl(value: string): string {
     );
 }
 
+// Keys whose value is a bare query string or fragment with the leading "?"
+// or "#" stripped (span attributes `url.query`, `url.fragment`, `http.query`).
+const QUERY_LIKE_KEY = /(?:^|[._])(?:query|query_string|fragment)$/i;
+
+function scrubQueryLike(value: string): string {
+  return /^[?#]/.test(value) ? scrubUrl(value) : scrubUrl(`?${value}`).slice(1);
+}
+
 function scrubStringValues(data: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
+    const scrub = QUERY_LIKE_KEY.test(key) ? scrubQueryLike : scrubUrl;
     if (/email/i.test(key)) {
       out[key] = FILTERED;
     } else if (typeof value === 'string') {
-      out[key] = scrubUrl(value);
+      out[key] = scrub(value);
+    } else if (Array.isArray(value)) {
+      // Header attributes such as `http.request.header.referer` are arrays.
+      out[key] = value.map((v: unknown) => (typeof v === 'string' ? scrub(v) : v));
     } else {
       out[key] = value;
     }
@@ -93,15 +106,21 @@ export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
 }
 
 /**
- * `beforeSend` / `beforeSendTransaction` hook, also registered as an event
- * processor so replay events (which skip `beforeSend`) are covered.
+ * `beforeSend` hook, also registered as an event processor so replay events
+ * (which skip `beforeSend`) are covered. Spans are not events in
+ * @sentry/react 11: they are streamed and scrubbed by `scrubSpan`.
  */
 export function scrubEvent<T extends Event>(event: T): T {
   const request = event.request;
   if (request) {
     if (request.headers) {
-      for (const name of Object.keys(request.headers)) {
-        if (SENSITIVE_HEADERS.test(name)) delete request.headers[name];
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (SENSITIVE_HEADERS.test(name)) {
+          delete request.headers[name];
+        } else if (typeof value === 'string') {
+          // Referer carries the previous page URL, which can hold a token.
+          request.headers[name] = scrubUrl(value);
+        }
       }
     }
     delete request.cookies;
@@ -149,14 +168,35 @@ export function scrubEvent<T extends Event>(event: T): T {
   return event;
 }
 
+// The span payload `beforeSendSpan` receives (StreamedSpanJSON in
+// @sentry/core, which @sentry/react does not re-export).
+type StreamedSpan = Parameters<NonNullable<BrowserOptions['beforeSendSpan']>>[0];
+
+/**
+ * `beforeSendSpan` hook. With span streaming (the 11.x default, pinned in
+ * `initTelemetry`) every span, including the segment span that replaced the
+ * transaction, is sent on its own and never passes through `beforeSend`,
+ * `beforeSendTransaction` or event processors. The name holds the route or
+ * request URL; attributes hold `url.full`, `url.query`, `http.request.header.referer`,
+ * `sentry.segment.name` and the scope user (`user.email` is masked here).
+ */
+export function scrubSpan<T extends Pick<StreamedSpan, 'name' | 'attributes'>>(span: T): T {
+  if (typeof span.name === 'string') span.name = scrubUrl(span.name);
+  if (span.attributes) {
+    span.attributes = scrubStringValues(span.attributes) as T['attributes'];
+  }
+  return span;
+}
+
 /**
  * Replay `beforeAddRecordingEvent` hook. Custom recording events (tag
  * "breadcrumb" or "performanceSpan") embed URLs for navigations and network
  * requests; DOM snapshots are already masked by `maskAllText`.
  *
- * Limitation: Sentry only passes custom events through this hook. The rrweb
- * Meta event (type 4, `data.href = window.location.href`) that opens every
- * full snapshot never arrives here, which is why Replay is kept off token
+ * Limitation: Sentry only passes custom events (rrweb type 5) through this
+ * hook, in 8.x and still in 11.x. The rrweb Meta event (type 4,
+ * `data.href = window.location.href`) that opens every full snapshot never
+ * arrives here, which is why Replay is kept off token
  * routes entirely (see `isReplayExcludedPath`) and those pages strip the
  * token from the address bar (`utils/capabilityUrl.ts`).
  */
@@ -182,8 +222,8 @@ export function scrubRecordingEvent<T extends { type?: number; data?: unknown }>
 // public portal (/public/...), account activation, collection links,
 // contributor links, public tracking and the public request form. Replay
 // never records these. Every rrweb full snapshot starts with a Meta event
-// carrying window.location.href, and in @sentry/react 8.x that event skips
-// beforeAddRecordingEvent, so no scrubber can reach the token in it.
+// carrying window.location.href, and in @sentry/react 8.x through 11.x that
+// event skips beforeAddRecordingEvent, so no scrubber can reach the token in it.
 const REPLAY_EXCLUDED_ROUTE =
   /^\/(?:public|activate|collect|contribute|track|request)(?:\/|$)/i;
 
@@ -204,6 +244,46 @@ export function syncReplayWithRoute(pathname: string): void {
 }
 
 /**
+ * `dataCollection` for Sentry 11. Each category is pinned rather than left to
+ * the SDK default, which turned permissive in 11.x.
+ */
+export const SAFE_DATA_COLLECTION = {
+  // No automatic user.* fields, and no IP inference (`infer_ip: "never"`) on
+  // events, sessions, spans or replays.
+  userInfo: false,
+  cookies: false,
+  // The browser SDK only sends User-Agent and Referer. Referer is the
+  // previous page URL, which can carry a capability token.
+  httpHeaders: { request: { allow: ['user-agent'] }, response: false },
+  httpBodies: [],
+  // The parameter names scrubUrl filters, applied by the SDK before the
+  // scrubbers above see the URL.
+  urlQueryParams: { deny: SENSITIVE_PARAM_TERMS },
+  graphQL: { document: false, variables: false },
+  genAI: { inputs: false, outputs: false },
+  databaseQueryData: false,
+  queues: false,
+  stackFrameVariables: false,
+} satisfies NonNullable<BrowserOptions['dataCollection']>;
+
+// Default integrations kept from Sentry's list: the 8.x defaults, except
+// Breadcrumbs no longer covers console. Dropped: Console (console
+// breadcrumbs; the viewer has logged redaction text), CultureContext (locale,
+// time zone and calendar; not sent by 8.x), ConversationId (gen-AI spans
+// only) and anything a future release adds.
+export const KEPT_DEFAULT_INTEGRATIONS: ReadonlySet<string> = new Set([
+  'EventFilters',
+  'FunctionToString',
+  'BrowserApiErrors',
+  'Breadcrumbs',
+  'GlobalHandlers',
+  'LinkedErrors',
+  'Dedupe',
+  'HttpContext',
+  'BrowserSession',
+]);
+
+/**
  * Initialize frontend telemetry
  * Call this in index.tsx before rendering
  */
@@ -220,27 +300,34 @@ export function initTelemetry(): void {
       environment: ENVIRONMENT,
       release: `blackbar-frontend@${VERSION}`,
 
-      // Never attach IPs, cookies or request bodies automatically.
-      sendDefaultPii: false,
+      // 11.x replaced `sendDefaultPii` with `dataCollection`, and an unset
+      // `dataCollection` now collects user info, cookies, headers and bodies.
+      // Pin every category so nothing personal is attached automatically.
+      dataCollection: SAFE_DATA_COLLECTION,
 
-      // Performance monitoring
+      // Performance monitoring. Spans are streamed (the 11.x default, pinned
+      // here because `beforeSendSpan: scrubSpan` only runs in this mode).
       tracesSampleRate: IS_PRODUCTION ? 0.1 : 1.0,
+      traceLifecycle: 'stream',
 
       // Session replay. Text and media are masked, but keep volume low in
       // production: a replay is a recording of someone working a case.
       replaysSessionSampleRate: IS_PRODUCTION ? 0 : 0.1,
       replaysOnErrorSampleRate: IS_PRODUCTION ? 0.1 : 1.0,
 
-      // Integrations
-      integrations: [
-        // Console breadcrumbs would copy debug logging into every event.
-        Sentry.breadcrumbsIntegration({ console: false }),
+      // Integrations. Defaults are filtered through an allowlist so that a
+      // default added by a later SDK release does not start sending data.
+      integrations: (defaults) => [
+        ...defaults.filter((integration) => KEPT_DEFAULT_INTEGRATIONS.has(integration.name)),
         Sentry.browserTracingIntegration(),
         ...(recordReplay
           ? [
               Sentry.replayIntegration({
                 maskAllText: true,
+                maskAllInputs: true,
                 blockAllMedia: true,
+                // No request/response headers or bodies in replays.
+                networkDetailAllowUrls: [],
                 beforeAddRecordingEvent: scrubRecordingEvent,
               }),
             ]
@@ -250,7 +337,7 @@ export function initTelemetry(): void {
       // Filter sensitive data
       beforeBreadcrumb: scrubBreadcrumb,
       beforeSend: scrubEvent,
-      beforeSendTransaction: scrubEvent,
+      beforeSendSpan: scrubSpan,
     });
     // Replay events bypass beforeSend; event processors see every event type.
     Sentry.addEventProcessor(scrubEvent);
