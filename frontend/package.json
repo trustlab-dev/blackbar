@@ -19,7 +19,7 @@
         "react-dom": "^19.3.0",
         "react-pdf": "10.5.0",
         "react-router-dom": "^7.18.4",
-        "web-vitals": "^3.5.2"
+        "web-vitals": "^6.2.3"
     },
     "scripts": {
         "dev": "vite",

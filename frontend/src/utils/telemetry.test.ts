@@ -26,11 +26,11 @@ const sentryMock = vi.hoisted(() => ({
 }));
 
 const vitalsMock = vi.hoisted(() => ({
-  getCLS: vi.fn(),
-  getFID: vi.fn(),
-  getFCP: vi.fn(),
-  getLCP: vi.fn(),
-  getTTFB: vi.fn(),
+  onCLS: vi.fn(),
+  onINP: vi.fn(),
+  onFCP: vi.fn(),
+  onLCP: vi.fn(),
+  onTTFB: vi.fn(),
 }));
 
 vi.mock('@sentry/react', () => sentryMock);
@@ -78,11 +78,11 @@ describe('initTelemetry — DSN configured', () => {
     expect(cfg.release).toBe('blackbar-frontend@2.3.4');
     expect(cfg.tracesSampleRate).toBe(0.1);
 
-    expect(vitalsMock.getCLS).toHaveBeenCalled();
-    expect(vitalsMock.getFID).toHaveBeenCalled();
-    expect(vitalsMock.getFCP).toHaveBeenCalled();
-    expect(vitalsMock.getLCP).toHaveBeenCalled();
-    expect(vitalsMock.getTTFB).toHaveBeenCalled();
+    expect(vitalsMock.onCLS).toHaveBeenCalled();
+    expect(vitalsMock.onINP).toHaveBeenCalled();
+    expect(vitalsMock.onFCP).toHaveBeenCalled();
+    expect(vitalsMock.onLCP).toHaveBeenCalled();
+    expect(vitalsMock.onTTFB).toHaveBeenCalled();
   });
 
   it('uses a full traces sample rate outside production', async () => {
@@ -256,7 +256,7 @@ describe('initTelemetry — DSN not configured', () => {
     expect(logSpy).toHaveBeenCalledWith(
       '[Telemetry] Sentry DSN not configured, error tracking disabled',
     );
-    expect(vitalsMock.getCLS).toHaveBeenCalled();
+    expect(vitalsMock.onCLS).toHaveBeenCalled();
   });
 });
 
@@ -265,15 +265,15 @@ describe('web vitals reporting callback', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const t = await loadTelemetry(env);
     t.initTelemetry();
-    // Every getX receives the same reportVital callback.
-    return vitalsMock.getCLS.mock.calls[0][0] as (m: any) => void;
+    // Every onX receives the same reportVital callback.
+    return vitalsMock.onCLS.mock.calls[0][0] as (m: any) => void;
   }
 
   it('logs vitals in development and rates good metrics', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const t = await loadTelemetry({ VITE_ENVIRONMENT: 'development' });
     t.initTelemetry();
-    const report = vitalsMock.getCLS.mock.calls[0][0] as (m: any) => void;
+    const report = vitalsMock.onCLS.mock.calls[0][0] as (m: any) => void;
     report({ name: 'LCP', value: 1000 });
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining('[Web Vitals] LCP: 1000.00 (good)'),
@@ -319,10 +319,17 @@ describe('web vitals reporting callback', () => {
     ).toBe(true);
   });
 
+  it('rates INP against its 200 ms threshold', async () => {
+    const report = await getReporter({ VITE_ENVIRONMENT: 'development' });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    report({ name: 'INP', value: 350 });
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[Web Vitals] INP: 350.00 (poor)'));
+  });
+
   it('rates an unknown metric name as "unknown" and skips threshold tracking', async () => {
     const report = await getReporter({ VITE_ENVIRONMENT: 'development' });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    report({ name: 'INP', value: 123 });
+    report({ name: 'FID', value: 123 });
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining('(unknown)'),
     );
