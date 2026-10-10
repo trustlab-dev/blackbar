@@ -26,8 +26,8 @@ import {
   Tooltip,
   IconButton
 } from '@mui/material';
-import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
-import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
+import PauseCircleOutlinedIcon from '@mui/icons-material/PauseCircleOutlined';
+import PlayCircleOutlinedIcon from '@mui/icons-material/PlayCircleOutlined';
 import HistoryIcon from '@mui/icons-material/History';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
@@ -36,8 +36,8 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { clockApi, ClockStatus, ClockEvent } from '../../api/workflowApi';
 import { getApiErrorMessage } from '../../api/errors';
 
-const PauseIcon = PauseCircleOutlineIcon;
-const PlayIcon = PlayCircleOutlineIcon;
+const PauseIcon = PauseCircleOutlinedIcon;
+const PlayIcon = PlayCircleOutlinedIcon;
 const ClockIcon = AccessTimeIcon;
 const WarningIcon = WarningAmberIcon;
 const InfoIcon = InfoOutlinedIcon;

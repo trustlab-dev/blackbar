@@ -541,7 +541,9 @@ const AutoSuggestDrawer: React.FC<Props> = ({ open, onClose, documentId, onApply
       }}
       ModalProps={{
         keepMounted: true,
-        BackdropProps: {
+      }}
+      slotProps={{
+        backdrop: {
           invisible: true
         }
       }}

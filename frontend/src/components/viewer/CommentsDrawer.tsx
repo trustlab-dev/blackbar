@@ -123,7 +123,9 @@ const CommentsDrawer: React.FC<Props> = ({ open, onClose, documentId }) => {
             }}
             ModalProps={{
                 keepMounted: true,
-                BackdropProps: {
+            }}
+            slotProps={{
+                backdrop: {
                     invisible: true
                 }
             }}

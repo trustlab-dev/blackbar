@@ -28,7 +28,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Tooltip from '@mui/material/Tooltip';
 import QueueIcon from '@mui/icons-material/Queue';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
-import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
+import PauseCircleOutlinedIcon from '@mui/icons-material/PauseCircleOutlined';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { queueApi, CasePriorityScore } from '../../api/workflowApi';
 
@@ -285,7 +285,7 @@ const PriorityQueue: React.FC<PriorityQueueProps> = ({ currentUserId, users = []
                   <TableCell>
                     {caseItem.clock_status === 'paused' ? (
                       <Tooltip title="Clock paused">
-                        <PauseCircleOutlineIcon color="warning" fontSize="small" />
+                        <PauseCircleOutlinedIcon color="warning" fontSize="small" />
                       </Tooltip>
                     ) : (
                       <Typography variant="caption" sx={{
