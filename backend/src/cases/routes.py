@@ -32,7 +32,7 @@ def convert_mongo_doc_to_json(doc: dict[str, Any]) -> dict[str, Any]:
     if doc is None:
         return None
 
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in doc.items():
         if isinstance(value, ObjectId):
             result[key] = str(value)
@@ -183,15 +183,15 @@ async def list_cases(
     request: Request,
     skip: int = 0,
     limit: int = 20,
-    status: CaseStatus = None,
-    priority: CasePriority = None,
-    assigned_to: str = None,
-    created_by: str = None,
+    status: CaseStatus | None = None,
+    priority: CasePriority | None = None,
+    assigned_to: str | None = None,
+    created_by: str | None = None,
     current_user=Depends(get_current_user),
 ):
     """List cases with filtering options based on system role."""
     db = await get_db(request)
-    query = {}
+    query: dict[str, Any] = {}
     if status:
         query["status"] = status
     if priority:
@@ -496,7 +496,7 @@ async def assign_case(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    update_data = {"updated_at": datetime.utcnow()}
+    update_data: dict[str, Any] = {"updated_at": datetime.utcnow()}
     audit_details = {}
 
     if assignee is not None:

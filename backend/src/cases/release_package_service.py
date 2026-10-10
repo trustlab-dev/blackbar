@@ -15,6 +15,7 @@ import secrets
 import uuid
 import zipfile
 from datetime import datetime, timedelta
+from typing import Any
 
 import gridfs
 from bson import ObjectId
@@ -54,7 +55,7 @@ async def get_document_content(doc: dict, db: AsyncIOMotorDatabase) -> bytes | N
     # Try GridFS first
     if doc.get("content_file_id"):
         try:
-            sync_client = MongoClient(MONGODB_URI)
+            sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
             db_name = db.name
             sync_db = sync_client[db_name]
             fs = gridfs.GridFS(sync_db)
@@ -83,7 +84,7 @@ async def delete_existing_draft(case_id: str, db: AsyncIOMotorDatabase) -> str |
         # Delete from GridFS if file exists
         if existing_draft.get("file_id"):
             try:
-                sync_client = MongoClient(MONGODB_URI)
+                sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
                 sync_db = sync_client[db.name]
                 fs = gridfs.GridFS(sync_db)
                 fs.delete(ObjectId(existing_draft["file_id"]))
@@ -107,7 +108,7 @@ async def start_package_generation(
     created_by_name: str,
     request: ReleasePackageGenerate,
     release_settings: dict,
-    db: AsyncIOMotorDatabase = None,
+    db: AsyncIOMotorDatabase,
 ) -> tuple[str, str | None]:
     """
     Start generating a release package (Step 1).
@@ -228,7 +229,7 @@ async def process_package_generation(
             raise ValueError("Case not found")
 
         # Get documents
-        query = {"case_id": case_id}
+        query: dict[str, Any] = {"case_id": case_id}
         if request.document_ids:
             query["id"] = {"$in": request.document_ids}
 
@@ -311,6 +312,8 @@ async def process_package_generation(
                     )
                 )
                 continue
+            # _prepare_release_document returns content whenever error is None.
+            assert redacted_content is not None
 
             zip_filename = _zip_entry_name(idx, doc.get("filename"))
             entries.append((zip_filename, redacted_content))
@@ -403,12 +406,14 @@ async def process_package_generation(
         )
 
         # Store ZIP in GridFS
-        sync_client = MongoClient(MONGODB_URI)
+        sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
         sync_db = sync_client[db.name]
         fs = gridfs.GridFS(sync_db)
 
         # Get package to get filename
         package = await db.release_packages.find_one({"id": package_id})
+        if package is None:
+            raise RuntimeError(f"Package {package_id} not found while storing")
 
         file_id = fs.put(
             zip_content,
@@ -564,6 +569,8 @@ async def release_package(
 
     # Return updated package
     updated = await db.release_packages.find_one({"id": package_id})
+    if updated is None:
+        raise RuntimeError(f"Package {package_id} not found after release")
     return ReleasePackageDB(**updated)
 
 
@@ -609,7 +616,7 @@ async def download_draft_package(
     if not package.file_id:
         raise ValueError("Package file not found")
 
-    sync_client = MongoClient(MONGODB_URI)
+    sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
     sync_db = sync_client[db.name]
     fs = gridfs.GridFS(sync_db)
 
@@ -676,7 +683,7 @@ async def download_public_package(
     if not package.file_id:
         raise ValueError("Package file not found")
 
-    sync_client = MongoClient(MONGODB_URI)
+    sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
     sync_db = sync_client[db.name]
     fs = gridfs.GridFS(sync_db)
 

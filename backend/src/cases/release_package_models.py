@@ -60,7 +60,7 @@ class ReleasePackageGenerate(BaseModel):
     """Request to generate a release package (Step 1)"""
 
     document_ids: list[str] | None = Field(
-        None, description="Specific docs to include (all approved if omitted)"
+        default=None, description="Specific docs to include (all approved if omitted)"
     )
     include_cover_letter: bool = Field(default=True)
     cover_letter_template_id: str | None = None
@@ -69,10 +69,12 @@ class ReleasePackageGenerate(BaseModel):
 class ReleasePackageRelease(BaseModel):
     """Request to release a package to public portal (Step 3)"""
 
-    expires_in_days: int | None = Field(None, description="Override default expiration")
-    max_downloads: int | None = Field(None, description="Override default max downloads")
+    expires_in_days: int | None = Field(default=None, description="Override default expiration")
+    max_downloads: int | None = Field(default=None, description="Override default max downloads")
     notify_requester: bool = Field(default=True)
-    custom_message: str | None = Field(None, description="Custom message for notification email")
+    custom_message: str | None = Field(
+        default=None, description="Custom message for notification email"
+    )
 
 
 class ReleasePackageDB(BaseModel):

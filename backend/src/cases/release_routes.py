@@ -78,7 +78,7 @@ async def generate_release_package_endpoint(
     request: Request,
     case_id: str,
     background_tasks: BackgroundTasks,
-    package_request: ReleasePackageGenerate = None,
+    package_request: ReleasePackageGenerate | None = None,
     current_user=Depends(get_current_user),
     db=Depends(get_db),
 ):
@@ -250,7 +250,7 @@ async def release_package_endpoint(
     request: Request,
     case_id: str,
     package_id: str,
-    release_request: ReleasePackageRelease = None,
+    release_request: ReleasePackageRelease | None = None,
     current_user=Depends(get_current_user),
     db=Depends(get_db),
 ):
@@ -298,6 +298,8 @@ async def release_package_endpoint(
         await db.cases.update_one({"id": case_id}, {"$push": {"audit_log": audit_entry}})
 
         public_url = f"/api/v1/cases/public/release/{released_package.access_token}"
+        if released_package.expires_at is None:
+            raise ValueError("Released package has no expiry date")
 
         return ReleaseResponse(
             id=released_package.id,
