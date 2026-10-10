@@ -95,8 +95,9 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run pytest
+        # JWT_SECRET is left unset: tests/conftest.py generates a strong one,
+        # and any fixed value here would trip the weak-secret check.
         env:
-          JWT_SECRET: ci-only-throwaway-jwt-secret-please-do-not-reuse
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
           pytest -m "not slow" \
