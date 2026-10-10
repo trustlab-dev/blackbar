@@ -146,3 +146,8 @@ updates:
     commit-message:
       prefix: "deps(frontend,docker)"
       include: "scope"
+    ignore:
+      # The build image stays on an LTS line (odd majors never become LTS);
+      # move it by hand together with @types/node and frontend-ci.yml.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
