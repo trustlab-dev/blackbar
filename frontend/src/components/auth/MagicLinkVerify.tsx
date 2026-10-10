@@ -95,7 +95,9 @@ export const MagicLinkVerify: React.FC = () => {
         }}
       >
         <CircularProgress size={64} />
-        <Typography variant="h6" color="text.secondary">
+        <Typography variant="h6" sx={{
+          color: "text.secondary"
+        }}>
           Verifying your magic link...
         </Typography>
       </Box>
@@ -109,7 +111,9 @@ export const MagicLinkVerify: React.FC = () => {
         <Typography variant="h5" gutterBottom>
           Success!
         </Typography>
-        <Typography variant="body1" color="text.secondary">
+        <Typography variant="body1" sx={{
+          color: "text.secondary"
+        }}>
           You're being redirected to your dashboard...
         </Typography>
       </Paper>

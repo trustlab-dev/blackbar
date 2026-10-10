@@ -28,7 +28,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Tooltip from '@mui/material/Tooltip';
 import QueueIcon from '@mui/icons-material/Queue';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
-import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
+import PauseCircleOutlinedIcon from '@mui/icons-material/PauseCircleOutlined';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { queueApi, CasePriorityScore } from '../../api/workflowApi';
 
@@ -133,7 +133,13 @@ const PriorityQueue: React.FC<PriorityQueueProps> = ({ currentUserId, users = []
         )}
 
         {/* Filters */}
-        <Box display="flex" gap={2} mb={3} flexWrap="wrap">
+        <Box
+          sx={{
+            display: "flex",
+            gap: 2,
+            mb: 3,
+            flexWrap: "wrap"
+          }}>
           <FormControl size="small" sx={{ minWidth: 150 }}>
             <InputLabel>Analyst</InputLabel>
             <Select
@@ -177,11 +183,21 @@ const PriorityQueue: React.FC<PriorityQueueProps> = ({ currentUserId, users = []
         </Box>
 
         {loading ? (
-          <Box display="flex" justifyContent="center" py={4}>
+          <Box
+            sx={{
+              display: "flex",
+              justifyContent: "center",
+              py: 4
+            }}>
             <CircularProgress />
           </Box>
         ) : cases.length === 0 ? (
-          <Typography color="text.secondary" sx={{ textAlign: 'center', py: 4 }}>
+          <Typography
+            sx={{
+              color: "text.secondary",
+              textAlign: 'center',
+              py: 4
+            }}>
             No cases match the current filters.
           </Typography>
         ) : (
@@ -206,8 +222,18 @@ const PriorityQueue: React.FC<PriorityQueueProps> = ({ currentUserId, users = []
                   onClick={() => navigate(`/cases/${caseItem.case_id}`)}
                 >
                   <TableCell>
-                    <Box display="flex" alignItems="center" gap={1}>
-                      <Typography variant="body2" fontWeight={600} sx={{ minWidth: 24 }}>
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 1
+                      }}>
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          fontWeight: 600,
+                          minWidth: 24
+                        }}>
                         #{index + 1}
                       </Typography>
                       <Tooltip title={`Priority Score: ${caseItem.priority_score}`}>
@@ -226,16 +252,21 @@ const PriorityQueue: React.FC<PriorityQueueProps> = ({ currentUserId, users = []
                     </Box>
                   </TableCell>
                   <TableCell>
-                    <Typography variant="body2" fontWeight={500}>
+                    <Typography variant="body2" sx={{
+                      fontWeight: 500
+                    }}>
                       {caseItem.tracking_number}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ 
-                      display: 'block',
-                      maxWidth: 200,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap'
-                    }}>
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        color: "text.secondary",
+                        display: 'block',
+                        maxWidth: 200,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}>
                       {caseItem.title}
                     </Typography>
                   </TableCell>
@@ -254,10 +285,12 @@ const PriorityQueue: React.FC<PriorityQueueProps> = ({ currentUserId, users = []
                   <TableCell>
                     {caseItem.clock_status === 'paused' ? (
                       <Tooltip title="Clock paused">
-                        <PauseCircleOutlineIcon color="warning" fontSize="small" />
+                        <PauseCircleOutlinedIcon color="warning" fontSize="small" />
                       </Tooltip>
                     ) : (
-                      <Typography variant="caption" color="success.main">●</Typography>
+                      <Typography variant="caption" sx={{
+                        color: "success.main"
+                      }}>●</Typography>
                     )}
                   </TableCell>
                 </TableRow>

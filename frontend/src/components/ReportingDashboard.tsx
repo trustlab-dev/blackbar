@@ -130,64 +130,102 @@ const ReportingDashboard: React.FC = () => {
       <Typography variant="h4" gutterBottom>
         Reporting Dashboard
       </Typography>
-      <Typography variant="body2" color="text.secondary" gutterBottom sx={{ mb: 4 }}>
+      <Typography
+        variant="body2"
+        gutterBottom
+        sx={{
+          color: "text.secondary",
+          mb: 4
+        }}>
         Deadline tracking and SLA compliance monitoring
       </Typography>
 
       {/* Summary Cards */}
       <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3
+          }}>
           <Card>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                 <span style={{ marginRight: '8px' }}>✓</span>
                 <Typography variant="h6">On Track</Typography>
               </Box>
-              <Typography variant="h3" color="success.main">
+              <Typography variant="h3" sx={{
+                color: "success.main"
+              }}>
                 {summary?.on_track || 0}
               </Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{
+                color: "text.secondary"
+              }}>
                 Cases meeting deadlines
               </Typography>
             </CardContent>
           </Card>
         </Grid>
 
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3
+          }}>
           <Card>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                 <span style={{ marginRight: '8px' }}>⚠</span>
                 <Typography variant="h6">Warning</Typography>
               </Box>
-              <Typography variant="h3" color="warning.main">
+              <Typography variant="h3" sx={{
+                color: "warning.main"
+              }}>
                 {summary?.warning || 0}
               </Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{
+                color: "text.secondary"
+              }}>
                 Within 7 days
               </Typography>
             </CardContent>
           </Card>
         </Grid>
 
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3
+          }}>
           <Card>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
                 <span style={{ marginRight: '8px' }}>⚠</span>
                 <Typography variant="h6">Urgent</Typography>
               </Box>
-              <Typography variant="h3" color="error.main">
+              <Typography variant="h3" sx={{
+                color: "error.main"
+              }}>
                 {summary?.urgent || 0}
               </Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{
+                color: "text.secondary"
+              }}>
                 Within 3 days
               </Typography>
             </CardContent>
           </Card>
         </Grid>
 
-        <Grid item xs={12} sm={6} md={3}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3
+          }}>
           <Card sx={{ bgcolor: 'error.dark', color: 'white' }}>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
@@ -207,7 +245,11 @@ const ReportingDashboard: React.FC = () => {
 
       {/* Compliance Metrics */}
       <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid item xs={12} md={6}>
+        <Grid
+          size={{
+            xs: 12,
+            md: 6
+          }}>
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6" gutterBottom>
               Compliance Rate
@@ -221,17 +263,25 @@ const ReportingDashboard: React.FC = () => {
                   color="success"
                 />
               </Box>
-              <Typography variant="h5" color="success.main">
+              <Typography variant="h5" sx={{
+                color: "success.main"
+              }}>
                 {summary?.compliance_rate?.toFixed(1) || 0}%
               </Typography>
             </Box>
-            <Typography variant="caption" color="text.secondary">
+            <Typography variant="caption" sx={{
+              color: "text.secondary"
+            }}>
               Cases on track or completed on time
             </Typography>
           </Paper>
         </Grid>
 
-        <Grid item xs={12} md={6}>
+        <Grid
+          size={{
+            xs: 12,
+            md: 6
+          }}>
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6" gutterBottom>
               At-Risk Rate
@@ -245,11 +295,15 @@ const ReportingDashboard: React.FC = () => {
                   color="error"
                 />
               </Box>
-              <Typography variant="h5" color="error.main">
+              <Typography variant="h5" sx={{
+                color: "error.main"
+              }}>
                 {summary?.at_risk_rate?.toFixed(1) || 0}%
               </Typography>
             </Box>
-            <Typography variant="caption" color="text.secondary">
+            <Typography variant="caption" sx={{
+              color: "text.secondary"
+            }}>
               Cases requiring immediate attention
             </Typography>
           </Paper>
@@ -264,7 +318,9 @@ const ReportingDashboard: React.FC = () => {
         
         {attentionCases.length === 0 ? (
           <Box sx={{ textAlign: 'center', py: 4 }}>
-            <Typography variant="body1" color="text.secondary">
+            <Typography variant="body1" sx={{
+              color: "text.secondary"
+            }}>
               No cases requiring immediate attention
             </Typography>
           </Box>
@@ -286,7 +342,9 @@ const ReportingDashboard: React.FC = () => {
                       <Typography variant="subtitle1" sx={{ fontWeight: 'bold' }}>
                         {caseItem.case_number}: {caseItem.title}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary">
+                      <Typography variant="caption" sx={{
+                        color: "text.secondary"
+                      }}>
                         Status: {caseItem.status}
                       </Typography>
                     </Box>

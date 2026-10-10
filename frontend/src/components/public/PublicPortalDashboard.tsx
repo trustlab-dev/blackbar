@@ -223,10 +223,17 @@ export const PublicPortalDashboard: React.FC = () => {
               
               {requests.length === 0 ? (
                 <Box sx={{ textAlign: 'center', py: 6 }}>
-                  <Typography variant="body1" color="text.secondary" gutterBottom>
+                  <Typography variant="body1" gutterBottom sx={{
+                    color: "text.secondary"
+                  }}>
                     No FOI requests yet
                   </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      color: "text.secondary",
+                      mb: 3
+                    }}>
                     Submit your first Freedom of Information request to get started
                   </Typography>
                   <Button
@@ -291,7 +298,12 @@ export const PublicPortalDashboard: React.FC = () => {
                 <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
                   Request Status Timeline
                 </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    color: "text.secondary",
+                    mb: 3
+                  }}>
                   Request ID #{selectedRequest.tracking_number}: {selectedRequest.title}
                 </Typography>
                 
@@ -355,7 +367,12 @@ export const PublicPortalDashboard: React.FC = () => {
                     FAQs
                     <span style={{ fontSize: '0.875rem' }}>↗</span>
                   </Link>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      color: "text.secondary",
+                      mt: 0.5
+                    }}>
                     Learn more to start about FAQs
                   </Typography>
                 </Box>

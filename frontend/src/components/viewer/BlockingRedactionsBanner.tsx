@@ -157,7 +157,13 @@ const BlockingRedactionsBanner: React.FC<Props> = ({
                           {redaction.notes}
                         </Typography>
                       )}
-                      <Typography component="span" variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                      <Typography
+                        component="span"
+                        variant="caption"
+                        sx={{
+                          color: "text.secondary",
+                          display: 'block'
+                        }}>
                         {actions.hint}
                       </Typography>
                     </>

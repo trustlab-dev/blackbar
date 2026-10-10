@@ -103,7 +103,9 @@ const RecordsConfirmation: React.FC<RecordsConfirmationProps> = ({ caseId, onCon
       <Card variant="outlined" sx={{ mb: 2 }}>
         <CardContent sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1.5, '&:last-child': { pb: 1.5 } }}>
           <CircularProgress size={16} />
-          <Typography variant="body2" color="text.secondary">Loading...</Typography>
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>Loading...</Typography>
         </CardContent>
       </Card>
     );
@@ -120,8 +122,20 @@ const RecordsConfirmation: React.FC<RecordsConfirmationProps> = ({ caseId, onCon
           </Alert>
         )}
 
-        <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
-          <Box display="flex" alignItems="center" gap={1}>
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 1
+          }}>
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1
+            }}>
             <FolderIcon color={isConfirmed ? 'success' : 'action'} />
             <Typography variant="subtitle2">
               Records Collection
@@ -162,7 +176,13 @@ const RecordsConfirmation: React.FC<RecordsConfirmationProps> = ({ caseId, onCon
         </Box>
 
         {isConfirmed && confirmation?.confirmed_at && (
-          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+          <Typography
+            variant="caption"
+            sx={{
+              color: "text.secondary",
+              mt: 1,
+              display: 'block'
+            }}>
             Confirmed by {confirmation.confirmed_by_name || 'Unknown'} on {formatDate(confirmation.confirmed_at)}
             {confirmation.notes && <> — {confirmation.notes}</>}
           </Typography>
@@ -173,7 +193,12 @@ const RecordsConfirmation: React.FC<RecordsConfirmationProps> = ({ caseId, onCon
       <Dialog open={showConfirmDialog} onClose={() => setShowConfirmDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Confirm All Records Uploaded</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          <Typography
+            variant="body2"
+            sx={{
+              color: "text.secondary",
+              mb: 2
+            }}>
             By confirming, you are indicating that all responsive records have been collected and uploaded.
             This will notify assigned analysts that the case is ready for review.
           </Typography>

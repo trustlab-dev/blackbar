@@ -10,7 +10,7 @@ import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf';
 import DescriptionIcon from '@mui/icons-material/Description';
 import EmailIcon from '@mui/icons-material/Email';
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile';
-import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import CheckCircleOutlinedIcon from '@mui/icons-material/CheckCircleOutlined';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import BlockIcon from '@mui/icons-material/Block';
 // Workflow components
@@ -726,7 +726,7 @@ const CaseDetailView: React.FC = () => {
               Status
               {saveIndicators.status && (
                 <span className="save-indicator">
-                  <CheckCircleOutlineIcon fontSize="small" /> Saved
+                  <CheckCircleOutlinedIcon fontSize="small" /> Saved
                 </span>
               )}
             </label>
@@ -750,7 +750,7 @@ const CaseDetailView: React.FC = () => {
               Priority
               {saveIndicators.priority && (
                 <span className="save-indicator">
-                  <CheckCircleOutlineIcon fontSize="small" /> Saved
+                  <CheckCircleOutlinedIcon fontSize="small" /> Saved
                 </span>
               )}
             </label>
@@ -771,7 +771,7 @@ const CaseDetailView: React.FC = () => {
               Assignee
               {saveIndicators.assignee && (
                 <span className="save-indicator">
-                  <CheckCircleOutlineIcon fontSize="small" /> Saved
+                  <CheckCircleOutlinedIcon fontSize="small" /> Saved
                 </span>
               )}
             </label>

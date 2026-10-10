@@ -154,14 +154,16 @@ const Header: React.FC = () => {
           open={open}
           onClose={handleClose}
           onClick={handleClose}
-          PaperProps={{
-            elevation: 3,
-            sx: {
-              minWidth: 200,
-              mt: 1.5,
-              '& .MuiMenuItem-root': {
-                px: 2,
-                py: 1.5
+          slotProps={{
+            paper: {
+              elevation: 3,
+              sx: {
+                minWidth: 200,
+                mt: 1.5,
+                '& .MuiMenuItem-root': {
+                  px: 2,
+                  py: 1.5
+                }
               }
             }
           }}

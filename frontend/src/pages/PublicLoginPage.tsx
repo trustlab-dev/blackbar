@@ -114,7 +114,9 @@ export const PublicLoginPage: React.FC = () => {
           >
             {orgConfig.org_name}
           </Typography>
-          <Typography variant="body1" color="text.secondary">
+          <Typography variant="body1" sx={{
+            color: "text.secondary"
+          }}>
             Sign in to view and manage your FOI requests
           </Typography>
         </Box>
@@ -131,7 +133,9 @@ export const PublicLoginPage: React.FC = () => {
         {orgConfig.demo_mode && (
           <Box sx={{ mt: 3 }}>
             <Divider sx={{ mb: 2 }}>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{
+                color: "text.secondary"
+              }}>
                 or
               </Typography>
             </Divider>
@@ -147,7 +151,13 @@ export const PublicLoginPage: React.FC = () => {
               <Typography variant="caption" sx={{ display: 'block', fontWeight: 600, color: '#bf6900' }}>
                 DEMO MODE
               </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>
+              <Typography
+                variant="body2"
+                sx={{
+                  color: "text.secondary",
+                  mt: 0.5,
+                  mb: 1.5
+                }}>
                 Skip the magic-link email and log in as the demo requester
                 (Jordan Park). Visible because <code>BLACKBAR_DEMO_MODE=true</code>
                 on this backend; never enabled in production.
@@ -173,14 +183,31 @@ export const PublicLoginPage: React.FC = () => {
 
         {/* Footer */}
         <Paper elevation={0} sx={{ mt: 4, p: 3, textAlign: 'center', backgroundColor: 'transparent' }}>
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             New to our portal? Enter your email above to get started.
           </Typography>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+          <Typography
+            variant="caption"
+            sx={{
+              color: "text.secondary",
+              display: "block",
+              mt: 1
+            }}>
             By signing in, you agree to our Terms of Service and Privacy Policy
           </Typography>
           {orgConfig.footer_text && (
-            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 2, p: 2, backgroundColor: '#f0f0f0', borderRadius: 1 }}>
+            <Typography
+              variant="caption"
+              sx={{
+                color: "text.secondary",
+                display: "block",
+                mt: 2,
+                p: 2,
+                backgroundColor: '#f0f0f0',
+                borderRadius: 1
+              }}>
               {orgConfig.footer_text}
             </Typography>
           )}

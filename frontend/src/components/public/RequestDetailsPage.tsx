@@ -214,14 +214,20 @@ export const RequestDetailsPage: React.FC = () => {
             color={getStatusColor(request.status)}
           />
         </Box>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{
+          color: "text.secondary"
+        }}>
           Tracking Number: {request.tracking_number}
         </Typography>
       </Box>
 
       <Grid container spacing={3}>
         {/* Main Content */}
-        <Grid item xs={12} md={8}>
+        <Grid
+          size={{
+            xs: 12,
+            md: 8
+          }}>
           {/* Request Details */}
           <Card sx={{ mb: 3 }}>
             <CardContent>
@@ -230,21 +236,27 @@ export const RequestDetailsPage: React.FC = () => {
               </Typography>
               <Divider sx={{ mb: 2 }} />
               
-              <Typography variant="body1" paragraph>
+              <Typography variant="body1" sx={{
+                marginBottom: "16px"
+              }}>
                 {request.description}
               </Typography>
 
               <Grid container spacing={2}>
-                <Grid item xs={6}>
-                  <Typography variant="caption" color="text.secondary">
+                <Grid size={6}>
+                  <Typography variant="caption" sx={{
+                    color: "text.secondary"
+                  }}>
                     Category
                   </Typography>
                   <Typography variant="body2">
                     {request.category || 'Not specified'}
                   </Typography>
                 </Grid>
-                <Grid item xs={6}>
-                  <Typography variant="caption" color="text.secondary">
+                <Grid size={6}>
+                  <Typography variant="caption" sx={{
+                    color: "text.secondary"
+                  }}>
                     Submitted
                   </Typography>
                   <Typography variant="body2">
@@ -252,8 +264,10 @@ export const RequestDetailsPage: React.FC = () => {
                   </Typography>
                 </Grid>
                 {request.due_date && (
-                  <Grid item xs={6}>
-                    <Typography variant="caption" color="text.secondary">
+                  <Grid size={6}>
+                    <Typography variant="caption" sx={{
+                      color: "text.secondary"
+                    }}>
                       Due Date
                     </Typography>
                     <Typography variant="body2">
@@ -282,16 +296,33 @@ export const RequestDetailsPage: React.FC = () => {
                     <Typography variant="subtitle1" sx={{ fontWeight: 500 }}>
                       {pkg.filename}
                     </Typography>
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                    <Typography
+                      variant="body2"
+                      sx={{
+                        color: "text.secondary",
+                        mb: 1
+                      }}>
                       {pkg.document_count} documents • {formatFileSize(pkg.size_bytes)}
                     </Typography>
                     {pkg.expires_at && (
-                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          color: "text.secondary",
+                          display: "block",
+                          mb: 1
+                        }}>
                         Available until {formatDate(pkg.expires_at)}
                       </Typography>
                     )}
                     {pkg.max_downloads && (
-                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 2 }}>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          color: "text.secondary",
+                          display: "block",
+                          mb: 2
+                        }}>
                         Downloads: {pkg.download_count} / {pkg.max_downloads}
                       </Typography>
                     )}
@@ -313,7 +344,11 @@ export const RequestDetailsPage: React.FC = () => {
         </Grid>
 
         {/* Sidebar */}
-        <Grid item xs={12} md={4}>
+        <Grid
+          size={{
+            xs: 12,
+            md: 4
+          }}>
           {/* Timeline */}
           <Card>
             <CardContent>
@@ -326,7 +361,9 @@ export const RequestDetailsPage: React.FC = () => {
               <Divider sx={{ mb: 2 }} />
 
               {request.timeline.length === 0 ? (
-                <Typography variant="body2" color="text.secondary">
+                <Typography variant="body2" sx={{
+                  color: "text.secondary"
+                }}>
                   No timeline events yet
                 </Typography>
               ) : (
@@ -343,13 +380,20 @@ export const RequestDetailsPage: React.FC = () => {
                           }
                           secondary={
                             <>
-                              <Typography variant="caption" color="text.secondary" display="block">
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  color: "text.secondary",
+                                  display: "block"
+                                }}>
                                 {formatDate(event.timestamp)}
                               </Typography>
                               {(() => {
                                 const formattedDetails = formatEventDetails(event.details);
                                 return formattedDetails && (
-                                  <Typography variant="caption" color="text.secondary">
+                                  <Typography variant="caption" sx={{
+                                    color: "text.secondary"
+                                  }}>
                                     {formattedDetails}
                                   </Typography>
                                 );

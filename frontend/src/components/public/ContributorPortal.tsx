@@ -199,7 +199,9 @@ const ContributorPortal: React.FC = () => {
           <Paper sx={{ p: 4, textAlign: 'center' }}>
             <WarningIcon sx={{ fontSize: 64, color: 'error.main', mb: 2 }} />
             <Typography variant="h5" gutterBottom>Access Error</Typography>
-            <Typography color="text.secondary">{error}</Typography>
+            <Typography sx={{
+              color: "text.secondary"
+            }}>{error}</Typography>
           </Paper>
         </Container>
       </Box>
@@ -216,14 +218,20 @@ const ContributorPortal: React.FC = () => {
           <Typography variant="h4" gutterBottom>
             Records Upload Portal
           </Typography>
-          <Typography variant="body1" color="text.secondary" gutterBottom>
+          <Typography variant="body1" gutterBottom sx={{
+            color: "text.secondary"
+          }}>
             Hello <strong>{info.contributor_name}</strong>, you have been asked to provide records for:
           </Typography>
           <Box sx={{ mt: 2, p: 2, bgcolor: '#e3f2fd', borderRadius: 1 }}>
-            <Typography variant="subtitle1" fontWeight={600}>
+            <Typography variant="subtitle1" sx={{
+              fontWeight: 600
+            }}>
               {info.case_title}
             </Typography>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               Reference: {info.case_tracking_number} • {info.org_name}
             </Typography>
           </Box>
@@ -259,7 +267,12 @@ const ContributorPortal: React.FC = () => {
             <Typography variant="h6" gutterBottom>
               Upload Documents
             </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            <Typography
+              variant="body2"
+              sx={{
+                color: "text.secondary",
+                mb: 2
+              }}>
               Upload any documents that may be relevant to this FOI request. You can upload multiple files at once.
             </Typography>
             
@@ -284,7 +297,13 @@ const ContributorPortal: React.FC = () => {
                   {uploading ? 'Uploading...' : 'Select Files to Upload'}
                 </Button>
               </label>
-              <Typography variant="caption" display="block" sx={{ mt: 1, color: 'text.secondary' }}>
+              <Typography
+                variant="caption"
+                sx={{
+                  display: "block",
+                  mt: 1,
+                  color: 'text.secondary'
+                }}>
                 Supported formats: PDF, Word, Excel, images, and more
               </Typography>
             </Box>
@@ -298,7 +317,12 @@ const ContributorPortal: React.FC = () => {
           </Typography>
           
           {info.uploaded_documents.length === 0 ? (
-            <Typography color="text.secondary" sx={{ textAlign: 'center', py: 3 }}>
+            <Typography
+              sx={{
+                color: "text.secondary",
+                textAlign: 'center',
+                py: 3
+              }}>
               No documents uploaded yet.
             </Typography>
           ) : (
@@ -332,7 +356,12 @@ const ContributorPortal: React.FC = () => {
             <Typography variant="h6" gutterBottom>
               Confirm Submission
             </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            <Typography
+              variant="body2"
+              sx={{
+                color: "text.secondary",
+                mb: 2
+              }}>
               Once you have uploaded all relevant documents, click the button below to confirm your submission is complete.
             </Typography>
             <Button
@@ -350,7 +379,9 @@ const ContributorPortal: React.FC = () => {
 
         {/* Footer */}
         <Box sx={{ mt: 4, textAlign: 'center' }}>
-          <Typography variant="caption" color="text.secondary">
+          <Typography variant="caption" sx={{
+            color: "text.secondary"
+          }}>
             Link expires: {formatDate(info.expires_at)}
           </Typography>
         </Box>

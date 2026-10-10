@@ -105,7 +105,12 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle>
-        <Box display="flex" justifyContent="space-between" alignItems="center">
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center"
+          }}>
           <Typography variant="h5">{pack.name}</Typography>
           <Button onClick={onClose} size="small">
             <CloseIcon />
@@ -118,7 +123,12 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
 
       <DialogContent dividers>
         {loading ? (
-          <Box display="flex" justifyContent="center" py={4}>
+          <Box
+            sx={{
+              display: "flex",
+              justifyContent: "center",
+              py: 4
+            }}>
             <CircularProgress />
           </Box>
         ) : details ? (
@@ -133,7 +143,9 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
 
             <TabPanel value={tabValue} index={0}>
               <Typography variant="h6" gutterBottom>Jurisdiction</Typography>
-              <Box mb={2}>
+              <Box sx={{
+                mb: 2
+              }}>
                 <Typography variant="body2"><strong>Country:</strong> {details.jurisdiction?.country_name}</Typography>
                 <Typography variant="body2"><strong>Region:</strong> {details.jurisdiction?.region_name}</Typography>
                 <Typography variant="body2"><strong>Legislation:</strong> {details.jurisdiction?.legislation}</Typography>
@@ -150,7 +162,9 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
               <Divider sx={{ my: 2 }} />
 
               <Typography variant="h6" gutterBottom>Terminology</Typography>
-              <Box mb={2}>
+              <Box sx={{
+                mb: 2
+              }}>
                 <Typography variant="body2"><strong>Request Type:</strong> {details.terminology?.request_type}</Typography>
                 <Typography variant="body2"><strong>Requester:</strong> {details.terminology?.requester}</Typography>
                 <Typography variant="body2"><strong>Tracking Prefix:</strong> {details.terminology?.tracking_number_prefix}</Typography>
@@ -159,7 +173,12 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
               <Divider sx={{ my: 2 }} />
 
               <Typography variant="h6" gutterBottom>Capabilities</Typography>
-              <Box display="flex" flexWrap="wrap" gap={1}>
+              <Box
+                sx={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 1
+                }}>
                 <Chip label={`${details.categories?.length || 0} Redaction Categories`} color="primary" />
                 <Chip label={`${details.statuses?.length || 0} Statuses`} color="primary" />
                 <Chip label={`${details.priorities?.length || 0} Priorities`} color="primary" />
@@ -171,8 +190,16 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
               <List>
                 {details.categories?.map((cat: any, index: number) => (
                   <ListItem key={index} divider>
-                    <Box width="100%">
-                      <Box display="flex" alignItems="center" gap={1} mb={1}>
+                    <Box sx={{
+                      width: "100%"
+                    }}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 1,
+                          mb: 1
+                        }}>
                         <Chip 
                           label={cat.code} 
                           size="small" 
@@ -184,7 +211,12 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
                         {cat.description}
                       </Typography>
                       {cat.guidance && (
-                        <Typography variant="caption" display="block" mt={0.5}>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            display: "block",
+                            mt: 0.5
+                          }}>
                           <strong>Guidance:</strong> {cat.guidance}
                         </Typography>
                       )}
@@ -198,8 +230,16 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
               <List>
                 {details.statuses?.map((status: any, index: number) => (
                   <ListItem key={index} divider>
-                    <Box width="100%">
-                      <Box display="flex" alignItems="center" gap={1} mb={1}>
+                    <Box sx={{
+                      width: "100%"
+                    }}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 1,
+                          mb: 1
+                        }}>
                         <Chip 
                           label={status.label} 
                           size="small" 
@@ -218,13 +258,19 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
             </TabPanel>
 
             <TabPanel value={tabValue} index={3}>
-              <Typography variant="body2" paragraph>
+              <Typography variant="body2" sx={{
+                marginBottom: "16px"
+              }}>
                 <strong>Default Response Time:</strong> {details.timelines?.default_response_days} days
               </Typography>
-              <Typography variant="body2" paragraph>
+              <Typography variant="body2" sx={{
+                marginBottom: "16px"
+              }}>
                 <strong>Maximum Extension:</strong> {details.timelines?.extension_max_days} days
               </Typography>
-              <Typography variant="body2" paragraph>
+              <Typography variant="body2" sx={{
+                marginBottom: "16px"
+              }}>
                 <strong>Business Days:</strong> {details.timelines?.business_days ? 'Yes' : 'No'}
               </Typography>
               {details.timelines?.extension_reasons && (
@@ -243,7 +289,13 @@ const PackDetailsModal: React.FC<PackDetailsModalProps> = ({ pack, open, onClose
 
             <TabPanel value={tabValue} index={4}>
               <Typography variant="h6" gutterBottom>Available Features</Typography>
-              <Box display="flex" flexWrap="wrap" gap={1} mb={3}>
+              <Box
+                sx={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 1,
+                  mb: 3
+                }}>
                 {details.features && Object.entries(details.features).map(([key, value]) => (
                   <Chip 
                     key={key}

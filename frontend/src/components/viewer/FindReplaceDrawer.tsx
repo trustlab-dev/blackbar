@@ -217,12 +217,14 @@ const FindReplaceDrawer: React.FC<Props> = ({
         onKeyPress={handleKeyPress}
         placeholder="Enter text to find"
         sx={{ mb: 2 }}
-        InputProps={{
-          endAdornment: (
-            <IconButton onClick={handleSearch} disabled={searching}>
-              <Search />
-            </IconButton>
-          )
+        slotProps={{
+          input: {
+            endAdornment: (
+              <IconButton onClick={handleSearch} disabled={searching}>
+                <Search />
+              </IconButton>
+            )
+          }
         }}
       />
 
@@ -255,11 +257,15 @@ const FindReplaceDrawer: React.FC<Props> = ({
       {/* Results Summary */}
       {matches.length > 0 && (
         <Box sx={{ mb: 2 }}>
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             Found {matches.length} match{matches.length !== 1 ? 'es' : ''} across{' '}
             {Object.keys(groupedMatches).length} page{Object.keys(groupedMatches).length !== 1 ? 's' : ''}
           </Typography>
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {selectedMatches.size} selected
           </Typography>
         </Box>
@@ -339,18 +345,20 @@ const FindReplaceDrawer: React.FC<Props> = ({
                             <ListItemText
                               primary={match.text}
                               secondary={match.context}
-                              primaryTypographyProps={{ variant: 'body2' }}
-                              secondaryTypographyProps={{
-                                variant: 'caption',
-                                sx: {
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis',
-                                  display: '-webkit-box',
-                                  WebkitLineClamp: 2,
-                                  WebkitBoxOrient: 'vertical'
+                              slotProps={{
+                                primary: { variant: 'body2' },
+
+                                secondary: {
+                                  variant: 'caption',
+                                  sx: {
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    display: '-webkit-box',
+                                    WebkitLineClamp: 2,
+                                    WebkitBoxOrient: 'vertical'
+                                  }
                                 }
-                              }}
-                            />
+                              }} />
                           </ListItem>
                         );
                       })}

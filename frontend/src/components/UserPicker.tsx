@@ -104,7 +104,9 @@ const UserPicker: React.FC<UserPickerProps> = ({
                   }}
                 />
               </Box>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{
+                color: "text.secondary"
+              }}>
                 {option.email}
               </Typography>
             </Box>
@@ -117,14 +119,18 @@ const UserPicker: React.FC<UserPickerProps> = ({
           label={label}
           helperText={helperText}
           required={required}
-          InputProps={{
-            ...params.InputProps,
-            endAdornment: (
-              <>
-                {loading ? <CircularProgress color="inherit" size={20} /> : null}
-                {params.InputProps.endAdornment}
-              </>
-            ),
+          slotProps={{
+            ...params.slotProps,
+
+            input: {
+              ...params.slotProps.input,
+              endAdornment: (
+                <>
+                  {loading ? <CircularProgress color="inherit" size={20} /> : null}
+                  {params.slotProps.input.endAdornment}
+                </>
+              ),
+            }
           }}
         />
       )}

@@ -358,7 +358,9 @@ const UserManagement: React.FC = () => {
                         checked={!user.disabled}
                         onChange={() => handleToggleDisable(user)}
                         disabled={isLockedOwner(user)}
-                        inputProps={{ 'aria-label': 'toggle user status' }}
+                        slotProps={{
+                          input: { 'aria-label': 'toggle user status' }
+                        }}
                       />
                       <Typography variant="body2">
                         {user.disabled ? 'Disabled' : 'Active'}
@@ -408,10 +410,14 @@ const UserManagement: React.FC = () => {
         <DialogContent>
           {invitationSent ? (
             <Box sx={{ textAlign: 'center', py: 3 }}>
-              <Typography variant="h6" color="success.main" gutterBottom>
+              <Typography variant="h6" gutterBottom sx={{
+                color: "success.main"
+              }}>
                 ✓ Invitation Sent!
               </Typography>
-              <Typography color="text.secondary">
+              <Typography sx={{
+                color: "text.secondary"
+              }}>
                 An activation email has been sent to {invitationSent}
               </Typography>
             </Box>

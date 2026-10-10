@@ -248,7 +248,12 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
         )}
 
         {contributors.length === 0 ? (
-          <Typography color="text.secondary" sx={{ textAlign: 'center', py: 4 }}>
+          <Typography
+            sx={{
+              color: "text.secondary",
+              textAlign: 'center',
+              py: 4
+            }}>
             No contributors invited yet. Click "Invite" to add record providers.
           </Typography>
         ) : (
@@ -267,10 +272,14 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
               {contributors.map((contributor) => (
                 <TableRow key={contributor.id}>
                   <TableCell>
-                    <Typography variant="body2" fontWeight={500}>
+                    <Typography variant="body2" sx={{
+                      fontWeight: 500
+                    }}>
                       {contributor.name}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary">
+                    <Typography variant="caption" sx={{
+                      color: "text.secondary"
+                    }}>
                       {contributor.email}
                     </Typography>
                   </TableCell>
@@ -308,7 +317,12 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
       <Dialog open={showInviteDialog} onClose={() => setShowInviteDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Invite Record Contributor</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          <Typography
+            variant="body2"
+            sx={{
+              color: "text.secondary",
+              mb: 2
+            }}>
             Send an invitation to someone who needs to upload records for this case.
             They will receive a secure link to upload documents.
           </Typography>
@@ -394,7 +408,12 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
       <Dialog open={showBulkDialog} onClose={() => setShowBulkDialog(false)} maxWidth="md" fullWidth>
         <DialogTitle>Bulk Invite Contributors</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          <Typography
+            variant="body2"
+            sx={{
+              color: "text.secondary",
+              mb: 2
+            }}>
             Enter one contributor per line in the format: <strong>Name, Email, Department</strong> (department is optional)
           </Typography>
           <TextField
@@ -408,7 +427,13 @@ Bob Wilson, bob@example.com"
             onChange={(e) => setBulkText(e.target.value)}
             sx={{ fontFamily: 'monospace' }}
           />
-          <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+          <Typography
+            variant="caption"
+            sx={{
+              color: "text.secondary",
+              mt: 1,
+              display: 'block'
+            }}>
             {bulkText.split('\n').filter(l => l.trim()).length} contributor(s) detected
           </Typography>
         </DialogContent>

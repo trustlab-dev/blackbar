@@ -154,7 +154,7 @@ const ReasonPickerModal: React.FC<Props> = ({
       className="reason-picker-modal"
     >
       <DialogTitle>Add Redaction Reason</DialogTitle>
-      
+
       <DialogContent dividers>
         <Typography variant="subtitle2" gutterBottom>
           Select exemption section(s) for this redaction
@@ -197,10 +197,10 @@ const ReasonPickerModal: React.FC<Props> = ({
                     variant="outlined"
                   />
                 )}
-                renderTags={(value, getTagProps) =>
+                renderValue={(value, getItemProps) =>
                   value.map((option, index) => (
                     <Chip
-                      {...getTagProps({ index })}
+                      {...getItemProps({ index })}
                       key={option.code}
                       label={option.code}
                       color={option.code === primarySection ? 'primary' : 'default'}
@@ -212,7 +212,9 @@ const ReasonPickerModal: React.FC<Props> = ({
                 renderOption={(props, option) => (
                   <li {...props} key={option.code}>
                     <Box>
-                      <Typography variant="body2" fontWeight={500}>
+                      <Typography variant="body2" sx={{
+                        fontWeight: 500
+                      }}>
                         {option.code} - {option.name}
                       </Typography>
                       <Typography variant="caption" color="textSecondary">
@@ -242,7 +244,9 @@ const ReasonPickerModal: React.FC<Props> = ({
                 </Typography>
                 {selectedSections.map((section) => (
                   <Box key={section.code} sx={{ mb: 1 }}>
-                    <Typography variant="body2" fontWeight={section.code === primarySection ? 600 : 400}>
+                    <Typography variant="body2" sx={{
+                      fontWeight: section.code === primarySection ? 600 : 400
+                    }}>
                       {section.code === primarySection && '★ '}{section.code}: {section.name}
                     </Typography>
                     <Typography variant="caption" color="textSecondary" sx={{ pl: 2 }}>

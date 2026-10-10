@@ -96,28 +96,42 @@ const SectionPicker: React.FC<SectionPickerProps> = ({
             {...params}
             label={label}
             placeholder={selectedSections.length === 0 ? placeholder : ''}
-            InputProps={{
-              ...params.InputProps,
-              endAdornment: (
-                <>
-                  {loading ? <CircularProgress color="inherit" size={20} /> : null}
-                  {params.InputProps.endAdornment}
-                </>
-              ),
+            slotProps={{
+              ...params.slotProps,
+
+              input: {
+                ...params.slotProps.input,
+                endAdornment: (
+                  <>
+                    {loading ? <CircularProgress color="inherit" size={20} /> : null}
+                    {params.slotProps.input.endAdornment}
+                  </>
+                ),
+              }
             }}
           />
         )}
         renderOption={(props, option) => (
           <li {...props} key={option.code}>
             <Box>
-              <Typography variant="body2" fontWeight={500}>
+              <Typography variant="body2" sx={{
+                fontWeight: 500
+              }}>
                 {option.code}
               </Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" sx={{
+                color: "text.secondary"
+              }}>
                 {option.name}
               </Typography>
               {option.description && (
-                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                <Typography
+                  variant="caption"
+                  sx={{
+                    color: "text.secondary",
+                    display: "block",
+                    mt: 0.5
+                  }}>
                   {option.description.substring(0, 100)}
                   {option.description.length > 100 ? '...' : ''}
                 </Typography>
@@ -125,10 +139,10 @@ const SectionPicker: React.FC<SectionPickerProps> = ({
             </Box>
           </li>
         )}
-        renderTags={(value, getTagProps) =>
+        renderValue={(value, getItemProps) =>
           value.map((option, index) => (
             <Chip
-              {...getTagProps({ index })}
+              {...getItemProps({ index })}
               key={option.code}
               label={option.code}
               size="small"
@@ -138,12 +152,20 @@ const SectionPicker: React.FC<SectionPickerProps> = ({
             />
           ))
         }
-        PaperComponent={(props) => (
-          <Paper {...props} elevation={8} />
-        )}
+        slots={{
+          paper: (props) => (
+            <Paper {...props} elevation={8} />
+          )
+        }}
       />
       {selectedSections.length > 1 && (
-        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+        <Typography
+          variant="caption"
+          sx={{
+            color: "text.secondary",
+            mt: 0.5,
+            display: 'block'
+          }}>
           Click a section chip to set it as primary. Primary: <strong>{primarySection}</strong>
         </Typography>
       )}
