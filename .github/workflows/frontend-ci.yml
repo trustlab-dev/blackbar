@@ -27,11 +27,6 @@ jobs:
   type-check:
     name: TypeScript (tsc --noEmit)
     runs-on: ubuntu-latest
-    # `tsc --noEmit` currently surfaces a ~35-error React 18 type-compat
-    # backlog in test files plus a `MemoryRouter` import that needs
-    # migration to react-router-dom v6 syntax. Tracked for follow-up;
-    # surfacing without blocking the gate until cleared.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
@@ -47,6 +42,10 @@ jobs:
 
       - name: tsc --noEmit
         run: npx tsc --noEmit
+
+      # vite.config.ts is outside the app tsconfig; check it on its own.
+      - name: tsc --noEmit (vite config)
+        run: npx tsc --noEmit -p tsconfig.node.json
 
   test:
     name: Tests + coverage
