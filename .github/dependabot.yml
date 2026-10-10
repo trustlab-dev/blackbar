@@ -50,7 +50,23 @@ updates:
     commit-message:
       prefix: "deps(frontend)"
       include: "scope"
+    ignore:
+      # Types follow the Node runtime (frontend/Dockerfile, frontend-ci.yml);
+      # raise the major together with the runtime.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # react-pdf pins an exact pdfjs-dist and the worker in
+      # src/components/viewer/pdfSetup.ts must load that same version, so
+      # pdfjs-dist moves only when react-pdf does.
+      - dependency-name: "pdfjs-dist"
     groups:
+      # Material and icons majors only install together.
+      mui-major:
+        applies-to: version-updates
+        update-types:
+          - "major"
+        patterns:
+          - "@mui/*"
       node-minor-and-patch:
         applies-to: version-updates
         update-types:

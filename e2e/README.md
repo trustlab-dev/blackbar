@@ -27,7 +27,7 @@ authorization work (ISSUE-018).
 
 ## Prerequisites
 
-1. **Docker + docker compose** (the stack) and **Node 18+** (Playwright).
+1. **Docker + docker compose** (the stack) and **Node 24+** (Playwright).
 
 2. **A bootstrapped stack with a known admin.** The harness cannot create the
    first owner over the public API (owner activation needs an emailed token),
