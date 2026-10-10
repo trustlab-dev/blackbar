@@ -45,7 +45,10 @@ app = FastAPI(
     openapi_url=None if _is_production else "/openapi.json",
 )
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Starlette types every handler as taking a plain Exception, so a handler
+# for a specific subclass fails arg-type even though Starlette only calls it
+# with that subclass. The ignores below are for that stub limitation.
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 # Add standard error handlers
 from fastapi import HTTPException
@@ -56,8 +59,10 @@ from src.utils.error_handler import (
     validation_exception_handler,
 )
 
-app.add_exception_handler(HTTPException, http_exception_handler)
-app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]
+app.add_exception_handler(
+    RequestValidationError, validation_exception_handler  # type: ignore[arg-type]
+)
 app.add_exception_handler(Exception, generic_exception_handler)
 
 

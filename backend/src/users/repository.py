@@ -17,7 +17,7 @@ class UsersRepository:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.collection = db.users
 
-    async def create(self, user_data: UserCreate, password_hash: str) -> User:
+    async def create(self, user_data: UserCreate, password_hash: str | None) -> User:
         """Create a new user with hashed password"""
         user_dict = user_data.model_dump(exclude={"password"})
         user_dict["id"] = str(uuid.uuid4())

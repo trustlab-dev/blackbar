@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -12,7 +13,7 @@ from .models import TemplateCreate, TemplateResponse, TemplateUpdate
 router = APIRouter(prefix="/templates", tags=["templates"])
 
 
-def render_template(template_content: str, case_data: dict, user_data: dict = None) -> str:
+def render_template(template_content: str, case_data: dict, user_data: dict | None = None) -> str:
     """
     Render a template by replacing variables with actual data.
 
@@ -98,13 +99,13 @@ def render_template(template_content: str, case_data: dict, user_data: dict = No
     dependencies=[Depends(check_role(["owner", "admin", "analyst"]))],
 )
 async def list_templates(
-    category: str = None,
+    category: str | None = None,
     active_only: bool = True,
     current_user=Depends(get_current_user),
     db=Depends(get_database_from_request),
 ):
     """Get all templates"""
-    query = {}
+    query: dict[str, Any] = {}
     if category:
         query["category"] = category
     if active_only:

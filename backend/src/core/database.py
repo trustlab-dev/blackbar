@@ -58,7 +58,7 @@ async def get_database_from_request(request: Request) -> AsyncIOMotorDatabase:
     return get_shared_database()
 
 
-async def create_indexes(db: AsyncIOMotorDatabase = None):
+async def create_indexes(db: AsyncIOMotorDatabase | None = None):
     """Create indexes for all database collections"""
     if db is None:
         db = get_shared_database()

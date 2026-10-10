@@ -18,7 +18,7 @@ def convert_mongo_doc_to_json(doc: dict[str, Any]) -> dict[str, Any]:
     if doc is None:
         return None
 
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in doc.items():
         if key == "_id":
             continue

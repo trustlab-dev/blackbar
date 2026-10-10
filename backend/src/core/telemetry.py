@@ -368,7 +368,7 @@ def get_tracer() -> trace.Tracer:
 
 
 @contextmanager
-def create_span(name: str, attributes: dict = None):
+def create_span(name: str, attributes: dict | None = None):
     """
     Create a new trace span.
 
@@ -394,7 +394,7 @@ def add_span_attributes(attributes: dict):
                 span.set_attribute(key, str(value))
 
 
-def record_exception(exception: Exception, attributes: dict = None):
+def record_exception(exception: Exception, attributes: dict | None = None):
     """Record an exception in the current span and Sentry."""
     span = trace.get_current_span()
     if span:
@@ -418,7 +418,7 @@ def record_exception(exception: Exception, attributes: dict = None):
 # =============================================================================
 
 
-def set_sentry_user(user_id: str, email: str = None):
+def set_sentry_user(user_id: str, email: str | None = None):
     """Set user context for Sentry."""
     if not SENTRY_DSN:
         return
@@ -439,7 +439,7 @@ def set_sentry_context(name: str, data: dict):
     sentry_sdk.set_context(name, data)
 
 
-def add_sentry_breadcrumb(message: str, category: str = "info", data: dict = None):
+def add_sentry_breadcrumb(message: str, category: str = "info", data: dict | None = None):
     """Add a breadcrumb for Sentry."""
     if not SENTRY_DSN:
         return

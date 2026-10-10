@@ -93,16 +93,16 @@ class SystemConfiguration(BaseModel):
 class SystemConfigurationUpdate(BaseModel):
     """Update model - all fields optional"""
 
-    org_name: str | None = Field(None, max_length=100)
+    org_name: str | None = Field(default=None, max_length=100)
     org_logo_url: str | None = None
     contact_email: EmailStr | None = None
-    primary_color: str | None = Field(None, pattern="^#[0-9A-Fa-f]{6}$")
-    footer_text: str | None = Field(None, max_length=500)
-    default_due_days: int | None = Field(None, ge=1, le=365)
+    primary_color: str | None = Field(default=None, pattern="^#[0-9A-Fa-f]{6}$")
+    footer_text: str | None = Field(default=None, max_length=500)
+    default_due_days: int | None = Field(default=None, ge=1, le=365)
     default_assignee_id: str | None = None
-    default_priority: str | None = Field(None, pattern="^(low|normal|high|urgent)$")
-    session_timeout_minutes: int | None = Field(None, ge=15, le=480)
-    password_min_length: int | None = Field(None, ge=8, le=32)
+    default_priority: str | None = Field(default=None, pattern="^(low|normal|high|urgent)$")
+    session_timeout_minutes: int | None = Field(default=None, ge=15, le=480)
+    password_min_length: int | None = Field(default=None, ge=8, le=32)
     enable_public_requests: bool | None = None
     enable_request_tracking: bool | None = None
     enable_public_upload: bool | None = None
