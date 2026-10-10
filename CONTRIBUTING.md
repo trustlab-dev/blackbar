@@ -31,7 +31,7 @@ under the project's license. Commits without a sign-off cannot be merged.
 
 - Docker and Docker Compose
 - `openssl` (used by `setup.sh` to generate secrets)
-- Python 3.11+ and Node.js 20+ (only needed for running the test suites or
+- Python 3.11+ and Node.js 24+ (only needed for running the test suites or
   the dev servers outside containers)
 
 ### Quick start (Docker)

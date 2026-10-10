@@ -6,7 +6,7 @@
 [![Latest release](https://img.shields.io/github/v/release/trustlab-dev/blackbar?include_prereleases&sort=semver)](https://github.com/trustlab-dev/blackbar/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg?logo=python&logoColor=white)](backend/pyproject.toml)
-[![Node 20+](https://img.shields.io/badge/node-20+-green.svg?logo=node.js&logoColor=white)](frontend/package.json)
+[![Node 24+](https://img.shields.io/badge/node-24+-green.svg?logo=node.js&logoColor=white)](frontend/package.json)
 
 <!--
 Codecov badges are intentionally

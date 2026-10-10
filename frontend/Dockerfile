@@ -8,7 +8,7 @@
 #                docker-compose.prod.yml. Ships no node_modules or build
 #                tooling, which keeps the image small and scanner-clean.
 
-FROM node:20-alpine AS dev
+FROM node:24-alpine AS dev
 
 # Patch base-image OS packages and npm's bundled dependencies (tar, glob,
 # sigstore, …) — they lag the base image cut and dominate scanner findings.
