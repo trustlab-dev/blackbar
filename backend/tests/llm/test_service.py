@@ -45,7 +45,7 @@ from src.llm.models import (
 )
 from src.llm.repository import LLMRepository
 from src.llm.safety import LLMDisabledError, LLMProviderError
-from src.llm.service import LLMKeyMissingError, LLMService
+from src.llm.service import LLMKeyMissingError, LLMService, extract_completion
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -730,3 +730,40 @@ class TestCohereV2Shape:
         assert body["preamble"] == "S"
         assert body["message"] == "U"
         assert body["chat_history"] == []
+
+
+class TestOpenAIContentShapes:
+    def test_list_of_text_parts_is_joined(self) -> None:
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "[1, "},
+                            {"type": "image_url", "image_url": {"url": "x"}},
+                            {"type": "text", "text": "2]"},
+                        ]
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        assert extract_completion("openai", response) == ("[1, 2]", "stop")
+
+    def test_string_and_null_content_are_unchanged(self) -> None:
+        assert extract_completion("openai", {"choices": [{"message": {"content": "hi"}}]}) == (
+            "hi",
+            None,
+        )
+        assert extract_completion("openai", {"choices": [{"message": {"content": None}}]}) == (
+            "",
+            None,
+        )
+
+    @pytest.mark.parametrize(
+        "content",
+        [{"type": "text", "text": "x"}, 42, ["bare string"], [{"type": "text", "text": 5}]],
+    )
+    def test_other_shapes_raise_provider_error(self, content) -> None:
+        with pytest.raises(LLMProviderError):
+            extract_completion("openai", {"choices": [{"message": {"content": content}}]})

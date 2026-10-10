@@ -67,6 +67,7 @@ interface AiAnalysis {
   chunks?: number;
   output_truncated?: boolean;
   invalid_suggestions?: number;
+  dropped_suggestions?: number;
   provider?: string | null;
   model?: string | null;
   error?: string | null;

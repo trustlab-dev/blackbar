@@ -60,6 +60,7 @@ _ANALYSIS_FIELDS = (
     "chunks",
     "output_truncated",
     "invalid_suggestions",
+    "dropped_suggestions",
     "disclosed_count",
     "provider",
     "model",
