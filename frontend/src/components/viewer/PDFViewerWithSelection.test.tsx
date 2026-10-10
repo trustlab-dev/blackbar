@@ -92,6 +92,10 @@ beforeEach(() => {
   // URL.createObjectURL is missing under jsdom.
   (global.URL.createObjectURL as any) = vi.fn(() => 'blob:mock-url');
   vi.spyOn(console, 'log').mockImplementation(() => {});
+  // The viewer fetches OCR metadata on mount. Default to "no OCR pages" so
+  // overlay/selection tests do not make unhandled requests; tests that care
+  // about OCR override this with server.use().
+  server.use(http.get(META_URL, () => HttpResponse.json({})));
 });
 
 afterEach(() => {

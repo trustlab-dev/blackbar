@@ -397,13 +397,16 @@ describe('CaseQueue — session ended (401)', () => {
   it('leaves the redirect to the api client, keeping reason and return path', async () => {
     const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')!;
     const assignments: string[] = [];
-    let href = 'http://localhost/cases?view=all';
+    // Keep jsdom's document origin: requests resolve against the document,
+    // MSW resolves relative handler paths against this stubbed href.
+    const { origin, host } = window.location;
+    let href = `${origin}/cases?view=all`;
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: {
-        origin: 'http://localhost',
+        origin,
         protocol: 'http:',
-        host: 'localhost',
+        host,
         hostname: 'localhost',
         pathname: '/cases',
         search: '?view=all',
