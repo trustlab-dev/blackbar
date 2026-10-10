@@ -1010,6 +1010,7 @@ class TestMergeAttachmentsIntoEmail:
         """A stored attachment record carries the converted PDF's size and
         the original bytes' hash; re-uploading the email must match it on
         the hash, not the size (issue #77)."""
+        from src.documents.processing_service import UploadContext
         from src.utils.conversion import calculate_file_hash
 
         att = tmp_path / "dup.docx"
@@ -1025,8 +1026,6 @@ class TestMergeAttachmentsIntoEmail:
         )
 
         existing_email = {"id": "email-1", "attachment_ids": ["exist-att"]}
-
-        from src.documents.processing_service import UploadContext
 
         process = AsyncMock(return_value=[{"id": "new-att", "parent_document_id": "email-1"}])
         with patch.object(service, "_process_attachments", process):
@@ -1068,6 +1067,33 @@ class TestMergeAttachmentsIntoEmail:
                 UploadContext(),
             )
         assert merged == 1
+
+    async def test_reprocesses_attachment_whose_record_lacks_content_hash(
+        self, service, db, tmp_path
+    ) -> None:
+        # Legacy record: same name, no content_hash. It cannot be matched, so the
+        # attachment is processed again rather than dropped.
+        from src.documents.processing_service import UploadContext
+
+        att = tmp_path / "old.docx"
+        att.write_bytes(b"abcdefgh")
+        await db.documents.insert_one({"id": "exist-att", "original_filename": "old.docx"})
+        await db.documents.insert_one(
+            {"id": "email-1", "attachment_ids": ["exist-att"], "filename": "e.eml"}
+        )
+        existing_email = {"id": "email-1", "attachment_ids": ["exist-att"]}
+        att_doc = {"id": "att-2", "filename": "old.pdf", "original_filename": "old.docx"}
+
+        with patch.object(
+            service, "_process_attachments", AsyncMock(return_value=[att_doc])
+        ) as proc:
+            merged = await service._merge_attachments_into_email(
+                existing_email,
+                [{"filename": "old.docx", "path": str(att)}],
+                UploadContext(),
+            )
+        assert merged == 1
+        proc.assert_called_once()
 
     async def test_skips_missing_file(self, service) -> None:
         from src.documents.processing_service import UploadContext
@@ -2183,9 +2209,7 @@ class TestAttachmentErrorsSurfaced:
                 "pdf_path": str(email_pdf),
                 "extracted_text": None,
                 "attachments": [],
-                "dropped_attachments": [
-                    {"filename": "link.url", "error": "no extractable data"}
-                ],
+                "dropped_attachments": [{"filename": "link.url", "error": "no extractable data"}],
             }
 
         monkeypatch.setattr("src.documents.processing_service.convert_to_pdf", fake_convert)

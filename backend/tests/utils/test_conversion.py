@@ -421,6 +421,17 @@ class TestConvertEmlToPdf:
         assert "alice@example.test" in text
         assert message_id == "<abc@example.test>"
 
+    def test_non_ascii_message_id_is_returned_as_text(self, tmp_path: Path) -> None:
+        """A Message-ID holding raw 8-bit bytes parses to an email.header.Header;
+        callers store and query it, so it must come back as a plain str."""
+        in_file = tmp_path / "msg.eml"
+        in_file.write_bytes(b"Message-ID: <abc\xe9@x>\nSubject: hi\n\nbody\n")
+
+        _, _, _, message_id, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+        assert type(message_id) is str
+        assert message_id == "<abc\ufffd@x>"
+
     def test_multipart_eml_extracts_attachment(self, tmp_path: Path) -> None:
         in_file = tmp_path / "msg.eml"
         in_file.write_bytes(MULTIPART_EML)
@@ -518,6 +529,71 @@ class TestConvertEmlToPdf:
         ):
             pdf_path, _, _, _, _ = convert_eml_to_pdf(str(in_file), str(out))
         assert Path(pdf_path).exists()
+
+    def test_inline_image_referenced_repeatedly_is_ocred_once_with_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        """Each distinct inline image is OCRed once per email, within the per-page
+        time limit, however many times the body refers to it."""
+        import base64
+
+        from src.utils import pdf_limits
+
+        png_1x1 = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00"
+            b"\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT"
+            b"\x08\x99c\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xdc\xccY\xe7\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        b64 = base64.b64encode(png_1x1).decode()
+        refs = b'<img src="cid:image1@x"/><p>between</p>' * 5
+        eml = (
+            b"MIME-Version: 1.0\nFrom: a@x\nTo: b@x\nSubject: cid-test\n"
+            b'Content-Type: multipart/related; boundary="b"\n\n'
+            b"--b\nContent-Type: text/html\n\n<html><body>" + refs + b"</body></html>\n"
+            b"--b\nContent-Type: image/png\nContent-ID: <image1@x>\n"
+            b"Content-Transfer-Encoding: base64\n\n" + b64.encode() + b"\n" + b"--b--\n"
+        )
+        in_file = tmp_path / "msg.eml"
+        in_file.write_bytes(eml)
+
+        with patch("src.utils.conversion.pytesseract.image_to_string", return_value="hello") as ocr:
+            _, _, text, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+        assert ocr.call_count == 1
+        assert ocr.call_args.kwargs["timeout"] == pdf_limits.OCR_PAGE_TIMEOUT_SECONDS
+        assert "[Image text: hello]" in text
+
+    def test_failed_inline_ocr_is_not_retried_for_later_references(self, tmp_path: Path) -> None:
+        """A failed or timed-out OCR of an inline image is not repeated at the
+        email's other references to that image."""
+        import base64
+
+        png_1x1 = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00"
+            b"\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT"
+            b"\x08\x99c\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xdc\xccY\xe7\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        b64 = base64.b64encode(png_1x1).decode()
+        refs = b'<img src="cid:image1@x"/><p>between</p>' * 5
+        eml = (
+            b"MIME-Version: 1.0\nFrom: a@x\nTo: b@x\nSubject: cid-test\n"
+            b'Content-Type: multipart/related; boundary="b"\n\n'
+            b"--b\nContent-Type: text/html\n\n<html><body>" + refs + b"</body></html>\n"
+            b"--b\nContent-Type: image/png\nContent-ID: <image1@x>\n"
+            b"Content-Transfer-Encoding: base64\n\n" + b64.encode() + b"\n" + b"--b--\n"
+        )
+        in_file = tmp_path / "msg.eml"
+        in_file.write_bytes(eml)
+
+        with patch(
+            "src.utils.conversion.pytesseract.image_to_string",
+            side_effect=RuntimeError("timeout"),
+        ) as ocr:
+            pdf_path, _, text, _, _ = convert_eml_to_pdf(str(in_file), str(tmp_path / "msg.pdf"))
+
+        assert ocr.call_count == 1
+        assert Path(pdf_path).exists()
+        assert "[Image text:" not in text
 
     def test_eml_with_unnamed_attachment_falls_back_to_uuid_name(self, tmp_path: Path) -> None:
         """An attachment without a filename gets a uuid-based one."""
