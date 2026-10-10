@@ -52,10 +52,6 @@ jobs:
   type-check:
     name: Type-check (mypy)
     runs-on: ubuntu-latest
-    # mypy has a ~210-error backlog against the existing code (tracked for
-    # follow-up). Surface the findings without blocking the merge gate until
-    # the backlog is cleared.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
