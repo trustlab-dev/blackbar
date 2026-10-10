@@ -469,7 +469,13 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
               variant="determinate"
               value={packageState.current_draft?.generation_progress || 0}
             />
-            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+            <Typography
+              variant="caption"
+              sx={{
+                color: "text.secondary",
+                mt: 0.5,
+                display: 'block'
+              }}>
               {packageState.current_draft?.generation_message || 'Processing...'}
             </Typography>
           </Box>
@@ -551,7 +557,9 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
 
         {/* Release Stats */}
         {hasRelease && (
-          <Typography variant="caption" color="text.secondary">
+          <Typography variant="caption" sx={{
+            color: "text.secondary"
+          }}>
             Downloads: {packageState.current_release!.download_count}
             {packageState.current_release!.max_downloads && 
               ` / ${packageState.current_release!.max_downloads}`}
@@ -568,7 +576,9 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
         </DialogTitle>
         <DialogContent>
           <Box sx={{ pt: 2 }}>
-            <Typography variant="body2" color="text.secondary" gutterBottom>
+            <Typography variant="body2" gutterBottom sx={{
+              color: "text.secondary"
+            }}>
               Select documents to include in the release package:
             </Typography>
 
@@ -689,10 +699,12 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
               onChange={(e) => setExpiresInDays(parseInt(e.target.value) || 30)}
               fullWidth
               sx={{ mb: 2 }}
-              inputProps={{ min: 7, max: 90 }}
               helperText={`Expires: ${formatDate(
                 new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString()
               )}`}
+              slotProps={{
+                htmlInput: { min: 7, max: 90 }
+              }}
             />
 
             <TextField
@@ -702,7 +714,9 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
               onChange={(e) => setMaxDownloads(parseInt(e.target.value) || 10)}
               fullWidth
               sx={{ mb: 2 }}
-              inputProps={{ min: 1, max: 100 }}
+              slotProps={{
+                htmlInput: { min: 1, max: 100 }
+              }}
             />
 
             <Divider sx={{ my: 2 }} />

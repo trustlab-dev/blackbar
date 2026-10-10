@@ -111,10 +111,17 @@ const ActivateAccount: React.FC = () => {
             <Typography variant="h4" gutterBottom>
               Account Activated!
             </Typography>
-            <Typography variant="body1" color="text.secondary" paragraph>
+            <Typography
+              variant="body1"
+              sx={{
+                color: "text.secondary",
+                marginBottom: "16px"
+              }}>
               Your account has been successfully activated. You can now log in with your email and password.
             </Typography>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               Redirecting to login page...
             </Typography>
           </Paper>
@@ -130,7 +137,13 @@ const ActivateAccount: React.FC = () => {
           <Typography variant="h4" component="h1" gutterBottom align="center">
             Activate Your Account
           </Typography>
-          <Typography variant="body2" color="text.secondary" paragraph align="center">
+          <Typography
+            variant="body2"
+            align="center"
+            sx={{
+              color: "text.secondary",
+              marginBottom: "16px"
+            }}>
             Set your password to complete account activation
           </Typography>
 
@@ -184,7 +197,9 @@ const ActivateAccount: React.FC = () => {
             </Button>
 
             <Box sx={{ mt: 2, textAlign: 'center' }}>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{
+                color: "text.secondary"
+              }}>
                 Already have an account?{' '}
                 <Button
                   onClick={() => navigate('/login')}

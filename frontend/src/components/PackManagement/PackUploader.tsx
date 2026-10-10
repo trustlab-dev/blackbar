@@ -107,7 +107,9 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
       <DialogTitle>Upload Jurisdiction Pack</DialogTitle>
 
       <DialogContent>
-        <Typography variant="body2" color="textSecondary" paragraph>
+        <Typography variant="body2" color="textSecondary" sx={{
+          marginBottom: "16px"
+        }}>
           Upload a custom jurisdiction pack JSON file. The pack will be validated before upload.
         </Typography>
 
@@ -142,20 +144,26 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
         </Box>
 
         {validating && (
-          <Box mt={2}>
+          <Box sx={{
+            mt: 2
+          }}>
             <Typography variant="body2" gutterBottom>Validating pack...</Typography>
             <LinearProgress />
           </Box>
         )}
 
         {validation && (
-          <Box mt={2}>
+          <Box sx={{
+            mt: 2
+          }}>
             {validation.valid ? (
               <Alert severity="success" icon={<CheckCircleIcon />}>
                 <Typography variant="body2">
                   <strong>Pack is valid!</strong>
                 </Typography>
-                <Typography variant="caption" display="block">
+                <Typography variant="caption" sx={{
+                  display: "block"
+                }}>
                   {validation.pack_name} (v{validation.pack_id})
                 </Typography>
               </Alert>
@@ -168,8 +176,12 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
             )}
 
             {validation.errors && validation.errors.length > 0 && (
-              <Box mt={1}>
-                <Typography variant="caption" color="error" display="block" gutterBottom>
+              <Box sx={{
+                mt: 1
+              }}>
+                <Typography variant="caption" color="error" gutterBottom sx={{
+                  display: "block"
+                }}>
                   <strong>Errors:</strong>
                 </Typography>
                 <List dense>
@@ -180,7 +192,9 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
                       </ListItemIcon>
                       <ListItemText 
                         primary={err}
-                        primaryTypographyProps={{ variant: 'caption' }}
+                        slotProps={{
+                          primary: { variant: 'caption' }
+                        }}
                       />
                     </ListItem>
                   ))}
@@ -189,8 +203,16 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
             )}
 
             {validation.warnings && validation.warnings.length > 0 && (
-              <Box mt={1}>
-                <Typography variant="caption" color="warning.main" display="block" gutterBottom>
+              <Box sx={{
+                mt: 1
+              }}>
+                <Typography
+                  variant="caption"
+                  gutterBottom
+                  sx={{
+                    color: "warning.main",
+                    display: "block"
+                  }}>
                   <strong>Warnings:</strong>
                 </Typography>
                 <List dense>
@@ -201,7 +223,9 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
                       </ListItemIcon>
                       <ListItemText 
                         primary={warning}
-                        primaryTypographyProps={{ variant: 'caption' }}
+                        slotProps={{
+                          primary: { variant: 'caption' }
+                        }}
                       />
                     </ListItem>
                   ))}
@@ -218,7 +242,9 @@ const PackUploader: React.FC<PackUploaderProps> = ({ open, onClose, onSuccess })
         )}
 
         {uploading && (
-          <Box mt={2}>
+          <Box sx={{
+            mt: 2
+          }}>
             <Typography variant="body2" gutterBottom>Uploading pack...</Typography>
             <LinearProgress />
           </Box>

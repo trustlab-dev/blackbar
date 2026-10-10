@@ -265,16 +265,32 @@ const CaseTeamPanel: React.FC<CaseTeamPanelProps> = ({ caseId, canManageTeam }) 
                 </Box>
                 <Box>
                   {member.department && (
-                    <Typography variant="body2" color="text.secondary" sx={{ fontSize: '13px' }}>
+                    <Typography
+                      variant="body2"
+                      sx={{
+                        color: "text.secondary",
+                        fontSize: '13px'
+                      }}>
                       {member.department}
                     </Typography>
                   )}
                   {member.notes && (
-                    <Typography variant="body2" color="text.secondary" sx={{ fontSize: '13px', fontStyle: 'italic' }}>
+                    <Typography
+                      variant="body2"
+                      sx={{
+                        color: "text.secondary",
+                        fontSize: '13px',
+                        fontStyle: 'italic'
+                      }}>
                       {member.notes}
                     </Typography>
                   )}
-                  <Typography variant="caption" color="text.secondary" sx={{ fontSize: '11px' }}>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "text.secondary",
+                      fontSize: '11px'
+                    }}>
                     Added {new Date(member.added_at).toLocaleDateString()}
                   </Typography>
                 </Box>

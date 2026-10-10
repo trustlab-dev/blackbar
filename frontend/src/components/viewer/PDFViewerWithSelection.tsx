@@ -432,7 +432,9 @@ const PDFViewerWithSelection: React.FC<Props> = ({
             scale={zoom}
             renderTextLayer={true}
             renderAnnotationLayer={false}
-            error={<Box p={2}>Failed to load page {currentPage}</Box>}
+            error={<Box sx={{
+              p: 2
+            }}>Failed to load page {currentPage}</Box>}
           />
         </Document>
 

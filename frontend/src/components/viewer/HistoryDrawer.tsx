@@ -218,11 +218,24 @@ const HistoryDrawer: React.FC<Props> = ({ open, onClose, documentId }) => {
                       }
                       secondary={
                         <>
-                          <Typography variant="caption" color="text.secondary" component="span" sx={{ display: 'block' }}>
+                          <Typography
+                            variant="caption"
+                            component="span"
+                            sx={{
+                              color: "text.secondary",
+                              display: 'block'
+                            }}>
                             by {log.username || 'Unknown'} • {formatTimestamp(log.timestamp)}
                           </Typography>
                           {formatDetails(log) && (
-                            <Typography variant="caption" color="text.secondary" component="span" sx={{ display: 'block', mt: 0.5 }}>
+                            <Typography
+                              variant="caption"
+                              component="span"
+                              sx={{
+                                color: "text.secondary",
+                                display: 'block',
+                                mt: 0.5
+                              }}>
                               {formatDetails(log)}
                             </Typography>
                           )}

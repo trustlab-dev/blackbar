@@ -295,7 +295,13 @@ const LLMConfiguration: React.FC = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          minHeight: "400px"
+        }}>
         <CircularProgress />
       </Box>
     );
@@ -303,7 +309,13 @@ const LLMConfiguration: React.FC = () => {
 
   return (
     <Box>
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          mb: 3
+        }}>
         <Typography variant="h4">LLM Configuration</Typography>
         <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={() => handleOpenDialog()}>
           Add LLM
@@ -448,8 +460,12 @@ const LLMConfiguration: React.FC = () => {
                 unchanged when you save)
               </Typography>
             )}
-            <TextField label="Temperature" type="number" value={formData.temperature} onChange={(e) => setFormData({ ...formData, temperature: parseFloat(e.target.value) })} inputProps={{ min: 0, max: 2, step: 0.1 }} fullWidth />
-            <TextField label="Max Tokens" type="number" value={formData.max_tokens} onChange={(e) => setFormData({ ...formData, max_tokens: parseInt(e.target.value) })} inputProps={{ min: 1 }} fullWidth />
+            <TextField label="Temperature" type="number" value={formData.temperature} onChange={(e) => setFormData({ ...formData, temperature: parseFloat(e.target.value) })} fullWidth slotProps={{
+              htmlInput: { min: 0, max: 2, step: 0.1 }
+            }} />
+            <TextField label="Max Tokens" type="number" value={formData.max_tokens} onChange={(e) => setFormData({ ...formData, max_tokens: parseInt(e.target.value) })} fullWidth slotProps={{
+              htmlInput: { min: 1 }
+            }} />
             <TextField label="Notes" value={formData.notes} onChange={(e) => setFormData({ ...formData, notes: e.target.value })} fullWidth multiline rows={2} />
             <FormControl fullWidth>
               <InputLabel>Status</InputLabel>

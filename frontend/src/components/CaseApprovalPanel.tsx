@@ -159,11 +159,19 @@ const CaseApprovalPanel: React.FC<CaseApprovalPanelProps> = ({ caseId, userRole 
           <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
             Notes:
           </Typography>
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" sx={{
+            color: "text.secondary"
+          }}>
             {approvalStatus.approval_notes}
           </Typography>
           {approvalStatus.approved_at && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            <Typography
+              variant="caption"
+              sx={{
+                color: "text.secondary",
+                display: 'block',
+                mt: 1
+              }}>
               {new Date(approvalStatus.approved_at).toLocaleString()}
             </Typography>
           )}
@@ -202,7 +210,12 @@ const CaseApprovalPanel: React.FC<CaseApprovalPanelProps> = ({ caseId, userRole 
       )}
 
       {!canApprove && (
-        <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic' }}>
+        <Typography
+          variant="body2"
+          sx={{
+            color: "text.secondary",
+            fontStyle: 'italic'
+          }}>
           Only Approvers and Managers can approve cases for release.
         </Typography>
       )}

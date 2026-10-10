@@ -142,9 +142,17 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
 
   if (loading) {
     return (
-      <Box display="flex" alignItems="center" gap={1} p={1}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          p: 1
+        }}>
         <CircularProgress size={16} />
-        <Typography variant="body2" color="text.secondary">Loading clock status...</Typography>
+        <Typography variant="body2" sx={{
+          color: "text.secondary"
+        }}>Loading clock status...</Typography>
       </Box>
     );
   }
@@ -155,8 +163,20 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
   return (
     <Card variant="outlined" sx={{ mb: 2 }}>
       <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
-        <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
-          <Box display="flex" alignItems="center" gap={1}>
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 1
+          }}>
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1
+            }}>
             <ClockIcon color={isPaused ? 'warning' : 'primary'} />
             <Typography variant="subtitle2">
               Statutory Clock
@@ -177,7 +197,12 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
             )}
           </Box>
 
-          <Box display="flex" alignItems="center" gap={1}>
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1
+            }}>
             {isPaused ? (
               <Button
                 size="small"
@@ -220,9 +245,17 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
         )}
 
         {adjustedDueDate && clockStatus && clockStatus.total_paused_days > 0 && (
-          <Box mt={1} display="flex" alignItems="center" gap={1}>
+          <Box
+            sx={{
+              mt: 1,
+              display: "flex",
+              alignItems: "center",
+              gap: 1
+            }}>
             <InfoIcon fontSize="small" color="info" />
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{
+              color: "text.secondary"
+            }}>
               Adjusted due date: <strong>{formatDate(adjustedDueDate)}</strong>
               {clockStatus.original_due_date && (
                 <> (originally {formatDate(clockStatus.original_due_date)})</>
@@ -242,7 +275,12 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
       <Dialog open={showPauseDialog} onClose={() => setShowPauseDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Pause Statutory Clock</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          <Typography
+            variant="body2"
+            sx={{
+              color: "text.secondary",
+              mb: 2
+            }}>
             Pausing the clock will stop the countdown toward the due date. The due date will be automatically adjusted when the clock is resumed.
           </Typography>
           <FormControl fullWidth sx={{ mb: 2 }}>
@@ -309,15 +347,21 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
                       <ClockIcon color="primary" />
                     )}
                   </Box>
-                  <Box flex={1}>
-                    <Typography variant="body2" fontWeight={600}>
+                  <Box sx={{
+                    flex: 1
+                  }}>
+                    <Typography variant="body2" sx={{
+                      fontWeight: 600
+                    }}>
                       {event.event_type === 'pause' ? 'Clock Paused' :
                        event.event_type === 'resume' ? 'Clock Resumed' :
                        event.event_type === 'start' ? 'Clock Started' :
                        event.event_type === 'extend' ? 'Extension Applied' :
                        event.event_type}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary">
+                    <Typography variant="caption" sx={{
+                      color: "text.secondary"
+                    }}>
                       {formatDate(event.event_date)} by {event.created_by_name || 'Unknown'}
                     </Typography>
                     {event.reason && (
@@ -326,7 +370,12 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
                       </Typography>
                     )}
                     {event.notes && (
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          color: "text.secondary",
+                          mt: 0.5
+                        }}>
                         {event.notes}
                       </Typography>
                     )}
@@ -335,7 +384,12 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
               ))}
             </Box>
           ) : (
-            <Typography color="text.secondary" sx={{ py: 2, textAlign: 'center' }}>
+            <Typography
+              sx={{
+                color: "text.secondary",
+                py: 2,
+                textAlign: 'center'
+              }}>
               No clock events recorded yet.
             </Typography>
           )}

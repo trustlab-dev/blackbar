@@ -93,23 +93,23 @@ const CaseForm: React.FC = () => {
       <Typography variant="h4" component="h1" sx={{ mb: 3 }}>
         Create New Case
       </Typography>
-      
+
       {error && (
         <Alert severity="error" sx={{ mb: 3 }}>
           {error}
         </Alert>
       )}
-      
+
       {success && (
         <Alert severity="success" sx={{ mb: 3 }}>
           Case created successfully! Redirecting...
         </Alert>
       )}
-      
+
       <Paper sx={{ p: 3 }}>
         <form onSubmit={handleSubmit}>
           <Grid container spacing={3}>
-            <Grid item xs={12}>
+            <Grid size={12}>
               <TextField
                 fullWidth
                 label="Title"
@@ -121,7 +121,7 @@ const CaseForm: React.FC = () => {
               />
             </Grid>
             
-            <Grid item xs={12}>
+            <Grid size={12}>
               <TextField
                 fullWidth
                 label="Description"
@@ -134,7 +134,11 @@ const CaseForm: React.FC = () => {
               />
             </Grid>
             
-            <Grid item xs={12} sm={6}>
+            <Grid
+              size={{
+                xs: 12,
+                sm: 6
+              }}>
               <FormControl fullWidth disabled={loading || success}>
                 <InputLabel id="case-status-label">Status</InputLabel>
                 <Select
@@ -154,7 +158,11 @@ const CaseForm: React.FC = () => {
               </FormControl>
             </Grid>
             
-            <Grid item xs={12} sm={6}>
+            <Grid
+              size={{
+                xs: 12,
+                sm: 6
+              }}>
               <FormControl fullWidth disabled={loading || success}>
                 <InputLabel id="case-priority-label">Priority</InputLabel>
                 <Select
@@ -171,7 +179,7 @@ const CaseForm: React.FC = () => {
               </FormControl>
             </Grid>
             
-            <Grid item xs={12}>
+            <Grid size={12}>
               <Typography variant="subtitle2" sx={{ mb: 1 }}>
                 Tags
               </Typography>
@@ -205,7 +213,7 @@ const CaseForm: React.FC = () => {
               </Box>
             </Grid>
             
-            <Grid item xs={12}>
+            <Grid size={12}>
               <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
                 <Button
                   type="submit"

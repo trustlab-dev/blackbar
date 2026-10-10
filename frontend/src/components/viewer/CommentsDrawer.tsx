@@ -175,13 +175,20 @@ const CommentsDrawer: React.FC<Props> = ({ open, onClose, documentId }) => {
                                                     <Typography variant="body2" sx={{ fontWeight: 500 }}>
                                                         {comment.username || 'Unknown'}
                                                     </Typography>
-                                                    <Typography variant="caption" color="text.secondary">
+                                                    <Typography variant="caption" sx={{
+                                                        color: "text.secondary"
+                                                    }}>
                                                         {formatTimestamp(comment.created_at)}
                                                     </Typography>
                                                 </Box>
                                             }
                                             secondary={
-                                                <Typography variant="body2" color="text.primary" sx={{ mt: 0.5 }}>
+                                                <Typography
+                                                    variant="body2"
+                                                    sx={{
+                                                        color: "text.primary",
+                                                        mt: 0.5
+                                                    }}>
                                                     {comment.content}
                                                 </Typography>
                                             }

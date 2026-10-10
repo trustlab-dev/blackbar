@@ -205,7 +205,12 @@ const TransferCase: React.FC<TransferCaseProps> = ({ caseId, caseTitle }) => {
         )}
 
         {transfers.length === 0 ? (
-          <Typography color="text.secondary" sx={{ textAlign: 'center', py: 4 }}>
+          <Typography
+            sx={{
+              color: "text.secondary",
+              textAlign: 'center',
+              py: 4
+            }}>
             No transfers yet. Click "Transfer" to send this request to another organization.
           </Typography>
         ) : (
@@ -223,10 +228,14 @@ const TransferCase: React.FC<TransferCaseProps> = ({ caseId, caseTitle }) => {
               {transfers.map((transfer) => (
                 <TableRow key={transfer.id}>
                   <TableCell>
-                    <Typography variant="body2" fontWeight={500}>
+                    <Typography variant="body2" sx={{
+                      fontWeight: 500
+                    }}>
                       {transfer.recipient_organization}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary">
+                    <Typography variant="caption" sx={{
+                      color: "text.secondary"
+                    }}>
                       {transfer.recipient_email}
                     </Typography>
                   </TableCell>
@@ -249,7 +258,12 @@ const TransferCase: React.FC<TransferCaseProps> = ({ caseId, caseTitle }) => {
       <Dialog open={showTransferDialog} onClose={() => setShowTransferDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Transfer Request to Another Public Body</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          <Typography
+            variant="body2"
+            sx={{
+              color: "text.secondary",
+              mb: 2
+            }}>
             Transfer this FOI request to another organization. They will receive a secure link
             to access the request details and optionally the uploaded documents.
           </Typography>
@@ -317,7 +331,13 @@ const TransferCase: React.FC<TransferCaseProps> = ({ caseId, caseTitle }) => {
           
           {formData.include_documents && documents.length > 0 && (
             <Box sx={{ mt: 2, pl: 4, maxHeight: 200, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1, p: 1 }}>
-              <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: 'block' }}>
+              <Typography
+                variant="caption"
+                sx={{
+                  color: "text.secondary",
+                  mb: 1,
+                  display: 'block'
+                }}>
                 Select documents to include ({selectedDocIds.length} of {documents.length} selected)
               </Typography>
               <Box sx={{ display: 'flex', gap: 1, mb: 1 }}>
@@ -356,7 +376,14 @@ const TransferCase: React.FC<TransferCaseProps> = ({ caseId, caseTitle }) => {
           )}
           
           {formData.include_documents && documents.length === 0 && (
-            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block', pl: 4 }}>
+            <Typography
+              variant="caption"
+              sx={{
+                color: "text.secondary",
+                mt: 1,
+                display: 'block',
+                pl: 4
+              }}>
               No documents uploaded to this case yet.
             </Typography>
           )}

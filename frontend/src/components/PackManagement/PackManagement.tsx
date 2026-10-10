@@ -147,7 +147,13 @@ const PackManagement: React.FC = () => {
 
   if (loading && packs.length === 0) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          minHeight: "400px"
+        }}>
         <CircularProgress />
       </Box>
     );
@@ -155,7 +161,13 @@ const PackManagement: React.FC = () => {
 
   return (
     <Box className="pack-management">
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          mb: 3
+        }}>
         <Box>
           <Typography variant="h4" gutterBottom>
             Jurisdiction Packs
@@ -164,7 +176,11 @@ const PackManagement: React.FC = () => {
             Manage jurisdiction-specific configurations for BlackBar
           </Typography>
         </Box>
-        <Box display="flex" gap={2}>
+        <Box
+          sx={{
+            display: "flex",
+            gap: 2
+          }}>
           <Button
             variant="outlined"
             startIcon={<RefreshIcon />}
@@ -213,7 +229,13 @@ const PackManagement: React.FC = () => {
       <TabPanel value={tabValue} index={0}>
         <Grid container spacing={3}>
           {packs.map((pack) => (
-            <Grid item xs={12} sm={6} md={4} key={pack.pack_id}>
+            <Grid
+              key={pack.pack_id}
+              size={{
+                xs: 12,
+                sm: 6,
+                md: 4
+              }}>
               <PackCard
                 pack={pack}
                 onActivate={handleActivatePack}
@@ -228,7 +250,13 @@ const PackManagement: React.FC = () => {
       <TabPanel value={tabValue} index={1}>
         <Grid container spacing={3}>
           {canadianPacks.map((pack) => (
-            <Grid item xs={12} sm={6} md={4} key={pack.pack_id}>
+            <Grid
+              key={pack.pack_id}
+              size={{
+                xs: 12,
+                sm: 6,
+                md: 4
+              }}>
               <PackCard
                 pack={pack}
                 onActivate={handleActivatePack}
@@ -248,7 +276,13 @@ const PackManagement: React.FC = () => {
       <TabPanel value={tabValue} index={2}>
         <Grid container spacing={3}>
           {usPacks.map((pack) => (
-            <Grid item xs={12} sm={6} md={4} key={pack.pack_id}>
+            <Grid
+              key={pack.pack_id}
+              size={{
+                xs: 12,
+                sm: 6,
+                md: 4
+              }}>
               <PackCard
                 pack={pack}
                 onActivate={handleActivatePack}
@@ -269,7 +303,13 @@ const PackManagement: React.FC = () => {
         <TabPanel value={tabValue} index={3}>
           <Grid container spacing={3}>
             {otherPacks.map((pack) => (
-              <Grid item xs={12} sm={6} md={4} key={pack.pack_id}>
+              <Grid
+                key={pack.pack_id}
+                size={{
+                  xs: 12,
+                  sm: 6,
+                  md: 4
+                }}>
                 <PackCard
                   pack={pack}
                   onActivate={handleActivatePack}
@@ -283,11 +323,17 @@ const PackManagement: React.FC = () => {
       )}
 
       {packs.length === 0 && !loading && (
-        <Box textAlign="center" py={8}>
+        <Box
+          sx={{
+            textAlign: "center",
+            py: 8
+          }}>
           <Typography variant="h6" color="textSecondary" gutterBottom>
             No packs available
           </Typography>
-          <Typography variant="body2" color="textSecondary" mb={3}>
+          <Typography variant="body2" color="textSecondary" sx={{
+            mb: 3
+          }}>
             Upload a jurisdiction pack to get started
           </Typography>
           <Button

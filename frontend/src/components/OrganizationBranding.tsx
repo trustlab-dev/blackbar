@@ -71,7 +71,13 @@ const OrganizationBranding: React.FC = () => {
 
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          minHeight: "400px"
+        }}>
         <CircularProgress />
       </Box>
     );
@@ -124,7 +130,9 @@ const OrganizationBranding: React.FC = () => {
                 size="small"
                 sx={{ width: 120 }}
               />
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{
+                color: "text.secondary"
+              }}>
                 Brand color for public pages
               </Typography>
             </Box>

@@ -66,23 +66,33 @@ export const MagicLinkLogin: React.FC<MagicLinkLoginProps> = ({
     return (
       <Paper elevation={3} sx={{ p: 4, maxWidth: 500, mx: 'auto', textAlign: 'center' }}>
         <EmailIcon sx={{ fontSize: 64, color: 'primary.main', mb: 2 }} />
-        
+
         <Typography variant="h5" gutterBottom>
           Check your email
         </Typography>
-        
-        <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+
+        <Typography
+          variant="body1"
+          sx={{
+            color: "text.secondary",
+            mb: 3
+          }}>
           We sent a sign-in link to <strong>{email}</strong>
         </Typography>
-        
+
         <Alert severity="info" sx={{ mb: 2 }}>
           The link will expire in {Math.floor(expiresIn / 60)} minutes
         </Alert>
-        
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+
+        <Typography
+          variant="body2"
+          sx={{
+            color: "text.secondary",
+            mb: 3
+          }}>
           Click the link in your email to continue. You can close this window.
         </Typography>
-        
+
         <Button
           variant="outlined"
           onClick={() => {
@@ -103,7 +113,9 @@ export const MagicLinkLogin: React.FC<MagicLinkLoginProps> = ({
         <Typography variant="h5" gutterBottom>
           Continue with your email
         </Typography>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" sx={{
+          color: "text.secondary"
+        }}>
           We'll send you a magic link to sign in
         </Typography>
       </Box>
@@ -125,8 +137,10 @@ export const MagicLinkLogin: React.FC<MagicLinkLoginProps> = ({
           disabled={loading}
           autoFocus
           sx={{ mb: 2 }}
-          InputProps={{
-            startAdornment: <EmailIcon sx={{ mr: 1, color: 'action.active' }} />
+          slotProps={{
+            input: {
+              startAdornment: <EmailIcon sx={{ mr: 1, color: 'action.active' }} />
+            }
           }}
         />
 
@@ -153,7 +167,14 @@ export const MagicLinkLogin: React.FC<MagicLinkLoginProps> = ({
         </Button>
       </form>
 
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2, textAlign: 'center' }}>
+      <Typography
+        variant="caption"
+        sx={{
+          color: "text.secondary",
+          display: 'block',
+          mt: 2,
+          textAlign: 'center'
+        }}>
         By continuing, you agree to our Terms of Service and Privacy Policy
       </Typography>
     </Paper>

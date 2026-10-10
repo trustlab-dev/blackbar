@@ -77,7 +77,13 @@ const PackCard: React.FC<PackCardProps> = ({ pack, onActivate, onViewDetails, ac
       )}
 
       <CardContent sx={{ flexGrow: 1, pt: pack.is_active ? 5 : 2 }}>
-        <Box display="flex" alignItems="center" gap={1} mb={1}>
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+            mb: 1
+          }}>
           <Typography variant="h3" component="span">
             {getCountryFlag(pack.jurisdiction.country)}
           </Typography>
@@ -99,7 +105,13 @@ const PackCard: React.FC<PackCardProps> = ({ pack, onActivate, onViewDetails, ac
           {pack.description}
         </Typography>
 
-        <Box display="flex" flexWrap="wrap" gap={0.5} mb={1}>
+        <Box
+          sx={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 0.5,
+            mb: 1
+          }}>
           <Chip 
             label={pack.jurisdiction.legislation_short} 
             size="small" 
@@ -118,7 +130,11 @@ const PackCard: React.FC<PackCardProps> = ({ pack, onActivate, onViewDetails, ac
           />
         </Box>
 
-        <Box display="flex" gap={0.5}>
+        <Box
+          sx={{
+            display: "flex",
+            gap: 0.5
+          }}>
           {pack.has_templates && (
             <Chip label="Templates" size="small" color="success" />
           )}
@@ -127,7 +143,13 @@ const PackCard: React.FC<PackCardProps> = ({ pack, onActivate, onViewDetails, ac
           )}
         </Box>
 
-        <Typography variant="caption" color="textSecondary" display="block" mt={2}>
+        <Typography
+          variant="caption"
+          color="textSecondary"
+          sx={{
+            display: "block",
+            mt: 2
+          }}>
           By {pack.author}
         </Typography>
       </CardContent>
