@@ -12,7 +12,7 @@ TRACKING_SUFFIX_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 TRACKING_SUFFIX_LENGTH = 8
 
 
-def generate_tracking_number(year: int = None, sequence: int = None) -> str:
+def generate_tracking_number(year: int | None = None, sequence: int | None = None) -> str:
     """
     Generate a tracking number using format from active pack
     Format: {prefix}-YYYY-###-XXXXXXXX where the suffix is random (secrets)
@@ -28,7 +28,7 @@ def generate_tracking_number(year: int = None, sequence: int = None) -> str:
     return f"{prefix}-{year}-{sequence:03d}-{suffix}"
 
 
-def calculate_due_date(received_date: datetime, days: int = None) -> datetime:
+def calculate_due_date(received_date: datetime, days: int | None = None) -> datetime:
     """
     Calculate due date based on received date.
     Uses default_response_days from active pack if days not specified.

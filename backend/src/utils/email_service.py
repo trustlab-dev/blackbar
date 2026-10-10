@@ -343,7 +343,7 @@ This link expires in {expires_days} days.
     def send_transfer_notification(
         self,
         to_email: str,
-        recipient_name: str,
+        recipient_name: str | None,
         recipient_organization: str,
         transfer_url: str,
         case_tracking_number: str,

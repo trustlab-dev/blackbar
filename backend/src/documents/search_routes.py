@@ -32,8 +32,11 @@ async def get_db(request: Request):
 @router.get(
     "/{document_id}/search",
     dependencies=[Depends(check_role(["owner", "admin", "analyst", "user"]))],
+    # Keep the route name (and so the OpenAPI operationId) the handler had
+    # before it was renamed to stop shadowing the POST handler below.
+    name="search_document_text",
 )
-async def search_document_text(
+async def search_document_text_get(
     request: Request,
     document_id: str,
     query: str,

@@ -6,10 +6,17 @@ Handles all database operations for public user management
 import time
 import uuid
 from datetime import datetime
+from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from .models import MagicLinkToken, PublicUser, PublicUserCreate, PublicUserUpdate
+from .models import (
+    MagicLinkToken,
+    PublicUser,
+    PublicUserCreate,
+    PublicUserStatus,
+    PublicUserUpdate,
+)
 
 
 class PublicUsersRepository:
@@ -38,7 +45,7 @@ class PublicUsersRepository:
             id=user_dict["_id"],
             **user_create.model_dump(),
             email_verified=True,
-            status="active",
+            status=PublicUserStatus.ACTIVE,
             created_at=user_dict["created_at"],
             updated_at=user_dict["updated_at"],
             last_login_at=None,
@@ -91,7 +98,7 @@ class PublicUsersRepository:
         )
         return result.modified_count > 0
 
-    async def update(self, user_id: str, user_update: PublicUserUpdate = None) -> bool:
+    async def update(self, user_id: str, user_update: PublicUserUpdate) -> bool:
         """Update user information"""
         update_data = {k: v for k, v in user_update.model_dump().items() if v is not None}
         if not update_data:
@@ -119,7 +126,7 @@ class MagicLinkTokensRepository:
         user_agent: str | None = None,
     ) -> MagicLinkToken:
         """Create a new magic link token"""
-        token_dict = {
+        token_dict: dict[str, Any] = {
             "_id": str(uuid.uuid4()),
             "email": email.lower(),
             "token_hash": token_hash,

@@ -65,7 +65,7 @@ From `backend/`:
 pytest                      # run the test suite (pytest + testcontainers)
 ruff check src tests        # lint
 black src tests             # format
-mypy src                    # type-check (permissive baseline today)
+mypy src                    # type-check (must pass; CI blocks on it)
 ```
 
 Tests use [testcontainers](https://testcontainers.com/) to spin up a real

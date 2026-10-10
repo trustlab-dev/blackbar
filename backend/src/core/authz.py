@@ -40,10 +40,14 @@ def check_document_access(doc: dict, current_user: dict, case: dict | None = Non
     entry. user: only if an active member of the document's case team (``case``
     must be supplied).
     """
-    user_id = current_user.get("id")
-
     if has_global_access(current_user):
         return True
+
+    user_id = current_user.get("id")
+    if not user_id:
+        # Fail closed: a missing id would compare equal to share and team
+        # entries that lack a user_id.
+        return False
 
     if current_user.get("role") == "guest":
         return any(share.get("user_id") == user_id for share in doc.get("shared_with", []))
@@ -64,6 +68,10 @@ def can_access_case(case: dict, current_user: dict) -> bool:
         return True
 
     user_id = current_user.get("id")
+    if not user_id:
+        # Fail closed: a missing id would compare equal to a missing
+        # created_by / privacy_officer_id or an id-less team entry.
+        return False
     if is_case_team_member(case.get("case_team", []), user_id):
         return True
     if user_id in case.get("assigned_user_ids", []):

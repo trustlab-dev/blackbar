@@ -11,12 +11,11 @@ Endpoints under test (mounted at `/api/v1/documents/...` via
 
 **Source-API findings pinned (audit Section 11 candidates):**
 
-- **Duplicate function name `search_document_text`:** both endpoints
-  are decorated handlers but bind the same function name to the module
-  namespace. The second decoration overwrites the first attribute, but
-  FastAPI's routing table holds both decorator references — so both
-  URLs ARE reachable. Confirmed in Phase 1.5 review and pinned in
-  TestSearchEndpointDuplicateBinding below.
+- **Handler names:** the GET handler was originally also named
+  `search_document_text` and was shadowed by the POST handler. It is now
+  `search_document_text_get`, registered with `name="search_document_text"`
+  so its route name and OpenAPI operationId are unchanged. Pinned in
+  test_search_endpoint_duplicate_function_name below.
 
 - **Module-level `db` capture:** `from ..database import db` at module
   top (line 12). The POST endpoint reads `db.documents.find_one` from
@@ -446,16 +445,15 @@ class TestSearchDocumentTextPost:
 
 
 def test_search_endpoint_duplicate_function_name() -> None:
-    """Pin reality: both GET and POST handlers in search_routes.py bind
-    the module attribute `search_document_text`. The second decoration
-    overwrites the attribute; only the POST handler is reachable via
-    `search_routes.search_document_text`. FastAPI's routing table holds
-    both decorator references separately, so both URL routes work."""
+    """`search_routes.search_document_text` is the POST handler; the GET
+    handler is `search_document_text_get` but keeps the route name
+    `search_document_text`. Both URL routes are registered."""
     from src.documents import search_routes
 
-    # Module attribute resolves to whichever def was processed last
-    # (the POST handler, defined after the GET handler).
     assert search_routes.search_document_text.__name__ == "search_document_text"
+    assert search_routes.search_document_text_get.__name__ == "search_document_text_get"
+    route_names = {r.name for r in search_routes.router.routes if r.path == "/{document_id}/search"}
+    assert route_names == {"search_document_text"}
 
     # Inspect the router for both registered paths
     paths = [(r.path, list(r.methods)) for r in search_routes.router.routes]

@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 
 from src.auth.auth_service import AuthService
-from src.users.models import User, UserUpdate
+from src.users.models import User, UserStatus, UserUpdate
 from src.users.repository import UsersRepository
 from src.utils.log_utils import hash_email_for_logs
 from src.utils.welcome_email_service import WelcomeEmailService
@@ -71,7 +71,7 @@ class ActivationService:
         password_hash = AuthService.hash_password(password)
 
         # Update user: set password, activate status, clear activation token
-        update_data = UserUpdate(status="active")
+        update_data = UserUpdate(status=UserStatus.ACTIVE)
 
         # Update user with new password and status
         updated_user = await self.users_repo.update(user.id, update_data, password_hash)

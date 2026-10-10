@@ -219,7 +219,7 @@ async def upload_to_collection(
 
     result = await service.process_upload(
         file_content=content,
-        filename=file.filename,
+        filename=file.filename or "",
         content_type=file.content_type,
         context=context,
         background_tasks=background_tasks,

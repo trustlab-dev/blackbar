@@ -65,12 +65,12 @@ class User(UserBase):
     """Full user model with metadata"""
 
     id: str = Field(..., description="Unique user ID")
-    password_hash: str | None = Field(None, description="Bcrypt password hash")
-    external_id: str | None = Field(None, description="External IdP identifier")
+    password_hash: str | None = Field(default=None, description="Bcrypt password hash")
+    external_id: str | None = Field(default=None, description="External IdP identifier")
     role: str = Field(default="user", description="User role: admin, analyst, user, guest")
-    activation_token: str | None = Field(None, description="Account activation token hash")
+    activation_token: str | None = Field(default=None, description="Account activation token hash")
     activation_token_expires_at: datetime | None = Field(
-        None, description="Activation token expiration"
+        default=None, description="Activation token expiration"
     )
     # Bumped on logout, password change, disable and role change; a staff
     # token whose `tv` claim differs is refused (AUTH-14).

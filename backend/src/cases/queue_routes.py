@@ -47,7 +47,7 @@ def convert_mongo_doc_to_json(doc: dict[str, Any]) -> dict[str, Any]:
     if doc is None:
         return None
 
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in doc.items():
         if isinstance(value, ObjectId):
             result[key] = str(value)
@@ -184,7 +184,7 @@ async def get_my_cases(
     db=Depends(get_db),
 ):
     """Get cases assigned to current user (cases where user is on case_team)."""
-    query = {
+    query: dict[str, Any] = {
         "$or": [
             {"assignee": current_user["id"]},
             {"assigned_user_ids": current_user["id"]},
@@ -243,7 +243,7 @@ async def get_all_cases_queue(
     db=Depends(get_db),
 ):
     """Get all cases with advanced filtering (owner/admin/analyst)."""
-    query = {}
+    query: dict[str, Any] = {}
 
     if status:
         query["status"] = status.value
@@ -535,8 +535,8 @@ async def advanced_search(
         raise HTTPException(status_code=400, detail="Search query must be at least 2 characters")
 
     # Build filters
-    doc_filters = {}
-    case_filters = {}
+    doc_filters: dict[str, Any] = {}
+    case_filters: dict[str, Any] = {}
 
     if document_status:
         doc_filters["status"] = document_status

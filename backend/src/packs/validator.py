@@ -43,8 +43,8 @@ class PackValidator:
         Returns:
             Tuple of (is_valid, errors, warnings)
         """
-        errors = []
-        warnings = []
+        errors: list[str] = []
+        warnings: list[str] = []
 
         # Check required top-level fields
         for field in REQUIRED_FIELDS:

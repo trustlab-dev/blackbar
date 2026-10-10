@@ -5,6 +5,7 @@ Authentication routes
 import logging
 import re
 from datetime import datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, field_validator
@@ -377,7 +378,7 @@ async def update_user(
         password_hash = AuthService.hash_password(user_data.password)
 
     # Build UserUpdate object with only provided fields
-    update_fields = {}
+    update_fields: dict[str, Any] = {}
     if user_data.email:
         # Check if new email is already in use by another user
         existing_user = await users_repo.get_by_email(user_data.email)

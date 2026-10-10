@@ -8,6 +8,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 from email.utils import getaddresses, parsedate_to_datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def normalize_subject(subject: str) -> str:
 
 def thread_identifiers_from_headers(
     headers: dict | None, message_id: str | None = None
-) -> dict[str, any] | None:
+) -> dict[str, Any] | None:
     """Thread identifiers from structured headers parsed off the message
     object at conversion time (I7; see ``conversion.read_thread_headers``).
 
@@ -90,7 +91,7 @@ def thread_identifiers_from_headers(
     if isinstance(references, str):
         references = references.split()
     subject = _text("subject")
-    identifiers = {
+    identifiers: dict[str, Any] = {
         "subject": subject,
         "normalized_subject": normalize_subject(subject) if subject else None,
         "from": _text("from"),
@@ -107,7 +108,7 @@ def thread_identifiers_from_headers(
     return identifiers
 
 
-def extract_thread_identifiers(extracted_text: str, message_id: str | None) -> dict[str, any]:
+def extract_thread_identifiers(extracted_text: str, message_id: str | None) -> dict[str, Any]:
     """
     Legacy: parse thread identifiers from the header block at the top of an
     email's extracted text. New uploads use ``thread_identifiers_from_headers``
@@ -118,7 +119,7 @@ def extract_thread_identifiers(extracted_text: str, message_id: str | None) -> d
     line, folded continuation lines are joined to their header, and the
     first occurrence of a header wins, so a quoted reply cannot overwrite it.
     """
-    identifiers = {
+    identifiers: dict[str, Any] = {
         "subject": None,
         "normalized_subject": None,
         "from": None,

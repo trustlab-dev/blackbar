@@ -293,7 +293,7 @@ This is an automated message, please do not reply.
         tracking_number: str,
         request_title: str,
         org_name: str,
-        contact_email: str = None,
+        contact_email: str | None = None,
     ) -> bool:
         """
         Send confirmation email to public requester after FOI request submission
@@ -360,7 +360,7 @@ This is an automated message, please do not reply.
         request_title: str,
         org_name: str,
         tracking_url: str,
-        contact_email: str,
+        contact_email: str | None,
     ) -> str:
         """Build HTML email template for request confirmation"""
         contact_section = (
@@ -458,7 +458,7 @@ This is an automated message, please do not reply.
         request_title: str,
         org_name: str,
         tracking_url: str,
-        contact_email: str,
+        contact_email: str | None,
     ) -> str:
         """Build plain text email template for request confirmation"""
         contact_section = (

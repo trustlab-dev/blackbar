@@ -31,10 +31,13 @@ except ImportError as _e:  # pragma: no cover — exercised when presidio is uni
         "Re-enable by installing presidio-analyzer. Underlying error: %s",
         _e,
     )
-    AnalyzerEngine = None  # type: ignore[assignment]
-    Pattern = None  # type: ignore[assignment]
-    PatternRecognizer = None  # type: ignore[assignment]
-    NlpEngineProvider = None  # type: ignore[assignment]
+    # presidio is an optional install. When it is present its classes are
+    # typed and these None fallbacks need the ignore; when it is absent the
+    # names are Any and the ignore is unused. Accept both.
+    AnalyzerEngine = None  # type: ignore[assignment, unused-ignore]
+    Pattern = None  # type: ignore[assignment, unused-ignore]
+    PatternRecognizer = None  # type: ignore[assignment, unused-ignore]
+    NlpEngineProvider = None  # type: ignore[assignment, unused-ignore]
     _PRESIDIO_AVAILABLE = False
 
 

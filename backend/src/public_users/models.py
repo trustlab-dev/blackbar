@@ -20,7 +20,7 @@ class PublicUserBase(BaseModel):
     """Base public user model"""
 
     email: EmailStr = Field(..., description="User email address")
-    name: str | None = Field(None, description="User full name")
+    name: str | None = Field(default=None, description="User full name")
 
     @validator("email")
     def normalize_email(cls, v):
@@ -65,8 +65,8 @@ class MagicLinkToken(BaseModel):
     expires_at: datetime = Field(..., description="Token expiration time")
     used: bool = Field(default=False, description="Whether token has been used")
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    ip_address: str | None = Field(None, description="Request IP for audit")
-    user_agent: str | None = Field(None, description="User agent for audit")
+    ip_address: str | None = Field(default=None, description="Request IP for audit")
+    user_agent: str | None = Field(default=None, description="User agent for audit")
 
     @validator("email")
     def normalize_email(cls, v):
