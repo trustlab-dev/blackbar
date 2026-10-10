@@ -22,6 +22,10 @@ services:
       - LLM_API_KEY_ENCRYPTION_KEY=${LLM_API_KEY_ENCRYPTION_KEY}
       # Force demo mode on regardless of .env.
       - BLACKBAR_DEMO_MODE=true
+      # Requests arrive from the host reverse proxy (via the network gateway)
+      # and the frontend container, both inside the compose subnet: trust
+      # their X-Forwarded-For so rate limits are per visitor (AUTH-16).
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-${BLACKBAR_NETWORK_SUBNET:-172.30.87.0/24}}
     # Bind to loopback only; a reverse proxy (see DEPLOY-DEMO.md) terminates
     # TLS and is the sole public entry point. `!override` REPLACES the base
     # port list instead of appending (which would collide on :8000).

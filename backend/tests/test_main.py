@@ -114,6 +114,8 @@ async def test_health_endpoint_healthy(
     assert body["database"] == "connected"
     assert "timestamp" in body
     assert "correlation_id" in body
+    # AUTH-30: unauthenticated callers don't learn the deployment environment.
+    assert "environment" not in body
 
 
 class _StubDb:
@@ -185,7 +187,36 @@ async def test_health_endpoint_unhealthy_when_db_down(
     body = r.json()
     assert body["status"] == "unhealthy"
     assert body["database"] == "disconnected"
-    assert "mongo down" in body["error"]
+    # AUTH-30: raw DB exception text (hosts, replica sets) stays in the logs.
+    assert "error" not in body
+    assert "mongo down" not in r.text
+
+
+def test_trusted_host_middleware_rejects_unknown_hosts():
+    """AUTH-29: with TRUSTED_HOSTS configured, other Host headers get 400."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.main import add_trusted_host_middleware
+
+    mini = FastAPI()
+
+    @mini.get("/ping")
+    async def ping():
+        return {"ok": True}
+
+    assert add_trusted_host_middleware(mini, ["foi.example.gov"]) is True
+    c = TestClient(mini)
+    assert c.get("/ping", headers={"Host": "foi.example.gov"}).status_code == 200
+    assert c.get("/ping", headers={"Host": "evil.example.com"}).status_code == 400
+
+
+def test_trusted_host_middleware_off_by_default():
+    from fastapi import FastAPI
+
+    from src.main import add_trusted_host_middleware
+
+    assert add_trusted_host_middleware(FastAPI(), []) is False
 
 
 # ---------------------------------------------------------------------------

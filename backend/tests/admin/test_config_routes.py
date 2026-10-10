@@ -359,3 +359,31 @@ class TestGetPublicConfiguration:
         client: AsyncClient = await authed_client_factory(role="admin")
         r = await client.put("/api/v1/admin/config/", json={"org_name": "X"})
         assert r.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# LLM-18: get_system_config takes a db handle and is keyed by id
+# ---------------------------------------------------------------------------
+
+
+class TestGetSystemConfigKeying:
+    async def test_accepts_database_argument_and_ignores_llm_docs(
+        self, db: AsyncIOMotorDatabase
+    ) -> None:
+        from src.admin.config_routes import get_system_config
+
+        await db.system_config.insert_one({"id": "global_llm_config", "default_llm_id": "x"})
+        await db.system_config.insert_one({"id": "global_ai_settings", "ai_suggestion_timeout": 9})
+        config = await get_system_config(db)
+        assert config["id"] == "system_configuration"
+        assert "default_llm_id" not in config
+        assert config["auto_generate_ai_suggestions"] is False
+
+    async def test_legacy_document_without_id_is_adopted(self, db: AsyncIOMotorDatabase) -> None:
+        from src.admin.config_routes import get_system_config
+
+        await db.system_config.insert_one({"id": "global_llm_config", "default_llm_id": "x"})
+        await db.system_config.insert_one({"org_name": "Legacy Org"})
+        config = await get_system_config(db)
+        assert config["org_name"] == "Legacy Org"
+        assert await db.system_config.count_documents({"id": "system_configuration"}) == 1

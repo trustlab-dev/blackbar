@@ -14,6 +14,11 @@ services:
       # The backend gates on ENVIRONMENT (not NODE_ENV): disables /docs,
       # /redoc, /openapi.json and requires a persisted JWT_SECRET.
       - ENVIRONMENT=production
+      # nginx (frontend container) is the only way in; trust its
+      # X-Forwarded-For so rate limits are per client (AUTH-16). A TLS proxy
+      # in front of nginx that reaches it through a published port shows up
+      # as the network gateway, which is inside this subnet too.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-${BLACKBAR_NETWORK_SUBNET:-172.30.87.0/24}}
     # Dev image CMD uses --reload; never run the auto-reloader in production.
     command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
 

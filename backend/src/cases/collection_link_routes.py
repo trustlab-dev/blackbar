@@ -176,6 +176,7 @@ async def upload_to_collection(
         DocumentProcessingService,
         ProcessingStatus,
         UploadContext,
+        read_verified_upload,
     )
 
     db = await get_db(http_request)
@@ -199,8 +200,8 @@ async def upload_to_collection(
     if not is_valid:
         raise HTTPException(status_code=403, detail=error_msg)
 
-    # Read file content
-    content = await file.read()
+    # Read file content (size-capped while streaming, type sniffed; DOC-11)
+    content = await read_verified_upload(file)
 
     # Use shared processing service
     service = DocumentProcessingService(db)
@@ -234,7 +235,7 @@ async def upload_to_collection(
             "duplicate_of_filename": result.duplicate_of_filename,
         }
     elif result.status in [ProcessingStatus.VALIDATION_FAILED, ProcessingStatus.ERROR]:
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(status_code=result.http_status or 400, detail=result.message)
 
     # Increment upload count on success
     await db.cases.update_one(

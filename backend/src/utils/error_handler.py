@@ -5,6 +5,7 @@ Implements standard error format per CODING_STANDARDS.md
 
 import logging
 import uuid
+from http import HTTPStatus
 from typing import Any
 
 from fastapi import HTTPException, Request, status
@@ -77,6 +78,13 @@ class StandardHTTPException(HTTPException):
         super().__init__(status_code=status_code, detail=detail)
 
 
+def _status_phrase(status_code: int) -> str:
+    try:
+        return HTTPStatus(status_code).phrase
+    except ValueError:
+        return "An error occurred"
+
+
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """
     Global HTTP exception handler that ensures standard error format.
@@ -84,13 +92,27 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     correlation_id = generate_correlation_id()
 
     # If the exception already has our standard format, use it
-    if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    # Keep headers such as Retry-After and WWW-Authenticate.
+    headers = getattr(exc, "headers", None)
 
-    # Otherwise, wrap it in standard format
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=headers)
+
+    # Otherwise, wrap it in standard format. A dict detail such as
+    # {"message": ..., "errors": [...]} keeps its message as the envelope
+    # message and the remaining keys as details (not a Python repr string).
+    details: dict[str, Any] | None = None
+    if isinstance(exc.detail, dict):
+        details = {k: v for k, v in exc.detail.items() if k != "message"}
+        raw_message = exc.detail.get("message")
+        message = str(raw_message) if raw_message else _status_phrase(exc.status_code)
+    else:
+        message = str(exc.detail) if exc.detail else "An error occurred"
+
     error_response = create_error_response(
         code=f"HTTP_{exc.status_code}",
-        message=str(exc.detail) if exc.detail else "An error occurred",
+        message=message,
+        details=jsonable_encoder(details) if details else None,
         correlation_id=correlation_id,
         status_code=exc.status_code,
     )
@@ -105,7 +127,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         },
     )
 
-    return JSONResponse(status_code=exc.status_code, content=error_response)
+    return JSONResponse(status_code=exc.status_code, content=error_response, headers=headers)
 
 
 async def validation_exception_handler(

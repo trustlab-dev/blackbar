@@ -138,8 +138,9 @@ class TestGenerateDocumentSummary:
                 "f.txt",
                 "text/plain",
             )
-        assert "Error generating summary" in result
-        assert "boom" in result
+        # LLM-02: a generic message with a reference; no raw exception text
+        assert result.startswith("AI summary failed (reference ")
+        assert "boom" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +206,8 @@ class TestGenerateAiSuggestions:
         ):
             result = await generate_ai_suggestions(b"text", "f", "text/plain")
         assert result[0]["type"] == "error"
-        assert "oops" in result[0]["description"]
+        assert "oops" not in result[0]["description"]
+        assert "reference" in result[0]["description"]
 
 
 # ---------------------------------------------------------------------------
@@ -339,3 +341,102 @@ class TestProcessAttachmentAsync:
         ):
             # Must not raise
             await process_attachment_async("att-1", "doc-parent")
+
+
+# ---------------------------------------------------------------------------
+# Security-review 2026-09: LLM-10, LLM-17
+# ---------------------------------------------------------------------------
+
+
+class TestDataMinimisation:
+    @pytest.mark.asyncio
+    async def test_filename_not_sent_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("LLM_SEND_CASE_CONTEXT", raising=False)
+        client = MagicMock()
+        client.chat_completion = AsyncMock(return_value="Summary.")
+        with patch("src.utils.ai_processing.get_llm_client", new=AsyncMock(return_value=client)):
+            await generate_document_summary(
+                b"some text content here that is long enough",
+                "Jane-Doe-medical-file.txt",
+                "text/plain",
+            )
+        prompt = client.chat_completion.call_args.args[0][1]["content"]
+        assert "Jane-Doe" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_filename_sent_when_opted_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_SEND_CASE_CONTEXT", "true")
+        client = MagicMock()
+        client.chat_completion = AsyncMock(return_value="Summary.")
+        with patch("src.utils.ai_processing.get_llm_client", new=AsyncMock(return_value=client)):
+            await generate_document_summary(
+                b"some text content here that is long enough", "report.txt", "text/plain"
+            )
+        prompt = client.chat_completion.call_args.args[0][1]["content"]
+        assert "report.txt" in prompt
+
+    @pytest.mark.asyncio
+    async def test_disabled_llm_returns_disabled_message(self) -> None:
+        from src.llm.safety import LLMDisabledError
+
+        with patch(
+            "src.utils.ai_processing.get_llm_client",
+            new=AsyncMock(side_effect=LLMDisabledError()),
+        ):
+            result = await generate_document_summary(b"x" * 50, "f.txt", "text/plain")
+        assert "disabled" in result.lower()
+
+
+def test_importing_ai_modules_does_not_configure_root_logger() -> None:
+    """LLM-10: library modules must not call logging.basicConfig."""
+    import importlib
+    import logging
+    from unittest.mock import patch as _patch
+
+    import src.utils.ai_processing as mod
+
+    with _patch.object(logging, "basicConfig") as basic_config:
+        importlib.reload(mod)
+    basic_config.assert_not_called()
+
+
+class TestSummaryTextReuse:
+    """I3: the summary does not OCR again when text is supplied, and runs
+    extraction off the event loop when it must."""
+
+    async def test_supplied_text_skips_extraction(self, monkeypatch) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.utils import ai_processing
+
+        client = MagicMock()
+        client.chat_completion = AsyncMock(return_value="A summary.")
+        monkeypatch.setattr(ai_processing, "get_llm_client", AsyncMock(return_value=client))
+        extract = MagicMock(side_effect=AssertionError("must not extract"))
+        monkeypatch.setattr(ai_processing, "extract_text_from_pdf", extract)
+
+        out = await ai_processing.generate_document_summary(
+            b"%PDF-1.4", "f.pdf", "application/pdf", text="Plenty of already extracted text."
+        )
+        assert out == "A summary."
+        prompt = client.chat_completion.call_args.args[0][1]["content"]
+        assert "already extracted text" in prompt
+
+    async def test_extraction_runs_in_worker_thread(self, monkeypatch) -> None:
+        import threading
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.utils import ai_processing
+
+        client = MagicMock()
+        client.chat_completion = AsyncMock(return_value="A summary.")
+        monkeypatch.setattr(ai_processing, "get_llm_client", AsyncMock(return_value=client))
+        seen = []
+
+        def extract(content):
+            seen.append(threading.current_thread() is threading.main_thread())
+            return "Extracted text long enough to summarise."
+
+        monkeypatch.setattr(ai_processing, "extract_text_from_pdf", extract)
+        await ai_processing.generate_document_summary(b"%PDF-1.4", "f.eml", "message/rfc822")
+        assert seen == [False]

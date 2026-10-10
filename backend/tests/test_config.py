@@ -28,7 +28,13 @@ default literal, the guard was unreachable.
 
 from __future__ import annotations
 
+import secrets
+
 import pytest
+
+# A secret with the shape `openssl rand -base64 48` / `secrets.token_urlsafe(48)`
+# produces. Every non-JWT test uses it so the secret-strength gate stays quiet.
+GOOD_SECRET = secrets.token_urlsafe(48)
 
 
 def _reload_config_class():
@@ -50,14 +56,14 @@ class TestMongoDBUri:
         Config = _reload_config_class()
         monkeypatch.delenv("MONGODB_URI", raising=False)
         # Required: JWT secret so we don't trip that branch
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.MONGODB_URI == "mongodb://mongodb:27017/blackbar"
 
     def test_explicit_env_var_used(self, monkeypatch: pytest.MonkeyPatch):
         Config = _reload_config_class()
         monkeypatch.setenv("MONGODB_URI", "mongodb://custom:27017/foo")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.MONGODB_URI == "mongodb://custom:27017/foo"
 
@@ -65,64 +71,46 @@ class TestMongoDBUri:
 # ---------------------------------------------------------------------------
 # JWT secret + environment-aware validation
 # ---------------------------------------------------------------------------
+# LLM_API_KEY_ENCRYPTION_KEY (LLM-19): validated once, no fallback key
+# ---------------------------------------------------------------------------
 
 
-class TestJWTSecret:
-    def test_production_requires_jwt_secret(self, monkeypatch: pytest.MonkeyPatch):
+class TestLLMEncryptionKey:
+    def test_valid_key_is_kept(self, monkeypatch: pytest.MonkeyPatch):
+        from cryptography.fernet import Fernet
+
         Config = _reload_config_class()
-        monkeypatch.delenv("JWT_SECRET", raising=False)
+        key = Fernet.generate_key().decode()
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", key)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        assert Config().LLM_API_KEY_ENCRYPTION_KEY == key
+
+    def test_comma_separated_rotation_keys_accepted(self, monkeypatch: pytest.MonkeyPatch):
+        from cryptography.fernet import Fernet
+
+        Config = _reload_config_class()
+        keys = f"{Fernet.generate_key().decode()},{Fernet.generate_key().decode()}"
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", keys)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        assert Config().LLM_API_KEY_ENCRYPTION_KEY == keys
+
+    @pytest.mark.parametrize("value", ["", "CHANGE_THIS_TO_FERNET_KEY"])
+    def test_missing_or_invalid_key_fails_in_production(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ):
+        Config = _reload_config_class()
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", value)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         monkeypatch.setenv("ENVIRONMENT", "production")
-        with pytest.raises(ValueError, match="JWT_SECRET"):
+        with pytest.raises(ValueError, match="LLM_API_KEY_ENCRYPTION_KEY"):
             Config()
 
-    def test_development_generates_temp_secret_and_warns(self, monkeypatch: pytest.MonkeyPatch):
+    def test_invalid_key_outside_production_is_disabled(self, monkeypatch: pytest.MonkeyPatch):
         Config = _reload_config_class()
-        monkeypatch.delenv("JWT_SECRET", raising=False)
+        monkeypatch.setenv("LLM_API_KEY_ENCRYPTION_KEY", "not-a-fernet-key")
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         monkeypatch.setenv("ENVIRONMENT", "development")
-        with pytest.warns(RuntimeWarning, match="auto-generated JWT secret"):
-            cfg = Config()
-        assert cfg.JWT_SECRET
-        assert len(cfg.JWT_SECRET) >= 32
-
-    def test_short_secret_raises(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.setenv("JWT_SECRET", "tooshort")
-        with pytest.raises(ValueError, match="at least 32 characters"):
-            Config()
-
-    def test_valid_secret_accepted(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
-        cfg = Config()
-        assert cfg.JWT_SECRET == "x" * 32
-
-    def test_environment_defaults_to_development(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.delenv("ENVIRONMENT", raising=False)
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
-        cfg = Config()
-        assert cfg.ENVIRONMENT == "development"
-
-
-# ---------------------------------------------------------------------------
-# OPENAI_API_KEY (optional)
-# ---------------------------------------------------------------------------
-
-
-class TestOpenAIKey:
-    def test_unset_is_none(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
-        cfg = Config()
-        assert cfg.OPENAI_API_KEY is None
-
-    def test_set_passes_through(self, monkeypatch: pytest.MonkeyPatch):
-        Config = _reload_config_class()
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
-        cfg = Config()
-        assert cfg.OPENAI_API_KEY == "sk-test"
+        assert Config().LLM_API_KEY_ENCRYPTION_KEY is None
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +122,7 @@ class TestAllowedOrigins:
     def test_env_var_split_on_comma(self, monkeypatch: pytest.MonkeyPatch):
         Config = _reload_config_class()
         monkeypatch.setenv("ALLOWED_ORIGINS", "https://a.example,https://b.example")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ALLOWED_ORIGINS == [
             "https://a.example",
@@ -144,14 +132,14 @@ class TestAllowedOrigins:
     def test_single_origin_via_env(self, monkeypatch: pytest.MonkeyPatch):
         Config = _reload_config_class()
         monkeypatch.setenv("ALLOWED_ORIGINS", "https://only.example")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ALLOWED_ORIGINS == ["https://only.example"]
 
     def test_unset_uses_localhost_default(self, monkeypatch: pytest.MonkeyPatch):
         Config = _reload_config_class()
         monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ALLOWED_ORIGINS == [
             "http://localhost:3000",
@@ -163,7 +151,7 @@ class TestAllowedOrigins:
         branch -> default."""
         Config = _reload_config_class()
         monkeypatch.setenv("ALLOWED_ORIGINS", "")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ALLOWED_ORIGINS == [
             "http://localhost:3000",
@@ -179,7 +167,7 @@ class TestAllowedOrigins:
 class TestConstants:
     def test_algorithm_is_hs256(self, monkeypatch: pytest.MonkeyPatch):
         Config = _reload_config_class()
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ALGORITHM == "HS256"
 
@@ -187,7 +175,7 @@ class TestConstants:
         """No JWT_EXPIRATION env var -> 60 minutes."""
         Config = _reload_config_class()
         monkeypatch.delenv("JWT_EXPIRATION", raising=False)
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ACCESS_TOKEN_EXPIRE_MINUTES == 60
 
@@ -196,7 +184,7 @@ class TestConstants:
         is honoured by Config."""
         Config = _reload_config_class()
         monkeypatch.setenv("JWT_EXPIRATION", "120")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ACCESS_TOKEN_EXPIRE_MINUTES == 120
 
@@ -208,7 +196,7 @@ class TestConstants:
         RuntimeWarning and falls back to 60."""
         Config = _reload_config_class()
         monkeypatch.setenv("JWT_EXPIRATION", "24h")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         with pytest.warns(RuntimeWarning, match="JWT_EXPIRATION"):
             cfg = Config()
         assert cfg.ACCESS_TOKEN_EXPIRE_MINUTES == 60
@@ -217,7 +205,7 @@ class TestConstants:
         """An empty JWT_EXPIRATION value is treated as unset -> 60."""
         Config = _reload_config_class()
         monkeypatch.setenv("JWT_EXPIRATION", "")
-        monkeypatch.setenv("JWT_SECRET", "x" * 32)
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
         cfg = Config()
         assert cfg.ACCESS_TOKEN_EXPIRE_MINUTES == 60
 
@@ -236,6 +224,119 @@ class TestSingleton:
         assert cfg_mod.JWT_SECRET == cfg_mod.config.JWT_SECRET
         assert cfg_mod.ALGORITHM == cfg_mod.config.ALGORITHM
         assert cfg_mod.MONGODB_URI == cfg_mod.config.MONGODB_URI
-        assert cfg_mod.OPENAI_API_KEY == cfg_mod.config.OPENAI_API_KEY
         assert cfg_mod.ALLOWED_ORIGINS == cfg_mod.config.ALLOWED_ORIGINS
         assert cfg_mod.ACCESS_TOKEN_EXPIRE_MINUTES == cfg_mod.config.ACCESS_TOKEN_EXPIRE_MINUTES
+
+
+# ---------------------------------------------------------------------------
+# Security-review 2026-09 settings
+# ---------------------------------------------------------------------------
+
+
+class TestSecuritySettings:
+    def test_jwt_expiration_is_capped(self, monkeypatch: pytest.MonkeyPatch):
+        """AUTH-14: an unbounded JWT_EXPIRATION defeats revocation; cap at 24h."""
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("JWT_EXPIRATION", "100000")
+        with pytest.warns(RuntimeWarning, match="JWT_EXPIRATION"):
+            cfg = Config()
+        assert cfg.ACCESS_TOKEN_EXPIRE_MINUTES == 1440
+
+    def test_allowed_origins_are_stripped(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("ALLOWED_ORIGINS", "https://a.example, https://b.example ,")
+        assert Config().ALLOWED_ORIGINS == ["https://a.example", "https://b.example"]
+
+    def test_trusted_proxies_default_empty(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+        assert Config().TRUSTED_PROXIES == []
+
+    def test_trusted_proxies_parsed(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("TRUSTED_PROXIES", "172.18.0.0/16, 10.0.0.5")
+        assert Config().TRUSTED_PROXIES == ["172.18.0.0/16", "10.0.0.5"]
+
+    def test_trusted_proxies_invalid_entry_raises(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("TRUSTED_PROXIES", "not-an-ip")
+        with pytest.raises(ValueError, match="TRUSTED_PROXIES"):
+            Config()
+
+    def test_trusted_hosts_default_empty(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.delenv("TRUSTED_HOSTS", raising=False)
+        assert Config().TRUSTED_HOSTS == []
+
+    def test_trusted_hosts_parsed(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("TRUSTED_HOSTS", "foi.example.org, localhost")
+        assert Config().TRUSTED_HOSTS == ["foi.example.org", "localhost"]
+
+
+class TestMaxUploadSize:
+    def test_default_is_100_mb(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.delenv("MAX_UPLOAD_SIZE_MB", raising=False)
+        assert Config().MAX_UPLOAD_SIZE_MB == 100
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "25")
+        assert Config().MAX_UPLOAD_SIZE_MB == 25
+
+    @pytest.mark.parametrize("value", ["20MB", "0", "-5"])
+    def test_invalid_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch, value):
+        Config = _reload_config_class()
+        monkeypatch.setenv("JWT_SECRET", GOOD_SECRET)
+        monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", value)
+        assert Config().MAX_UPLOAD_SIZE_MB == 100
+
+    def test_processing_service_uses_configured_limit(self):
+        from src import config as config_mod
+        from src.documents import processing_service
+
+        assert processing_service.MAX_FILE_SIZE == config_mod.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+
+class TestPublicBaseUrl:
+    def test_prefers_public_base_url(self, monkeypatch: pytest.MonkeyPatch):
+        from src.config import public_base_url
+
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://foi.example.org/")
+        monkeypatch.setenv("FRONTEND_URL", "https://other.example.org")
+        assert public_base_url() == "https://foi.example.org"
+
+    def test_falls_back_to_frontend_url(self, monkeypatch: pytest.MonkeyPatch):
+        from src.config import public_base_url
+
+        monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+        monkeypatch.setenv("FRONTEND_URL", "https://app.example.org")
+        assert public_base_url() == "https://app.example.org"
+
+    def test_default_localhost(self, monkeypatch: pytest.MonkeyPatch):
+        from src.config import public_base_url
+
+        monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+        monkeypatch.delenv("FRONTEND_URL", raising=False)
+        assert public_base_url() == "http://localhost:3000"
+
+
+def test_env_example_ships_secrets_empty() -> None:
+    """I9: `.env.example` must not ship placeholders the backend refuses;
+    setup.sh fills the empty values."""
+    from pathlib import Path
+
+    lines = (Path(__file__).resolve().parents[2] / ".env.example").read_text().splitlines()
+    values = dict(line.split("=", 1) for line in lines if "=" in line and not line.startswith("#"))
+    assert values["JWT_SECRET"] == ""
+    assert values["LLM_API_KEY_ENCRYPTION_KEY"] == ""

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import userEvent from '@testing-library/user-event';
 import { server } from '../test-utils/msw-handlers';
-import { renderWithProviders, screen, waitFor } from '../test-utils/render';
+import { fireEvent, renderWithProviders, screen, waitFor } from '../test-utils/render';
 import CaseDocuments from './CaseDocuments';
 import api from '../api/client';
 
@@ -363,6 +363,32 @@ describe('CaseDocuments — upload modal', () => {
     await waitFor(() => expect(uploaded.length).toBe(1));
   });
 
+  it('rejects unsupported or oversized files at selection time', async () => {
+    server.use(
+      http.get('/api/v1/cases/case-1/documents', () =>
+        HttpResponse.json({ documents: [] }),
+      ),
+      http.get('/api/v1/auth/users/guests', () => HttpResponse.json([])),
+    );
+    const user = userEvent.setup({ applyAccept: false });
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText(/no documents uploaded yet/i);
+    await user.click(screen.getByRole('button', { name: /upload documents/i }));
+    await screen.findByText(/add documents/i);
+
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const ok = new File(['a'], 'ok.pdf', { type: 'application/pdf' });
+    const exe = new File(['x'], 'tool.exe', { type: 'application/x-msdownload' });
+    const big = new File(['x'], 'big.pdf', { type: 'application/pdf' });
+    Object.defineProperty(big, 'size', { value: 101 * 1024 * 1024 });
+    await user.upload(fileInput, [ok, exe, big]);
+
+    expect(await screen.findByText(/1 file selected/i)).toBeInTheDocument();
+    expect(window.alert).toHaveBeenCalledWith(
+      expect.stringMatching(/tool\.exe" is not a supported file type[\s\S]*big\.pdf" is too large/),
+    );
+  });
+
   // The next two tests assert on UI state AFTER the upload response.
   // axios's Node adapter (jsdom) can't serialise a real File inside
   // FormData (the form-data package needs Buffer/stream inputs, not
@@ -658,6 +684,208 @@ describe('CaseDocuments — error & notification paths', () => {
     await user.click(screen.getByRole('button', { name: /^cancel$/i }));
     await waitFor(() =>
       expect(screen.queryByText(/share document/i)).not.toBeInTheDocument(),
+    );
+  });
+});
+
+// Backend contract: conversion_failed documents cannot be approved or
+// released (409, backend/src/documents/document_status_routes.py); only
+// approved redactions are burned in and anything unresolved blocks export and
+// release (backend/src/utils/redaction_records.py); uploads may carry
+// `warnings` (backend/src/documents/routes.py upload_document).
+describe('CaseDocuments — redaction/release readiness', () => {
+  const failedDoc = {
+    ...baseDoc,
+    id: 'd-fail',
+    filename: 'broken.docx',
+    status: 'conversion_failed',
+    conversion_failed: true,
+    conversion_error: 'LibreOffice could not convert the file',
+  };
+
+  function listDocs(documents: any[]) {
+    server.use(
+      http.get('/api/v1/cases/case-1/documents', () => HttpResponse.json({ documents })),
+      http.get('/api/v1/auth/users/guests', () => HttpResponse.json([])),
+    );
+  }
+
+  it('badges conversion-failed documents and disables Approved/Released for them', async () => {
+    listDocs([failedDoc]);
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('broken.docx');
+    const badge = screen.getByText(/conversion failed/i, { selector: '.doc-badge' });
+    expect(badge).toHaveAttribute('title', expect.stringMatching(/LibreOffice/));
+    const rowSelect = screen.getByDisplayValue(/conversion failed/i) as HTMLSelectElement;
+    const option = (value: string) =>
+      Array.from(rowSelect.options).find((o) => o.value === value)!;
+    expect(option('approved').disabled).toBe(true);
+    expect(option('released').disabled).toBe(true);
+    expect(option('withheld').disabled).toBe(false);
+  });
+
+  // A usable box (the status rule checks geometry before status).
+  const box = { page: 1, x: 10, y: 10, width: 50, height: 20 };
+
+  it('counts redactions that block export/release', async () => {
+    listDocs([
+      {
+        ...baseDoc,
+        redactions: [
+          { ...box, id: 'r1', status: 'approved' },
+          { ...box, id: 'r2', status: 'proposed' },
+          { ...box, id: 'r3', status: 'contested' },
+          { ...box, id: 'r4', status: 'rejected' },
+          { ...box, id: 'r5', status: 'pending', created_by_role: 'admin' },
+        ],
+      },
+    ]);
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('report.pdf');
+    expect(screen.getByText(/2 redactions awaiting review/i)).toBeInTheDocument();
+  });
+
+  it('counts boxes without geometry and legacy boxes on rotated pages as awaiting review', async () => {
+    listDocs([
+      {
+        ...baseDoc,
+        page_dims: [[612, 792, 0], [792, 612, 90]],
+        redactions: [
+          { ...box, id: 'r1', status: 'approved' },
+          { id: 'r2', page: 1, status: 'approved' },
+          { ...box, id: 'r3', page: 2, status: 'approved' },
+          { ...box, id: 'r4', page: 2, status: 'approved', coord_space: 'displayed', page_rotation: 90 },
+        ],
+      },
+    ]);
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('report.pdf');
+    expect(screen.getByText(/2 redactions awaiting review/i)).toBeInTheDocument();
+  });
+
+  it('refuses a bulk approve that includes a conversion-failed document without calling the API', async () => {
+    let called = false;
+    listDocs([{ ...baseDoc, id: 'd1', filename: 'a.pdf' }, failedDoc]);
+    server.use(
+      http.put('/api/v1/documents/bulk/status', () => {
+        called = true;
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('a.pdf');
+    await user.click(screen.getAllByRole('checkbox')[0]);
+    await user.selectOptions(screen.getByDisplayValue('Change Status...'), 'approved');
+    await user.click(screen.getByRole('button', { name: /update status/i }));
+    await waitFor(() =>
+      expect(window.alert).toHaveBeenCalledWith(expect.stringMatching(/broken\.docx/)),
+    );
+    expect(called).toBe(false);
+  });
+
+  it('explains a 409 from the per-row status update', async () => {
+    listDocs([baseDoc]);
+    server.use(
+      http.put('/api/v1/documents/doc-1/status', () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_409', message: 'Documents that failed conversion to PDF cannot be approved or released.' } },
+          { status: 409 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText('report.pdf');
+    await user.selectOptions(screen.getByDisplayValue('New'), 'approved');
+    await waitFor(() =>
+      expect(window.alert).toHaveBeenCalledWith(
+        'Documents that failed conversion to PDF cannot be approved or released.',
+      ),
+    );
+  });
+
+  it('shows upload warnings in the results modal', async () => {
+    listDocs([]);
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: {
+        id: 'd',
+        filename: 'mail.eml',
+        message: 'Uploaded successfully',
+        warnings: ['Email thread consolidation failed: timeout'],
+      },
+    } as never);
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText(/no documents uploaded yet/i);
+    await user.click(screen.getByRole('button', { name: /upload documents/i }));
+    await screen.findByText(/add documents/i);
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, new File(['a'], 'mail.eml', { type: 'message/rfc822' }));
+    await screen.findByText(/1 file selected/i);
+    await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
+    expect(await screen.findByText(/uploaded with warnings/i)).toBeInTheDocument();
+    expect(screen.getByText(/thread consolidation failed: timeout/i)).toBeInTheDocument();
+  });
+});
+
+describe('CaseDocuments — files the browser cannot type', () => {
+  function stubUploadEnv() {
+    server.use(
+      http.get('/api/v1/cases/case-1/documents', () =>
+        HttpResponse.json({ documents: [] }),
+      ),
+      http.get('/api/v1/auth/users/guests', () => HttpResponse.json([])),
+    );
+    // axios's Node adapter can't serialise a File (see note above).
+    return vi.spyOn(api, 'post').mockResolvedValue({ data: { id: 'new-doc' } });
+  }
+
+  it.each(['', 'application/octet-stream'])(
+    'uploads a .msg reported as %j with the Outlook MIME type',
+    async (type) => {
+      const post = stubUploadEnv();
+      // jsdom's FormData stringifies Node's File (see setupTests), so read
+      // the part the component appends.
+      const append = vi.spyOn(FormData.prototype, 'append');
+      const user = userEvent.setup({ applyAccept: false });
+      renderWithProviders(<CaseDocuments />);
+      await screen.findByText(/no documents uploaded yet/i);
+      await user.click(screen.getByRole('button', { name: /upload documents/i }));
+      await screen.findByText(/add documents/i);
+
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      await user.upload(fileInput, new File(['m'], 'mail.msg', { type }));
+      await screen.findByText(/1 file selected/i);
+      await user.click(screen.getByRole('button', { name: /upload 1 file/i }));
+
+      await waitFor(() => expect(post).toHaveBeenCalled());
+      const part = append.mock.calls.find(([name]) => name === 'file')?.[1] as File;
+      expect(part.name).toBe('mail.msg');
+      expect(part.type).toBe('application/vnd.ms-outlook');
+    },
+  );
+
+  it('runs dropped files through the same checks', async () => {
+    stubUploadEnv();
+    const user = userEvent.setup();
+    renderWithProviders(<CaseDocuments />);
+    await screen.findByText(/no documents uploaded yet/i);
+    await user.click(screen.getByRole('button', { name: /upload documents/i }));
+    await screen.findByText(/add documents/i);
+
+    const dropZone = document.querySelector('.upload-dropzone') as HTMLElement;
+    const dropped = [
+      new File(['m'], 'mail.msg', { type: '' }),
+      new File(['x'], 'tool.exe', { type: 'application/x-msdownload' }),
+    ];
+    fireEvent.drop(dropZone, { dataTransfer: { files: dropped } });
+
+    expect(await screen.findByText(/1 file selected/i)).toBeInTheDocument();
+    expect(screen.getByText('mail.msg')).toBeInTheDocument();
+    expect(screen.queryByText('tool.exe')).not.toBeInTheDocument();
+    expect(window.alert).toHaveBeenCalledWith(
+      expect.stringMatching(/tool\.exe" is not a supported file type/),
     );
   });
 });

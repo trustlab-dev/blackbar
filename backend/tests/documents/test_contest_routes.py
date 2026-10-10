@@ -7,7 +7,7 @@ reject-document state machines.
 Endpoints under test (mounted at `/api/v1/documents/...` via
 `contest_router` included from `documents/routes.py`):
 
-    POST   /{document_id}/redactions/{redaction_index}/contest
+    POST   /{document_id}/redactions/{redaction_ref}/contest   (stable id; legacy index)
     GET    /{document_id}/contests
     PUT    /contests/{contest_id}/resolve
     POST   /{document_id}/reject
@@ -40,8 +40,9 @@ unless we monkeypatch them too. Tests do.
 - get_document_contests / get_document_rejections: any case-team member.
 
 **Pinned source findings (audit Section 11 candidates):**
-- `resolve_contest` allows resolving an already-resolved contest
-  (no state-machine guard on `contest.status`). Pinned.
+- `resolve_contest` refuses (409) an already-resolved contest, and a
+  "kept"/"modified" resolution only approves a redaction that is
+  proposed or contested (I2).
 - `address_rejection` allows addressing an already-addressed
   rejection. Pinned.
 - Resolving a contest with `resolution == "removed"` uses a
@@ -136,8 +137,8 @@ class TestContestRedaction:
             ],
         )
         r = await client.post(
-            f"/api/v1/documents/{doc_id}/redactions/0/contest",
-            json={"redaction_index": 0, "reason": "Public interest"},
+            f"/api/v1/documents/{doc_id}/redactions/r1/contest",
+            json={"reason": "Public interest"},
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -151,6 +152,7 @@ class TestContestRedaction:
         assert contest["contested_by"] == me["id"]
         assert contest["contested_by_role"] == "legal"
         assert contest["document_id"] == doc_id
+        assert contest["redaction_id"] == "r1"
 
         # Redaction flipped to contested
         doc = await db.documents.find_one({"id": doc_id})
@@ -507,32 +509,82 @@ class TestResolveContest:
         assert r.status_code == 403
         assert "analysts and managers" in r.text
 
-    async def test_resolve_already_resolved_contest_silently_succeeds(
+    async def test_resolve_already_resolved_contest_is_refused(
         self,
         db: AsyncIOMotorDatabase,
         authed_client_factory,
         patch_routes_db,
     ) -> None:
-        """Pin reality: no state-machine guard on contest.status.
-        Re-resolving an already-resolved contest succeeds; the second
-        resolution overwrites the first."""
+        """I2: a contest can be resolved once. A second resolve is 409 and
+        neither the contest nor the redaction's contest count changes."""
         client = await authed_client_factory(role="user", email="re@example.com")
         me = await db.users.find_one({"email": "re@example.com"})
-        case_id, doc_id, contest_id = await self._seed_open_contest(db, me["id"])
-        # Resolve once
+        redaction = {
+            "id": "r1",
+            "page": 1,
+            "status": "contested",
+            "is_contested": True,
+            "active_contests": 2,
+        }
+        case_id, doc_id, contest_id = await self._seed_open_contest(
+            db, me["id"], redaction=redaction
+        )
         r1 = await client.put(
             f"/api/v1/documents/contests/{contest_id}/resolve",
             json={"resolution": "kept"},
         )
         assert r1.status_code == 200
-        # Resolve again with different resolution
         r2 = await client.put(
             f"/api/v1/documents/contests/{contest_id}/resolve",
             json={"resolution": "modified", "resolution_notes": "redo"},
         )
-        assert r2.status_code == 200
+        assert r2.status_code == 409, r2.text
         contest = await db["redaction_contests"].find_one({"id": contest_id})
-        assert contest["resolution"] == "modified"
+        assert contest["resolution"] == "kept"
+        red = (await db.documents.find_one({"id": doc_id}))["redactions"][0]
+        assert red["active_contests"] == 1
+        assert red["status"] == "contested"
+
+    @pytest.mark.parametrize("status", ["rejected", "approved", "pending"])
+    async def test_keeping_does_not_approve_a_redaction_in_another_state(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+        status: str,
+    ) -> None:
+        """I2: resolving as kept approves the redaction, so it is only
+        allowed while the redaction is proposed or contested."""
+        client = await authed_client_factory(role="user", email=f"st-{status}@example.com")
+        me = await db.users.find_one({"email": f"st-{status}@example.com"})
+        redaction = {"id": "r1", "page": 1, "status": status, "active_contests": 1}
+        _, doc_id, contest_id = await self._seed_open_contest(db, me["id"], redaction=redaction)
+        r = await client.put(
+            f"/api/v1/documents/contests/{contest_id}/resolve",
+            json={"resolution": "kept"},
+        )
+        assert r.status_code == 409, r.text
+        red = (await db.documents.find_one({"id": doc_id}))["redactions"][0]
+        assert red["status"] == status
+        contest = await db["redaction_contests"].find_one({"id": contest_id})
+        assert contest["status"] == "open"
+
+    async def test_unknown_resolution_is_rejected(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        client = await authed_client_factory(role="user", email="unk@example.com")
+        me = await db.users.find_one({"email": "unk@example.com"})
+        _, _, contest_id = await self._seed_open_contest(db, me["id"])
+        r = await client.put(
+            f"/api/v1/documents/contests/{contest_id}/resolve",
+            json={"resolution": "approve-everything"},
+        )
+        assert r.status_code == 400
+        contest = await db["redaction_contests"].find_one({"id": contest_id})
+        assert contest["status"] == "open"
 
 
 # ---------------------------------------------------------------------------
@@ -874,8 +926,8 @@ class TestContestLifecycle:
         )
         # 1. File contest
         r1 = await legal_client.post(
-            f"/api/v1/documents/{doc_id}/redactions/0/contest",
-            json={"redaction_index": 0, "reason": "Public interest"},
+            f"/api/v1/documents/{doc_id}/redactions/r1/contest",
+            json={"reason": "Public interest"},
         )
         assert r1.status_code == 200
         contest_id = r1.json()["contest_id"]
@@ -892,6 +944,61 @@ class TestContestLifecycle:
         doc = await db.documents.find_one({"id": doc_id})
         assert doc["redactions"][0]["status"] == "approved"
         assert doc["redactions"][0]["is_contested"] is False
+
+    async def test_rejected_redaction_cannot_be_contested(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        legal_client = await authed_client_factory(role="user", email="lrej@example.com")
+        legal = await db.users.find_one({"email": "lrej@example.com"})
+        case_id = await _seed_case_with_team(db, (legal["id"], "legal"))
+        doc_id = await _seed_doc(
+            db, case_id, redactions=[{"id": "r1", "page": 1, "status": "rejected"}]
+        )
+        r = await legal_client.post(
+            f"/api/v1/documents/{doc_id}/redactions/r1/contest", json={"reason": "x"}
+        )
+        assert r.status_code == 409, r.text
+        assert await db["redaction_contests"].count_documents({}) == 0
+
+    async def test_proposal_contested_then_kept_is_approved_by_the_resolver(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A proposal may be approved by an analyst resolving its contest as
+        kept; its pre-contest status is recorded."""
+        legal_client = await authed_client_factory(role="user", email="lp@example.com")
+        analyst_client = await authed_client_factory(role="user", email="ap@example.com")
+        legal = await db.users.find_one({"email": "lp@example.com"})
+        analyst = await db.users.find_one({"email": "ap@example.com"})
+        case_id = await _seed_case_with_team(db, (legal["id"], "legal"), (analyst["id"], "analyst"))
+        doc_id = await _seed_doc(
+            db,
+            case_id,
+            redactions=[{"id": "r1", "page": 1, "type": "proposed", "status": "proposed"}],
+        )
+        r = await legal_client.post(
+            f"/api/v1/documents/{doc_id}/redactions/r1/contest", json={"reason": "x"}
+        )
+        assert r.status_code == 200, r.text
+        red = (await db.documents.find_one({"id": doc_id}))["redactions"][0]
+        assert red["status_before_contest"] == "proposed"
+        r = await analyst_client.put(
+            f"/api/v1/documents/contests/{r.json()['contest_id']}/resolve",
+            json={"resolution": "kept"},
+        )
+        assert r.status_code == 200, r.text
+        red = (await db.documents.find_one({"id": doc_id}))["redactions"][0]
+        assert (red["status"], red["type"], red["approval_status"]) == (
+            "approved",
+            "professional",
+            "approved",
+        )
+        assert red["reviewed_by"] == analyst["id"]
 
 
 class TestRejectionLifecycle:

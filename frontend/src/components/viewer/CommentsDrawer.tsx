@@ -16,6 +16,7 @@ import Avatar from '@mui/material/Avatar';
 import Close from '@mui/icons-material/Close';
 import Send from '@mui/icons-material/Send';
 import api from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface Comment {
     id: string;
@@ -56,7 +57,7 @@ const CommentsDrawer: React.FC<Props> = ({ open, onClose, documentId }) => {
                 setComments([]);
             } else {
                 console.error('Error fetching comments:', error);
-                setErrorMessage(error.response?.data?.detail || 'Failed to load comments');
+                setErrorMessage(getApiErrorMessage(error, 'Failed to load comments'));
             }
         } finally {
             setLoading(false);

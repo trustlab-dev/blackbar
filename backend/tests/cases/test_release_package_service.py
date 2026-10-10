@@ -33,6 +33,26 @@ from src.cases.release_package_models import (
     ReleasePackageStatus,
 )
 
+
+def _make_pdf() -> bytes:
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 100), "release body", fontsize=12)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+# Released PDFs always go through the redaction/sanitise pipeline, so the
+# stored content must be a real PDF.
+_PDF = _make_pdf()
+
+
+def _box(x: float, y: float, w: float, h: float) -> dict:
+    return {"page": 1, "x": x, "y": y, "width": w, "height": h}
+
+
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
@@ -77,20 +97,18 @@ def mock_documents():
             "filename": "document1.pdf",
             "status": "approved",
             "redactions": [
-                {"category": "S22", "coordinates": {"x": 100, "y": 100, "width": 50, "height": 20}},
-                {"category": "S15", "coordinates": {"x": 200, "y": 200, "width": 60, "height": 25}},
+                {"category": "S22", "status": "approved", **_box(100, 100, 50, 20)},
+                {"category": "S15", "status": "approved", **_box(200, 200, 60, 25)},
             ],
-            "content": b"PDF content here",
+            "content": _PDF,
         },
         {
             "id": "doc-2",
             "case_id": "case-123",
             "filename": "document2.pdf",
             "status": "released",
-            "redactions": [
-                {"category": "S22", "coordinates": {"x": 150, "y": 150, "width": 40, "height": 15}}
-            ],
-            "content": b"Another PDF content",
+            "redactions": [{"category": "S22", "status": "approved", **_box(150, 150, 40, 15)}],
+            "content": _PDF,
         },
     ]
 
@@ -464,7 +482,7 @@ class TestProcessPackageGeneration:
                 "filename": "ok.pdf",
                 "status": "released",
                 "redactions": [],
-                "content": b"PDF",
+                "content": _PDF,
             },
             {
                 "id": "doc-excluded",
@@ -472,7 +490,7 @@ class TestProcessPackageGeneration:
                 "filename": "wip.pdf",
                 "status": "in_review",
                 "redactions": [],
-                "content": b"PDF",
+                "content": _PDF,
             },
         ]
         mock_db.cases.find_one = AsyncMock(return_value=mock_case)
@@ -511,7 +529,11 @@ class TestProcessPackageGeneration:
         assert update_payload["document_count"] == 1
 
     @pytest.mark.asyncio
-    async def test_skips_documents_with_no_content(self, mock_db, mock_case, release_settings):
+    async def test_document_without_content_fails_the_package(
+        self, mock_db, mock_case, release_settings
+    ):
+        """DOC-19: a document with no content used to be skipped silently
+        while the manifest still listed it. It now fails the package."""
         docs = [
             {
                 "id": "doc-1",
@@ -527,7 +549,7 @@ class TestProcessPackageGeneration:
                 "filename": "ok.pdf",
                 "status": "released",
                 "redactions": [],
-                "content": b"PDF",
+                "content": _PDF,
             },
         ]
         mock_db.cases.find_one = AsyncMock(return_value=mock_case)
@@ -563,8 +585,10 @@ class TestProcessPackageGeneration:
             )
 
         update_payload = mock_db.release_packages.update_one.call_args_list[-1][0][1]["$set"]
-        # Only 1 doc made it into the ZIP -- the contentless one was skipped.
-        assert update_payload["document_count"] == 1
+        assert update_payload["status"] == "failed"
+        assert [d["document_id"] for d in update_payload["failed_documents"]] == ["doc-1"]
+        assert "content is missing" in update_payload["failed_documents"][0]["reason"]
+        mock_fs.put.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_redaction_error_marks_package_failed(self, mock_db, mock_case, release_settings):
@@ -581,8 +605,8 @@ class TestProcessPackageGeneration:
                 "case_id": "case-123",
                 "filename": "doc.pdf",
                 "status": "released",
-                "redactions": [{"category": "S22"}],
-                "content": b"PDF",
+                "redactions": [{"category": "S22", "status": "approved", **_box(10, 10, 5, 5)}],
+                "content": _PDF,
             }
         ]
         mock_db.cases.find_one = AsyncMock(return_value=mock_case)
@@ -640,7 +664,7 @@ class TestProcessPackageGeneration:
                 "filename": "notes.txt",
                 "status": "released",
                 "redactions": [],
-                "content": b"data",
+                "content": _PDF,
             }
         ]
         mock_db.cases.find_one = AsyncMock(return_value=mock_case)
@@ -712,7 +736,7 @@ class TestProcessPackageGeneration:
                 "filename": "ok.pdf",
                 "status": "released",
                 "redactions": [],
-                "content": b"PDF",
+                "content": _PDF,
             }
         ]
         mock_db.cases.find_one = AsyncMock(return_value=mock_case)
@@ -776,7 +800,7 @@ class TestProcessPackageGeneration:
                 "filename": "x.pdf",
                 "status": "released",
                 "redactions": [],
-                "content": b"PDF",
+                "content": _PDF,
             }
         ]
         mock_db.cases.find_one = AsyncMock(return_value=case)

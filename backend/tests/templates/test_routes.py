@@ -188,15 +188,25 @@ class TestCreateTemplate:
 class TestGetTemplate:
     async def test_returns_template(self, db, authed_client_factory, patch_routes_db) -> None:
         await _seed_template(db, template_id="t1", name="X")
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.get("/api/v1/templates/t1")
         assert r.status_code == 200
         assert r.json()["name"] == "X"
 
     async def test_404_when_missing(self, db, authed_client_factory, patch_routes_db) -> None:
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.get("/api/v1/templates/missing")
         assert r.status_code == 404
+
+    @pytest.mark.parametrize("role", ["user", "guest"])
+    async def test_non_staff_roles_forbidden(
+        self, db, authed_client_factory, patch_routes_db, role: str
+    ) -> None:
+        """AUTH-21: same gate as the list route."""
+        await _seed_template(db, template_id="t1")
+        client = await authed_client_factory(role=role)
+        r = await client.get("/api/v1/templates/t1")
+        assert r.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +288,7 @@ class TestRenderTemplateForCase:
             }
         )
 
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert r.status_code == 200
         body = r.json()
@@ -286,15 +296,63 @@ class TestRenderTemplateForCase:
         assert "FOI-2026-001" in body["rendered_content"]
 
     async def test_template_not_found(self, db, authed_client_factory, patch_routes_db) -> None:
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/missing/render?case_id=x")
         assert r.status_code == 404
 
     async def test_case_not_found(self, db, authed_client_factory, patch_routes_db) -> None:
         await _seed_template(db, template_id="t1")
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=missing")
         assert r.status_code == 404
+
+    async def test_case_not_found_is_403_for_team_scoped_user(
+        self, db, authed_client_factory, patch_routes_db
+    ) -> None:
+        """A team-scoped user cannot tell a missing case from someone else's."""
+        await _seed_template(db, template_id="t1")
+        client = await authed_client_factory(role="user")
+        r = await client.post("/api/v1/templates/t1/render?case_id=missing")
+        assert r.status_code == 403
+
+    async def test_user_off_case_team_is_forbidden(
+        self, db, authed_client_factory, patch_routes_db
+    ) -> None:
+        """AUTH-06: rendering exposes requester PII; enforce case access."""
+        await _seed_template(db, template_id="t1", content="{requester_email}")
+        await db.cases.insert_one(
+            {"id": "case-1", "title": "T", "requester": {"email": "secret@x.test"}, "case_team": []}
+        )
+        client = await authed_client_factory(role="user")
+        r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
+        assert r.status_code == 403
+        assert "secret@x.test" not in r.text
+
+    async def test_user_on_case_team_can_render(
+        self, db, authed_client_factory, patch_routes_db
+    ) -> None:
+        await _seed_template(db, template_id="t1", content="{requester_email}")
+        client = await authed_client_factory(role="user")
+        # authed_client_factory leaves role unset for "user" and names them user-*.
+        me = (await db.users.find_one({"email": {"$regex": "^user-"}}))["id"]
+        await db.cases.insert_one(
+            {
+                "id": "case-1",
+                "title": "T",
+                "requester": {"email": "req@x.test"},
+                "case_team": [{"user_id": me, "role": "reviewer", "status": "active"}],
+            }
+        )
+        r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
+        assert r.status_code == 200, r.text
+        assert "req@x.test" in r.json()["rendered_content"]
+
+    async def test_guest_is_forbidden(self, db, authed_client_factory, patch_routes_db) -> None:
+        await _seed_template(db, template_id="t1")
+        await db.cases.insert_one({"id": "case-1", "title": "T", "case_team": []})
+        client = await authed_client_factory(role="guest")
+        r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
+        assert r.status_code == 403
 
     async def test_document_count_placeholder_replaced(
         self, db, authed_client_factory, patch_routes_db
@@ -308,7 +366,7 @@ class TestRenderTemplateForCase:
         await db.documents.insert_one({"id": "d1", "case_id": "case-1"})
         await db.documents.insert_one({"id": "d2", "case_id": "case-1"})
 
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert r.status_code == 200
         assert "Docs: 2" in r.json()["rendered_content"]
@@ -324,7 +382,7 @@ class TestRenderTemplateForCase:
                 "received_date": datetime(2026, 5, 1, 12, 0, 0),
             }
         )
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert r.status_code == 200
         assert "May 01, 2026" in r.json()["rendered_content"]
@@ -340,7 +398,7 @@ class TestRenderTemplateForCase:
                 "received_date": "2026-05-01T12:00:00Z",
             }
         )
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert r.status_code == 200
         assert "May 01, 2026" in r.json()["rendered_content"]
@@ -356,7 +414,7 @@ class TestRenderTemplateForCase:
                 "received_date": "yesterday",
             }
         )
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert r.status_code == 200
         assert "When: yesterday" in r.json()["rendered_content"]
@@ -370,7 +428,7 @@ class TestRenderTemplateForCase:
                 "due_date": datetime(2026, 6, 1),
             }
         )
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert "June 01, 2026" in r.json()["rendered_content"]
 
@@ -383,7 +441,7 @@ class TestRenderTemplateForCase:
                 "due_date": "2026-06-01T00:00:00Z",
             }
         )
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert "June 01, 2026" in r.json()["rendered_content"]
 
@@ -398,7 +456,7 @@ class TestRenderTemplateForCase:
                 "due_date": "next-week",
             }
         )
-        client = await authed_client_factory(role="user")
+        client = await authed_client_factory(role="analyst")
         r = await client.post("/api/v1/templates/t1/render?case_id=case-1")
         assert "Due: next-week" in r.json()["rendered_content"]
 

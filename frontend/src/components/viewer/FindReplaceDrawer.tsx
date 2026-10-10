@@ -22,6 +22,7 @@ import ExpandMore from '@mui/icons-material/ExpandMore';
 import ExpandLess from '@mui/icons-material/ExpandLess';
 import api from '../../api/client';
 import './FindReplaceDrawer.css';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface Props {
   open: boolean;
@@ -126,7 +127,7 @@ const FindReplaceDrawer: React.FC<Props> = ({
       
       // Show error message
       if (error.response?.status === 400) {
-        setErrorMessage(error.response?.data?.detail || 'This document does not have OCR data.');
+        setErrorMessage(getApiErrorMessage(error, 'This document does not have OCR data.'));
       } else if (error.response?.status === 403) {
         setErrorMessage('You do not have permission to search this document.');
       } else {

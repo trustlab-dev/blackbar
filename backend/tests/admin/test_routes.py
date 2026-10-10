@@ -47,8 +47,11 @@ def patch_routes_db(monkeypatch: pytest.MonkeyPatch, db: AsyncIOMotorDatabase):
     seeded users are invisible.
     """
     import src.admin.routes as _routes_mod
+    import src.dependencies as _deps_mod
 
     monkeypatch.setattr(_routes_mod, "users", db["users"])
+    # The admin gate re-reads the caller from the DB (AUTH-14).
+    monkeypatch.setattr(_deps_mod, "users", db["users"])
     return db
 
 

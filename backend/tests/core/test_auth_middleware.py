@@ -285,20 +285,35 @@ async def test_protected_route_valid_token_populates_state(
     assert body["roles"] == ["analyst"]
 
 
-async def test_protected_route_valid_token_without_role_yields_empty_roles(
+async def test_protected_route_token_without_role_is_rejected(
     aclient: httpx.AsyncClient,
 ):
-    """validate_token() backfills role='user' for tokens missing the field,
-    so request.state.roles should be `['user']`, not empty. Pins the
-    `[token_payload.role] if token_payload.role else []` branch."""
+    """AUTH-03: validate_token() used to backfill role='user' for tokens
+    missing the field, which let public magic-link tokens act as internal
+    users. A staff token without a role claim is now a 401."""
     future = int(time.time() + 600)
-    # No `role` key at all → validate_token() sets payload['role']='user'.
     token = _make_jwt({"sub": "u-7", "exp": future})
     r = await aclient.get("/protected", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 401
+
+
+async def test_public_token_rejected_on_protected_route(aclient: httpx.AsyncClient):
+    """AUTH-03: a public-realm token is refused (403) anywhere outside the
+    public allowlist, whatever else it claims."""
+    future = int(time.time() + 600)
+    token = _make_jwt(
+        {"sub": "p-1", "realm": "public", "user_type": "public", "role": "admin", "exp": future}
+    )
+    r = await aclient.get("/protected", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "PUBLIC_TOKEN_FORBIDDEN"
+
+
+async def test_public_token_allowed_on_public_prefix(aclient: httpx.AsyncClient):
+    future = int(time.time() + 600)
+    token = _make_jwt({"sub": "p-1", "realm": "public", "user_type": "public", "exp": future})
+    r = await aclient.get("/api/v1/cases/public/list", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
-    body = r.json()
-    assert body["user_id"] == "u-7"
-    assert body["roles"] == ["user"]
 
 
 async def test_lower_case_bearer_accepted(aclient: httpx.AsyncClient):

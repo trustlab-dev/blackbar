@@ -24,9 +24,15 @@ const { __urlPatch } = vi.hoisted(() => {
 });
 void __urlPatch;
 
+// Every `options` prop the mocked <Document> receives, in render order.
+const { documentOptionsSeen } = vi.hoisted(() => ({
+  documentOptionsSeen: [] as any[],
+}));
+
 // Mock react-pdf before component import — Document/Page can't render under jsdom.
 vi.mock('react-pdf', () => ({
-  Document: ({ children, onLoadSuccess, onLoadError, loading, error, file }: any) => {
+  Document: ({ children, onLoadSuccess, onLoadError, loading, error, file, options }: any) => {
+    documentOptionsSeen.push(options);
     // Auto-fire onLoadSuccess on render so the numPages callback flows.
     setTimeout(() => onLoadSuccess?.({ numPages: 3 }), 0);
     return (
@@ -90,6 +96,69 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('PDFViewerWithSelection — pdf.js hardening and blob lifecycle', () => {
+  it('passes a stable options object with isEvalSupported disabled', async () => {
+    documentOptionsSeen.length = 0;
+    server.use(http.get(META_URL, () => HttpResponse.json({})));
+    const { rerender } = renderWithProviders(
+      <PDFViewerWithSelection
+        documentId="doc-1"
+        currentPage={1}
+        zoom={1}
+        pdfUrl="/file/foo.pdf"
+        onNumPagesChange={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('mock-document')).toBeInTheDocument(),
+    );
+    rerender(
+      <PDFViewerWithSelection
+        documentId="doc-1"
+        currentPage={2}
+        zoom={1.25}
+        pdfUrl="/file/foo.pdf"
+        onNumPagesChange={() => {}}
+      />,
+    );
+    expect(documentOptionsSeen.length).toBeGreaterThan(1);
+    expect(documentOptionsSeen[0]).toEqual({ isEvalSupported: false });
+    // Same identity across renders, or react-pdf would reload the document.
+    expect(new Set(documentOptionsSeen).size).toBe(1);
+  });
+
+  it('revokes the object URL it created when unmounted', async () => {
+    const revoke = vi.fn();
+    (global.URL.createObjectURL as any) = vi.fn(() => 'blob:self-fetched');
+    (global.URL.revokeObjectURL as any) = revoke;
+    server.use(
+      http.get(DOC_URL, () =>
+        HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+          headers: { 'Content-Type': 'application/pdf' },
+        }),
+      ),
+      http.get(META_URL, () => HttpResponse.json({})),
+    );
+    const { unmount } = renderWithProviders(
+      <PDFViewerWithSelection
+        documentId="doc-1"
+        currentPage={1}
+        zoom={1}
+        onNumPagesChange={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('mock-document')).toHaveAttribute(
+        'data-file',
+        'blob:self-fetched',
+      ),
+    );
+    expect(revoke).not.toHaveBeenCalled();
+    unmount();
+    expect(revoke).toHaveBeenCalledWith('blob:self-fetched');
+  });
 });
 
 describe('PDFViewerWithSelection', () => {
@@ -157,6 +226,29 @@ describe('PDFViewerWithSelection', () => {
     expect(docFetched).toBe(false);
     expect(screen.getByTestId('mock-page')).toHaveAttribute('data-page', '2');
     expect(screen.getByTestId('mock-page')).toHaveAttribute('data-scale', '1.5');
+  });
+
+  it('waits for the parent instead of fetching when pdfUrl is null (parent owns the download)', async () => {
+    let docFetched = false;
+    server.use(
+      http.get(DOC_URL, () => {
+        docFetched = true;
+        return new HttpResponse(null, { status: 500 });
+      }),
+      http.get(META_URL, () => HttpResponse.json({})),
+    );
+    const { rerender } = renderWithProviders(
+      <PDFViewerWithSelection documentId="doc-1" currentPage={1} zoom={1} pdfUrl={null} onNumPagesChange={() => {}} />,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(docFetched).toBe(false);
+    expect(screen.queryByText(/failed to load pdf/i)).not.toBeInTheDocument();
+
+    rerender(
+      <PDFViewerWithSelection documentId="doc-1" currentPage={1} zoom={1} pdfUrl="/file/foo.pdf" onNumPagesChange={() => {}} />,
+    );
+    await waitFor(() => expect(screen.getByTestId('mock-document')).toBeInTheDocument());
+    expect(docFetched).toBe(false);
   });
 
   it('logs and shows the "Failed to load PDF" UI when fetch fails', async () => {

@@ -265,7 +265,7 @@ describe('CaseApprovalPanel — reject flow', () => {
         HttpResponse.json(pendingStatus),
       ),
       http.post('/api/v1/cases/case-1/reject-approval', () =>
-        HttpResponse.json({ detail: 'server boom' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'server boom' } }, { status: 400 }),
       ),
     );
     const user = userEvent.setup();

@@ -14,7 +14,8 @@ import {
 } from '@mui/material';
 import EmailIcon from '@mui/icons-material/Email';
 import SendIcon from '@mui/icons-material/Send';
-import axios from 'axios';
+import { publicApi } from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface MagicLinkLoginProps {
   onSuccess?: () => void;
@@ -36,7 +37,7 @@ export const MagicLinkLogin: React.FC<MagicLinkLoginProps> = ({
     setLoading(true);
 
     try {
-      const response = await axios.post('/api/v1/auth/public/magic-link/request', {
+      const response = await publicApi.post('/auth/public/magic-link/request', {
         email,
         name: name || undefined
       });
@@ -54,7 +55,7 @@ export const MagicLinkLogin: React.FC<MagicLinkLoginProps> = ({
       if (err.response?.status === 429) {
         setError('Too many requests. Please wait an hour before trying again.');
       } else {
-        setError(err.response?.data?.detail || 'Failed to send magic link. Please try again.');
+        setError(getApiErrorMessage(err, 'Failed to send magic link. Please try again.'));
       }
     } finally {
       setLoading(false);

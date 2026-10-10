@@ -181,6 +181,144 @@ class TestUpdate:
         result = await repo.update("nonexistent-id", LLMConfigUpdate(name="new"))
         assert result is None
 
+    async def test_identical_update_returns_config_not_none(self, db: AsyncIOMotorDatabase) -> None:
+        """An update that changes nothing is not a 404."""
+        repo = LLMRepository(db)
+        cfg = await repo.create(_make_create_payload(name="Same"), "u")
+        result = await repo.update(cfg.id, LLMConfigUpdate(name="Same"))
+        assert result is not None and result.name == "Same"
+
+
+class TestUpdateKeyReentry:
+    """LLM-05: a stored key never follows the config to a new destination."""
+
+    async def test_endpoint_change_without_key_clears_stored_key(
+        self, db: AsyncIOMotorDatabase
+    ) -> None:
+        repo = LLMRepository(db)
+        cfg = await repo.create(_make_create_payload(api_key="sk-original"), "u")
+        updated = await repo.update(
+            cfg.id, LLMConfigUpdate(api_endpoint="https://attacker.example/v1/chat")
+        )
+        assert updated is not None
+        assert updated.api_key_encrypted == ""
+
+    async def test_endpoint_change_with_new_key_keeps_new_key(
+        self, db: AsyncIOMotorDatabase
+    ) -> None:
+        repo = LLMRepository(db)
+        cfg = await repo.create(_make_create_payload(api_key="sk-original"), "u")
+        updated = await repo.update(
+            cfg.id,
+            LLMConfigUpdate(api_endpoint="https://api.example.com/v1/chat", api_key="sk-new-key"),
+        )
+        assert decrypt_api_key(updated.api_key_encrypted) == "sk-new-key"
+
+    async def test_provider_change_without_key_clears_stored_key(
+        self, db: AsyncIOMotorDatabase
+    ) -> None:
+        repo = LLMRepository(db)
+        cfg = await repo.create(_make_create_payload(api_key="sk-original"), "u")
+        updated = await repo.update(cfg.id, LLMConfigUpdate(request_format="anthropic"))
+        assert updated.api_key_encrypted == ""
+
+    async def test_unchanged_endpoint_keeps_key(self, db: AsyncIOMotorDatabase) -> None:
+        repo = LLMRepository(db)
+        cfg = await repo.create(_make_create_payload(api_key="sk-original"), "u")
+        updated = await repo.update(
+            cfg.id, LLMConfigUpdate(api_endpoint=cfg.api_endpoint, name="Renamed")
+        )
+        assert decrypt_api_key(updated.api_key_encrypted) == "sk-original"
+
+    async def test_masked_header_values_keep_stored_values(self, db: AsyncIOMotorDatabase) -> None:
+        from src.llm.models import MASKED_HEADER_VALUE
+
+        repo = LLMRepository(db)
+        payload = _make_create_payload()
+        payload.headers = {"api-key": "azure-secret", "X-Org": "org-1"}
+        cfg = await repo.create(payload, "u")
+        updated = await repo.update(
+            cfg.id,
+            LLMConfigUpdate(headers={"api-key": MASKED_HEADER_VALUE, "X-Org": "org-2"}),
+        )
+        assert updated.headers == {"api-key": "azure-secret", "X-Org": "org-2"}
+
+
+class TestHeaderCredentials:
+    """I6: header values are credentials; they are encrypted at rest and do
+    not follow the config to a new endpoint or provider."""
+
+    async def _with_headers(self, db) -> tuple[LLMRepository, str]:
+        repo = LLMRepository(db)
+        payload = _make_create_payload()
+        payload.headers = {"api-key": "azure-secret", "X-Org": "org-1"}
+        cfg = await repo.create(payload, "u")
+        return repo, cfg.id
+
+    async def test_header_values_are_encrypted_at_rest(self, db: AsyncIOMotorDatabase) -> None:
+        repo, cfg_id = await self._with_headers(db)
+        raw = await db.llm_configs.find_one({"id": cfg_id})
+        assert set(raw["headers"]) == {"api-key", "X-Org"}
+        assert "azure-secret" not in str(raw["headers"])
+        assert all(v.startswith("fernet:") for v in raw["headers"].values())
+        loaded = await repo.get_by_id(cfg_id)
+        assert loaded.headers == {"api-key": "azure-secret", "X-Org": "org-1"}
+        (listed,) = await repo.list_all()
+        assert listed.headers == loaded.headers
+
+    async def test_updated_header_values_are_encrypted(self, db: AsyncIOMotorDatabase) -> None:
+        repo, cfg_id = await self._with_headers(db)
+        await repo.update(cfg_id, LLMConfigUpdate(headers={"Authorization": "Bearer new"}))
+        raw = await db.llm_configs.find_one({"id": cfg_id})
+        assert "Bearer new" not in str(raw["headers"])
+        assert (await repo.get_by_id(cfg_id)).headers == {"Authorization": "Bearer new"}
+
+    async def test_legacy_plaintext_headers_are_read_and_reencrypted(
+        self, db: AsyncIOMotorDatabase
+    ) -> None:
+        repo, cfg_id = await self._with_headers(db)
+        await db.llm_configs.update_one(
+            {"id": cfg_id}, {"$set": {"headers": {"api-key": "legacy-plain"}}}
+        )
+        assert (await repo.get_by_id(cfg_id)).headers == {"api-key": "legacy-plain"}
+        raw = await db.llm_configs.find_one({"id": cfg_id})
+        assert raw["headers"]["api-key"].startswith("fernet:")
+
+    async def test_endpoint_change_clears_headers(self, db: AsyncIOMotorDatabase) -> None:
+        repo, cfg_id = await self._with_headers(db)
+        updated = await repo.update(
+            cfg_id, LLMConfigUpdate(api_endpoint="https://attacker.example/v1/chat")
+        )
+        assert updated.headers == {}
+        assert updated.api_key_encrypted == ""
+
+    async def test_provider_change_clears_headers(self, db: AsyncIOMotorDatabase) -> None:
+        repo, cfg_id = await self._with_headers(db)
+        updated = await repo.update(cfg_id, LLMConfigUpdate(request_format="anthropic"))
+        assert updated.headers == {}
+
+    async def test_masked_values_do_not_follow_an_endpoint_change(
+        self, db: AsyncIOMotorDatabase
+    ) -> None:
+        """The viewer sends masked values back; on a new destination they
+        are dropped, while newly typed values are kept."""
+        from src.llm.models import MASKED_HEADER_VALUE
+
+        repo, cfg_id = await self._with_headers(db)
+        updated = await repo.update(
+            cfg_id,
+            LLMConfigUpdate(
+                api_endpoint="https://other.example/v1/chat",
+                headers={"api-key": MASKED_HEADER_VALUE, "X-Org": "org-new"},
+            ),
+        )
+        assert updated.headers == {"X-Org": "org-new"}
+
+    async def test_unchanged_destination_keeps_headers(self, db: AsyncIOMotorDatabase) -> None:
+        repo, cfg_id = await self._with_headers(db)
+        updated = await repo.update(cfg_id, LLMConfigUpdate(name="Renamed"))
+        assert updated.headers == {"api-key": "azure-secret", "X-Org": "org-1"}
+
 
 # ---------------------------------------------------------------------------
 # delete

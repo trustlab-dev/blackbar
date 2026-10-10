@@ -268,7 +268,7 @@ class TestVerifyMagicLink:
             created_at=datetime.utcnow(),
         )
         mock_tokens_repo.get_by_email.return_value = stored_token
-        mock_tokens_repo.mark_as_used.return_value = True
+        mock_tokens_repo.consume.return_value = True
         mock_users_repo.get_by_email.return_value = sample_user
         mock_users_repo.update_last_login.return_value = True
 
@@ -280,7 +280,8 @@ class TestVerifyMagicLink:
         assert user is not None
         assert user.id == sample_user.id
         assert user.email == sample_user.email
-        mock_tokens_repo.mark_as_used.assert_called_once_with(stored_token.id)
+        # AUTH-28: consumed atomically, not find-then-mark.
+        mock_tokens_repo.consume.assert_called_once_with(stored_token.id)
         mock_users_repo.update_last_login.assert_called_once()
 
     @pytest.mark.asyncio
@@ -420,7 +421,7 @@ class TestVerifyMagicLink:
         """The token exists and is valid, but the user record has been
         deleted between request_magic_link and verify_magic_link. The
         service returns None and logs an error — exercises the
-        `if not user` branch after mark_as_used (lines 156-159)."""
+        `if not user` branch."""
         token = magic_link_service.generate_token()
         token_hash = magic_link_service.hash_token(token)
         stored_token = MagicLinkToken(
@@ -432,13 +433,36 @@ class TestVerifyMagicLink:
             created_at=datetime.utcnow(),
         )
         mock_tokens_repo.get_by_email.return_value = stored_token
-        mock_tokens_repo.mark_as_used.return_value = True
         mock_users_repo.get_by_email.return_value = None  # user deleted
 
         user = await magic_link_service.verify_magic_link(token=token, email="orphan@example.com")
         assert user is None
-        # Token still gets marked used (already committed) — pins behavior.
-        mock_tokens_repo.mark_as_used.assert_called_once()
+        # The user check now runs before the token is consumed.
+        mock_tokens_repo.consume.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_verify_magic_link_lost_consume_race_returns_none(
+        self,
+        magic_link_service: MagicLinkService,
+        mock_users_repo: AsyncMock,
+        mock_tokens_repo: AsyncMock,
+        sample_user: PublicUser,
+    ) -> None:
+        token = magic_link_service.generate_token()
+        stored_token = MagicLinkToken(
+            id="token-race",
+            email=sample_user.email,
+            token_hash=magic_link_service.hash_token(token),
+            expires_at=datetime.utcnow() + timedelta(minutes=15),
+            used=False,
+            created_at=datetime.utcnow(),
+        )
+        mock_tokens_repo.get_by_email.return_value = stored_token
+        mock_tokens_repo.consume.return_value = False  # another verify won
+        mock_users_repo.get_by_email.return_value = sample_user
+
+        assert await magic_link_service.verify_magic_link(token, sample_user.email) is None
+        mock_users_repo.update_last_login.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

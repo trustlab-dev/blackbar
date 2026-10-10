@@ -9,9 +9,12 @@ route modules tractable. Mounted via include_router in documents/routes.py.
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
+from src.utils.filenames import NO_STORE_HEADERS, content_disposition
+
 from ..core.authz import assert_document_access, check_document_access
 from ..core.database import get_database_from_request
 from ..dependencies import check_role, get_current_user
+from .redaction_store import load_document_pdf
 
 router = APIRouter()
 
@@ -96,18 +99,19 @@ async def get_attachment(
     if not attachment:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    # Create a response with the appropriate content type
-    content = attachment["content"]
-    filename = attachment["filename"]
-    mime_type = attachment.get("mime_type", "application/octet-stream")
+    # Current uploads keep the bytes in GridFS; ``content`` is legacy (DOC-12).
+    content = await load_document_pdf(attachment, db)
+    if not content:
+        raise HTTPException(status_code=404, detail="Attachment content not found")
 
-    response = Response(
+    return Response(
         content=content,
-        media_type=mime_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        media_type=attachment.get("mime_type") or "application/octet-stream",
+        headers={
+            "Content-Disposition": content_disposition(attachment.get("filename")),
+            **NO_STORE_HEADERS,
+        },
     )
-
-    return response
 
 
 # GET ATTACHMENT SUMMARY AND AI SUGGESTIONS

@@ -9,9 +9,10 @@ import secrets
 from datetime import datetime, timedelta
 
 import bcrypt
+from pymongo.errors import DuplicateKeyError
 
-from src.auth.security import create_access_token
-from src.public_users.models import PublicUser, PublicUserCreate
+from src.auth.security import PUBLIC_AUDIENCE, PUBLIC_ROLE, create_access_token
+from src.public_users.models import PublicUser, PublicUserCreate, PublicUserStatus
 from src.public_users.repository import MagicLinkTokensRepository, PublicUsersRepository
 from src.utils.log_utils import hash_email_for_logs
 
@@ -99,9 +100,13 @@ class MagicLinkService:
         if not user:
             # Create placeholder user (will be activated on verification)
             user_create = PublicUserCreate(email=email, name=name)
-            await self.users_repo.create(user_create)
-            email_hash = hash_email_for_logs(email)
-            logger.info(f"Created new public user for {email_hash}")
+            try:
+                await self.users_repo.create(user_create)
+                logger.info(f"Created new public user for {hash_email_for_logs(email)}")
+            except DuplicateKeyError:
+                # A concurrent first request created the user (unique index
+                # on public_users.email); nothing to do.
+                pass
 
         email_hash = hash_email_for_logs(email)
         logger.info(f"Magic link requested for {email_hash}")
@@ -140,14 +145,21 @@ class MagicLinkService:
             logger.warning(f"Token already used for {email_hash}")
             return None
 
-        # Mark token as used
-        await self.tokens_repo.mark_as_used(stored_token.id)
-
         # Get user
         user = await self.users_repo.get_by_email(email)
         if not user:
             email_hash = hash_email_for_logs(email)
             logger.error(f"User not found for {email_hash}")
+            return None
+
+        if user.status == PublicUserStatus.SUSPENDED:
+            logger.warning(f"Suspended public user {user.id} attempted magic-link login")
+            return None
+
+        # Atomically consume the token: of two concurrent verifies, only one
+        # gets a session (AUTH-28).
+        if not await self.tokens_repo.consume(stored_token.id):
+            logger.warning(f"Token already consumed for {hash_email_for_logs(email)}")
             return None
 
         # Update last login
@@ -166,6 +178,8 @@ class MagicLinkService:
         - email: user email
         - realm: "public" (security boundary — prevents access to admin routes)
         - user_type: "public" (legacy field for backward compatibility)
+        - role: "public_user" and aud: "blackbar-public" so the token can
+          never be read as an internal staff token (AUTH-03)
 
         Public users get longer sessions (8 hours) since they may be
         filling out forms or reviewing documents.
@@ -175,6 +189,8 @@ class MagicLinkService:
             "email": user.email,
             "realm": "public",  # Prevents admin access
             "user_type": "public",  # Legacy field for backward compatibility
+            "role": PUBLIC_ROLE,
+            "aud": PUBLIC_AUDIENCE,
         }
 
         # Public users get 8 hour sessions (configurable via env)

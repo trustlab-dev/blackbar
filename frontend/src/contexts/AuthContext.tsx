@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { jwtDecode } from 'jwt-decode';
-import { apiClient } from '../api/client';
+import { apiClient, revokeSessionOnServer } from '../api/client';
+import { clearUser as clearTelemetryUser } from '../utils/telemetry';
 
 interface User {
   id: string;
@@ -17,6 +18,11 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  /**
+   * End the session: asks the backend to revoke the token (POST
+   * /auth/logout, fire-and-forget) and clears local auth state regardless of
+   * the outcome.
+   */
   logout: () => void;
 }
 
@@ -49,8 +55,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       fetchCurrentUser(storedToken);
     } else {
       if (storedToken) {
-        // Token exists but expired — clean up
-        logout();
+        // Token exists but expired — clean up locally; the server already
+        // refuses it, so there is nothing to revoke.
+        clearSession();
       }
       setIsLoading(false);
     }
@@ -61,7 +68,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     if (!token) return;
     const interval = setInterval(() => {
       if (isTokenExpired(token)) {
-        logout();
+        clearSession();
       }
     }, 60_000);
     return () => clearInterval(interval);
@@ -83,7 +90,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       }
     } catch (error) {
       console.error('[AuthContext] Failed to fetch current user:', error);
-      logout();
+      clearSession();
     } finally {
       setIsLoading(false);
     }
@@ -108,17 +115,16 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       await fetchCurrentUser(access_token);
     } catch (error: any) {
       // Phase 4 Batch 4.4 (audit F1): re-throw the underlying axios
-      // error so callers (e.g. `Login.tsx`) can inspect
-      // `err.response?.data?.error?.message` /
-      // `err.response?.data?.detail` and show backend-specific
-      // messages. The previous `throw new Error(...)` flattened the
+      // error so callers (e.g. `Login.tsx`) can pass it to
+      // `getApiErrorMessage` and show backend-specific messages. The previous `throw new Error(...)` flattened the
       // error and made `Login.tsx`'s fallback branches unreachable.
       console.error('Login failed:', error);
       throw error;
     }
   };
 
-  const logout = () => {
+  /** Forget the session locally (state, localStorage, telemetry user). */
+  const clearSession = () => {
     setUser(null);
     setToken(null);
     setRoles([]);
@@ -128,6 +134,18 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       'user', 'user_type', 'magic_link_email', 'dev_current_user'
     ];
     authKeys.forEach(key => localStorage.removeItem(key));
+    clearTelemetryUser();
+  };
+
+  const logout = () => {
+    // Read the token before clearing: revocation needs it, and the local
+    // clear must happen whatever the server says.
+    const current = token ?? localStorage.getItem('token');
+    // Magic-link sessions cannot call the staff logout route (403).
+    if (localStorage.getItem('user_type') !== 'public') {
+      revokeSessionOnServer(current);
+    }
+    clearSession();
   };
 
   const value: AuthContextType = {
@@ -142,6 +160,12 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
+
+/**
+ * Like useAuth, but returns undefined outside an AuthProvider instead of
+ * throwing. For components that are also rendered standalone (tests, embeds).
+ */
+export const useOptionalAuth = (): AuthContextType | undefined => useContext(AuthContext);
 
 export const useAuth = (): AuthContextType => {
   const context = useContext(AuthContext);

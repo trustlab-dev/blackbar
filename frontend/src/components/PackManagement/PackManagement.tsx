@@ -16,6 +16,7 @@ import PackCard from './PackCard';
 import PackDetailsModal from './PackDetailsModal';
 import PackUploader from './PackUploader';
 import './PackManagement.css';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface Pack {
   pack_id: string;
@@ -79,7 +80,7 @@ const PackManagement: React.FC = () => {
       setPacks(response.data.packs || []);
     } catch (err: any) {
       console.error('Error fetching packs:', err);
-      setError(err.response?.data?.detail || 'Failed to load packs');
+      setError(getApiErrorMessage(err, 'Failed to load packs'));
     } finally {
       setLoading(false);
     }
@@ -102,7 +103,7 @@ const PackManagement: React.FC = () => {
       setTimeout(() => setSuccess(null), 5000);
     } catch (err: any) {
       console.error('Error activating pack:', err);
-      setError(err.response?.data?.detail || 'Failed to activate pack');
+      setError(getApiErrorMessage(err, 'Failed to activate pack'));
     } finally {
       setActivating(null);
     }
@@ -129,7 +130,7 @@ const PackManagement: React.FC = () => {
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
       console.error('Error reloading packs:', err);
-      setError(err.response?.data?.detail || 'Failed to reload packs');
+      setError(getApiErrorMessage(err, 'Failed to reload packs'));
     }
   };
 

@@ -8,8 +8,11 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from src.auth import security
 from src.auth.activation_service import ActivationService
+from src.auth.audit import record_auth_event
 from src.core.dependencies import get_correlation_id
+from src.core.rate_limit import AUTH_TOKEN_LIMIT, limiter
 from src.database import db
 from src.users.repository import UsersRepository
 
@@ -25,8 +28,11 @@ class ActivateAccountRequest(BaseModel):
     token: str = Field(..., description="Activation token from welcome email")
     password: str = Field(
         ...,
-        min_length=8,
-        description="New password (min 8 chars, must include uppercase, lowercase, digit, and special character)",
+        description=(
+            f"New password (min {security.MIN_PASSWORD_LENGTH} chars, max "
+            f"{security.BCRYPT_MAX_PASSWORD_BYTES} bytes, must include uppercase, "
+            "lowercase, digit, and special character)"
+        ),
     )
 
     @field_validator("password")
@@ -34,6 +40,9 @@ class ActivateAccountRequest(BaseModel):
     def validate_password_complexity(cls, v):
         import re
 
+        problem = security.password_policy_error(v)
+        if problem:
+            raise ValueError(problem)
         if not re.search(r"[A-Z]", v):
             raise ValueError("Password must contain at least one uppercase letter")
         if not re.search(r"[a-z]", v):
@@ -54,6 +63,7 @@ class ActivateAccountResponse(BaseModel):
 
 
 @router.post("/activate-owner", response_model=ActivateAccountResponse)
+@limiter.limit(AUTH_TOKEN_LIMIT)
 async def activate_owner_account(request: Request, activation_data: ActivateAccountRequest):
     """
     Activate org owner account with token and set password
@@ -76,7 +86,12 @@ async def activate_owner_account(request: Request, activation_data: ActivateAcco
             "Account activation failed for email",
             extra={"correlation_id": get_correlation_id(request)},
         )
+        await record_auth_event(db, "account_activation_failed", request=request, success=False)
         raise HTTPException(status_code=400, detail="Invalid or expired activation token")
+
+    await record_auth_event(
+        db, "account_activated", request=request, actor_id=user.id, target_id=user.id
+    )
 
     logger.info(
         f"Account activated successfully: {user.id}",

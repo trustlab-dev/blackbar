@@ -107,8 +107,16 @@ def _issue_public_jwt(user_id: str, email: str) -> str:
     return pyjwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
 
 
-async def _public_client(app, user_id: str, email: str) -> AsyncClient:
-    """AsyncClient pre-authenticated with a public-user JWT."""
+async def _public_client(app, db, user_id: str, email: str) -> AsyncClient:
+    """AsyncClient pre-authenticated with a public-user JWT.
+
+    Also upserts the matching `public_users` record: public routes refuse
+    sessions whose account is missing or suspended (AUTH-28)."""
+    await db.public_users.update_one(
+        {"_id": user_id},
+        {"$set": {"email": email, "status": "active"}},
+        upsert=True,
+    )
     token = _issue_public_jwt(user_id, email)
     return AsyncClient(
         transport=ASGITransport(app=app),
@@ -257,6 +265,10 @@ class TestTrackPublicRequest:
         tracking = "FOI-2026-0001-AB"
         doc = make_case(
             tracking_number=tracking,
+            # Only public-portal cases are trackable (AUTH-05).
+            source="public_portal",
+            created_by="system",
+            received_date=datetime.utcnow(),
             status="in_progress",
             comments=[
                 {
@@ -345,7 +357,7 @@ class TestGetMyRequests:
             )
         )
 
-        client = await _public_client(app, "user-1", "me@example.com")
+        client = await _public_client(app, db, "user-1", "me@example.com")
         try:
             r = await client.get("/api/v1/cases/public/my-requests")
         finally:
@@ -363,7 +375,7 @@ class TestGetMyRequests:
         app,
         patch_public_routes_db,
     ) -> None:
-        client = await _public_client(app, "user-empty", "empty@example.com")
+        client = await _public_client(app, db, "user-empty", "empty@example.com")
         try:
             r = await client.get("/api/v1/cases/public/my-requests")
         finally:
@@ -460,7 +472,7 @@ class TestGetRequestDetails:
             }
         )
 
-        client = await _public_client(app, "user-1", "me@example.com")
+        client = await _public_client(app, db, "user-1", "me@example.com")
         try:
             r = await client.get(f"/api/v1/cases/public/{case['id']}")
         finally:
@@ -483,7 +495,7 @@ class TestGetRequestDetails:
         """The route used to return 400 for malformed ObjectIds; now it
         accepts any string and returns 404 when no case matches that id
         for the authenticated requester."""
-        client = await _public_client(app, "u", "me@example.com")
+        client = await _public_client(app, patch_public_routes_db, "u", "me@example.com")
         try:
             r = await client.get("/api/v1/cases/public/not-a-valid-uuid")
         finally:
@@ -509,7 +521,7 @@ class TestGetRequestDetails:
         )
         await db.cases.insert_one(case)
 
-        client = await _public_client(app, "u", "intruder@example.com")
+        client = await _public_client(app, db, "u", "intruder@example.com")
         try:
             r = await client.get(f"/api/v1/cases/public/{case['id']}")
         finally:
@@ -542,7 +554,7 @@ class TestGetRequestDetails:
         case["updated_at"] = datetime.utcnow()  # mixed — also legitimate
         await db.cases.insert_one(case)
 
-        client = await _public_client(app, "u", "me@example.com")
+        client = await _public_client(app, db, "u", "me@example.com")
         try:
             r = await client.get(f"/api/v1/cases/public/{case['id']}")
         finally:
@@ -587,7 +599,7 @@ class TestGetRequestDetails:
             }
         )
 
-        client = await _public_client(app, "u", "me@example.com")
+        client = await _public_client(app, db, "u", "me@example.com")
         try:
             r = await client.get(f"/api/v1/cases/public/{case['id']}")
         finally:
@@ -627,7 +639,7 @@ class TestGetRequestDetails:
             }
         )
 
-        client = await _public_client(app, "u", "me@example.com")
+        client = await _public_client(app, db, "u", "me@example.com")
         try:
             r = await client.get(f"/api/v1/cases/public/{case['id']}")
         finally:
@@ -664,7 +676,7 @@ class TestGetRequestDetails:
             }
         )
 
-        client = await _public_client(app, "u", "me@example.com")
+        client = await _public_client(app, db, "u", "me@example.com")
         try:
             r = await client.get(f"/api/v1/cases/public/{case['id']}")
         finally:
@@ -705,7 +717,7 @@ class TestGetRequestDetails:
             }
         )
 
-        client = await _public_client(app, "u", "me@example.com")
+        client = await _public_client(app, db, "u", "me@example.com")
         try:
             r = await client.get(f"/api/v1/cases/public/{case['id']}")
         finally:
@@ -739,7 +751,7 @@ class TestGetRequestSummary:
                 )
             )
 
-        client = await _public_client(app, "u", "me@example.com")
+        client = await _public_client(app, db, "u", "me@example.com")
         try:
             r = await client.get("/api/v1/cases/public/stats/summary")
         finally:
@@ -758,7 +770,7 @@ class TestGetRequestSummary:
         app,
         patch_public_routes_db,
     ) -> None:
-        client = await _public_client(app, "u", "nobody@example.com")
+        client = await _public_client(app, db, "u", "nobody@example.com")
         try:
             r = await client.get("/api/v1/cases/public/stats/summary")
         finally:

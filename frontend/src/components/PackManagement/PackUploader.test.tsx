@@ -193,7 +193,7 @@ describe('PackUploader', () => {
     );
     mockUploadResponse({
       ok: false,
-      error: { response: { data: { detail: 'upload boom' }, status: 500 } },
+      error: { response: { data: { error: { message: 'upload boom' } }, status: 400 } },
     });
     const user = userEvent.setup();
     renderWithProviders(

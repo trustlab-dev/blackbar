@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { server } from './test-utils/msw-handlers';
+import userEvent from '@testing-library/user-event';
 
 // App.tsx is the root BrowserRouter + route table. It is mostly JSX route
 // declarations, so this is a shallow smoke suite: every heavy child is
@@ -77,8 +78,13 @@ vi.mock('./components/ProtectedRoute', () => ({
 vi.mock('./components/public/ContributorPortal', () => ({
   default: () => <div data-testid="contributor-portal" />,
 }));
+vi.mock('./utils/telemetry', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/telemetry')>()),
+  syncReplayWithRoute: vi.fn(),
+}));
 
 import App from './App';
+import { syncReplayWithRoute } from './utils/telemetry';
 
 /**
  * App owns its own BrowserRouter, so route is driven via window.history
@@ -162,6 +168,35 @@ describe('App — public routes', () => {
   it('renders the contributor portal at /contribute/:contributorId', () => {
     renderAppAt('/contribute/contrib-1');
     expect(screen.getByTestId('contributor-portal')).toBeInTheDocument();
+  });
+});
+
+describe('App — token-stripped capability routes (refresh after the token left the URL)', () => {
+  it('renders the verify page at /public/verify with no token', () => {
+    renderAppAt('/public/verify');
+    expect(screen.getByTestId('public-verify-page')).toBeInTheDocument();
+  });
+
+  it('renders the contributor portal at /contribute with no id', () => {
+    renderAppAt('/contribute');
+    expect(screen.getByTestId('contributor-portal')).toBeInTheDocument();
+  });
+
+  it('renders the tracking page at /track with no number', async () => {
+    renderAppAt('/track');
+    expect(await screen.findByTestId('public-tracking-page')).toBeInTheDocument();
+  });
+
+  it('renders the upload portal at /collect with no token', async () => {
+    renderAppAt('/collect');
+    expect(await screen.findByTestId('public-upload-portal')).toBeInTheDocument();
+  });
+});
+
+describe('App — Session Replay follows the route', () => {
+  it('reports each route to the replay gate', () => {
+    renderAppAt('/collect/tok-1');
+    expect(syncReplayWithRoute).toHaveBeenCalledWith('/collect/tok-1');
   });
 });
 
@@ -318,5 +353,67 @@ describe('App — root redirect (unauthenticated)', () => {
     );
     // Public-login portal should NOT have been transiently mounted.
     expect(screen.queryByTestId('public-login-page')).not.toBeInTheDocument();
+  });
+});
+
+describe('App — public (magic-link) sessions stay off staff routes', () => {
+  beforeEach(() => {
+    localStorage.setItem('token', 'public-tok');
+    localStorage.setItem('user_type', 'public');
+  });
+
+  it.each(['/cases', '/queue', '/shared', '/help', '/cases/case-1', '/documents/doc-1'])(
+    'sends a public session at %s to the public dashboard, not a staff page',
+    (path) => {
+      renderAppAt(path);
+      expect(screen.getByTestId('public-dashboard-page')).toBeInTheDocument();
+      expect(screen.queryByTestId('case-queue')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('login')).not.toBeInTheDocument();
+    },
+  );
+
+  it('sends a public session at /admin to the public dashboard', () => {
+    renderAppAt('/admin');
+    expect(screen.getByTestId('public-dashboard-page')).toBeInTheDocument();
+    expect(screen.queryByTestId('admin-console')).not.toBeInTheDocument();
+  });
+});
+
+describe('App — header logout', () => {
+  function makeJwt(secondsFromNow: number): string {
+    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+    const payload = btoa(
+      JSON.stringify({ sub: 'user-1', exp: Math.floor(Date.now() / 1000) + secondsFromNow }),
+    );
+    return `${header}.${payload}.sig`;
+  }
+
+  it('revokes the session server-side and clears local storage', async () => {
+    const token = makeJwt(3600);
+    localStorage.setItem('token', token);
+    server.use(
+      http.get('/api/v1/auth/me', () =>
+        HttpResponse.json({ id: 'user-1', email: 'a@b.com', name: 'Alice', roles: ['analyst'] }),
+      ),
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const user = userEvent.setup();
+
+    renderAppAt('/cases');
+    await screen.findAllByText(/Alice/);
+    const buttons = document.querySelectorAll('header button');
+    await user.click(buttons[buttons.length - 1] as HTMLElement);
+    await user.click(await screen.findByRole('menuitem', { name: /logout/i }));
+
+    const logoutCalls = fetchSpy.mock.calls.filter(([u]) => String(u).endsWith('/auth/logout'));
+    expect(logoutCalls).toHaveLength(1);
+    expect(logoutCalls[0][1]).toMatchObject({
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(localStorage.getItem('token')).toBeNull();
   });
 });

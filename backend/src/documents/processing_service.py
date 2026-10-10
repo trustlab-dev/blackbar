@@ -26,8 +26,11 @@ Usage:
     )
 """
 
+import asyncio
 import logging
 import os
+import re
+import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -37,15 +40,16 @@ from pathlib import Path
 from typing import Any
 
 import gridfs
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException, UploadFile
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import MongoClient
 
-from src.config import MONGODB_URI
+from src.config import MAX_UPLOAD_SIZE_MB, MONGODB_URI
 from src.utils.conversion import (
     calculate_file_hash,
     convert_to_pdf,
 )
+from src.utils.pdf_limits import PdfLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +96,156 @@ ALLOWED_MIME_TYPES = {
     "image/webp",
 }
 
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_FILE_SIZE = MAX_UPLOAD_SIZE_MB * 1024 * 1024  # MAX_UPLOAD_SIZE_MB, default 100
+
+# Server-side MIME type for each accepted extension. Used for records whose
+# conversion failed (so native bytes are never labelled application/pdf) and
+# for the GridFS copy of originals, instead of trusting the client's header.
+EXTENSION_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".eml": "message/rfc822",
+    ".msg": "application/vnd.ms-outlook",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+    ".webp": "image/webp",
+}
+
+# Status for a record whose conversion failed. The release package builder
+# only includes documents whose status is "approved" or "released".
+CONVERSION_FAILED_STATUS = "conversion_failed"
+
+
+# =============================================================================
+# Upload reading and content sniffing (DOC-11)
+# =============================================================================
+
+UPLOAD_READ_CHUNK = 1024 * 1024  # 1MB
+
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06")
+_BINARY_MAGICS = (
+    b"%PDF-",
+    *_ZIP_MAGICS,
+    _OLE_MAGIC,
+    b"\x89PNG",
+    b"\xff\xd8\xff",
+    b"GIF8",
+    b"II*\x00",
+    b"MM\x00*",
+    b"RIFF",
+)
+# RFC 5322 field name (printable ASCII except ":"), then a colon.
+_HEADER_LINE_RE = re.compile(rb"^[!-9;-~]+[ \t]*:")
+_KNOWN_EMAIL_HEADER_RE = re.compile(
+    rb"^(?:from|to|cc|subject|date|message-id|received|return-path|mime-version"
+    rb"|content-type|reply-to|sender|delivered-to|in-reply-to|references)[ \t]*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _looks_like_email(content: bytes) -> bool:
+    head = content[:16384]
+    if b"\x00" in head or head.startswith(_BINARY_MAGICS):
+        return False
+    lines = head.lstrip(b"\xef\xbb\xbf\r\n\t ").splitlines()
+    if lines and lines[0].startswith(b"From "):  # mbox separator line
+        lines = lines[1:]
+    if not lines or not _HEADER_LINE_RE.match(lines[0]):
+        return False
+    header_block = []
+    for line in lines:
+        if not line.strip():
+            break
+        header_block.append(line)
+    return bool(_KNOWN_EMAIL_HEADER_RE.search(b"\n".join(header_block)))
+
+
+_CONTENT_SNIFFERS = {
+    ".pdf": lambda c: b"%PDF-" in c[:1024],
+    ".docx": lambda c: c.startswith(_ZIP_MAGICS),
+    ".xlsx": lambda c: c.startswith(_ZIP_MAGICS),
+    ".pptx": lambda c: c.startswith(_ZIP_MAGICS),
+    ".doc": lambda c: c.startswith(_OLE_MAGIC),
+    ".xls": lambda c: c.startswith(_OLE_MAGIC),
+    ".ppt": lambda c: c.startswith(_OLE_MAGIC),
+    ".msg": lambda c: c.startswith(_OLE_MAGIC),
+    ".eml": _looks_like_email,
+    ".jpg": lambda c: c.startswith(b"\xff\xd8\xff"),
+    ".jpeg": lambda c: c.startswith(b"\xff\xd8\xff"),
+    ".png": lambda c: c.startswith(b"\x89PNG\r\n\x1a\n"),
+    ".gif": lambda c: c.startswith((b"GIF87a", b"GIF89a")),
+    ".bmp": lambda c: c.startswith(b"BM"),
+    ".tif": lambda c: c.startswith((b"II*\x00", b"MM\x00*")),
+    ".tiff": lambda c: c.startswith((b"II*\x00", b"MM\x00*")),
+    ".webp": lambda c: c[:4] == b"RIFF" and c[8:12] == b"WEBP",
+}
+
+
+CONTENT_MISMATCH_ERROR = "File content does not match its file type."
+
+# Attachments with these extensions go to LibreOffice, which picks its import
+# filter from the content, so they are content-checked before conversion.
+# Images and PDFs are decoded by Pillow and PyMuPDF from their content.
+_LIBREOFFICE_EXTENSIONS = frozenset({".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"})
+
+
+def content_matches_extension(filename: str, content: bytes) -> bool | None:
+    """Check the file's leading bytes against the type its extension claims.
+
+    Returns None for extensions outside the upload allow-list (the
+    processing service rejects those with its own validation error).
+    """
+    sniffer = _CONTENT_SNIFFERS.get(Path(filename or "").suffix.lower())
+    if sniffer is None:
+        return None
+    return bool(sniffer(content))
+
+
+async def read_upload_capped(upload: UploadFile, max_bytes: int | None = None) -> bytes:
+    """Read an upload in chunks, rejecting it (413) as soon as it exceeds the
+    limit instead of buffering the whole body first."""
+    limit = MAX_FILE_SIZE if max_bytes is None else max_bytes
+    too_large = HTTPException(
+        status_code=413,
+        detail=f"File too large. Maximum size: {limit // (1024 * 1024)}MB",
+    )
+    declared = getattr(upload, "size", None)
+    if isinstance(declared, int) and declared > limit:
+        raise too_large
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(UPLOAD_READ_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise too_large
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def read_verified_upload(upload: UploadFile) -> bytes:
+    """Shared entry for every upload route: size-capped read plus a
+    magic-byte check that the content matches the claimed file type (415)."""
+    content = await read_upload_capped(upload)
+    if content_matches_extension(upload.filename or "", content) is False:
+        raise HTTPException(
+            status_code=415,
+            detail=CONTENT_MISMATCH_ERROR,
+        )
+    return content
 
 
 # =============================================================================
@@ -135,6 +288,9 @@ class ProcessingResult:
     # Warnings/errors
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    # HTTP status the upload routes should use for VALIDATION_FAILED
+    # (None means 400); 413 when the file exceeds a processing limit.
+    http_status: int | None = None
 
 
 @dataclass
@@ -165,6 +321,54 @@ class UploadContext:
 # =============================================================================
 
 
+# Forwarded messages inside forwarded messages are processed this many
+# levels deep; deeper attachments are listed in attachment_errors (I8).
+MAX_ATTACHMENT_DEPTH = 5
+
+# Text kept in a document record's text_data, which lives inside the 16 MB
+# MongoDB document; word boxes take up to ~240 KB per dense page (#78).
+MAX_TEXT_DATA_PAGES = 50
+MAX_FULL_TEXT_CHARS = 500_000
+
+
+def _truncation_warning(filename: str, stored_pages: int, total_pages: int) -> str:
+    if stored_pages >= total_pages:
+        return (
+            f"{filename}: only the first {MAX_FULL_TEXT_CHARS:,} characters of text are "
+            "stored (storage limit). The rest gets no redaction suggestions and cannot "
+            "be searched; review it by eye."
+        )
+    if stored_pages == 0:
+        kept = "no page's text is stored"
+    elif stored_pages == 1:
+        kept = f"text is stored for page 1 of {total_pages} only"
+    else:
+        kept = f"text is stored for pages 1-{stored_pages} of {total_pages} only"
+    first_missing = stored_pages + 1
+    missing = (
+        f"Page {total_pages} gets"
+        if first_missing == total_pages
+        else f"Pages {first_missing}-{total_pages} get"
+    )
+    return (
+        f"{filename}: {kept} (storage limit). {missing} no redaction suggestions and "
+        "cannot be searched; review them by eye."
+    )
+
+
+def _ocr_failure_warning(filename: str, pages: list[int]) -> str:
+    listed = ", ".join(str(p) for p in pages)
+    if len(pages) == 1:
+        return (
+            f"{filename}: OCR failed on page {listed}. That page has no text, so it gets "
+            "no redaction suggestions and cannot be searched; review it by eye."
+        )
+    return (
+        f"{filename}: OCR failed on pages {listed}. Those pages have no text, so they get "
+        "no redaction suggestions and cannot be searched; review them by eye."
+    )
+
+
 class DocumentProcessingService:
     """
     Centralized document processing service.
@@ -183,7 +387,14 @@ class DocumentProcessingService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.temp_dir = tempfile.mkdtemp(prefix="blackbar_uploads_")
-        os.makedirs(self.temp_dir, exist_ok=True)
+        self.attachment_errors: list[dict[str, str]] = []
+        # Pages left without text (OCR failed #79, not stored #78), per
+        # file, for the upload warnings.
+        self.text_warnings: list[str] = []
+
+    def cleanup(self) -> None:
+        """Remove the work directory (converted PDFs, extracted attachments)."""
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def process_upload(
         self,
@@ -206,6 +417,28 @@ class DocumentProcessingService:
         Returns:
             ProcessingResult with document ID and processing status
         """
+        if not os.path.isdir(self.temp_dir):
+            # Instance reused after a previous upload cleaned up.
+            self.temp_dir = tempfile.mkdtemp(prefix="blackbar_uploads_")
+        self.attachment_errors = []
+        self.text_warnings = []
+        try:
+            return await self._process_upload(
+                file_content, filename, content_type, context, background_tasks
+            )
+        finally:
+            # Unredacted originals and conversions must not outlive the
+            # request (DOC-14).
+            self.cleanup()
+
+    async def _process_upload(
+        self,
+        file_content: bytes,
+        filename: str,
+        content_type: str | None,
+        context: UploadContext,
+        background_tasks: BackgroundTasks | None,
+    ) -> ProcessingResult:
         result = ProcessingResult(status=ProcessingStatus.SUCCESS)
 
         try:
@@ -236,15 +469,23 @@ class DocumentProcessingService:
 
             # Step 4: Convert to PDF
             ext = Path(filename).suffix.lower()
-            conversion_result = await self._convert_to_pdf(file_content, filename, ext)
+            try:
+                conversion_result = await self._convert_to_pdf(file_content, filename, ext)
+            except PdfLimitExceeded as exc:
+                return self._limit_exceeded(result, filename, exc)
+
+            original_mime = EXTENSION_MIME_TYPES.get(ext, "application/octet-stream")
 
             if not conversion_result["success"]:
                 result.status = ProcessingStatus.CONVERSION_FAILED
                 result.error = conversion_result.get("error", "Conversion failed")
                 result.message = f"Failed to convert {filename}"
                 result.warnings.append(conversion_result.get("error", "Unknown conversion error"))
-                # Still create document record for manual processing
+                # Still create document record for manual processing, but
+                # never label the native bytes as a PDF (DOC-19).
                 conversion_result["pdf_content"] = None
+                conversion_result["mime_type"] = original_mime
+                conversion_result["final_filename"] = filename
 
             pdf_content = conversion_result.get("pdf_content")
             final_filename = conversion_result.get("final_filename", filename)
@@ -253,9 +494,12 @@ class DocumentProcessingService:
             extracted_text = conversion_result.get("extracted_text")
             attachments = conversion_result.get("attachments", [])
 
-            result.conversion_status = (
-                "converted" if pdf_content and ext != ".pdf" else "not_needed"
-            )
+            if not conversion_result["success"]:
+                result.conversion_status = "failed"
+            else:
+                result.conversion_status = (
+                    "converted" if pdf_content and ext != ".pdf" else "not_needed"
+                )
 
             # Step 5: Check for duplicate email by message_id
             if message_id and ext in [".eml", ".msg"]:
@@ -283,19 +527,32 @@ class DocumentProcessingService:
             text_data = None
             text_summary = None
             if pdf_content:
-                text_data, text_summary = await self._extract_text(pdf_content, filename)
+                try:
+                    text_data, text_summary = await self._extract_text(pdf_content, filename)
+                except PdfLimitExceeded as exc:
+                    return self._limit_exceeded(result, filename, exc)
                 result.has_ocr = text_data is not None
+            # Bulk search reads extracted_text; direct PDF uploads only have
+            # the OCR/native text layer (DOC-12).
+            if not extracted_text and text_data:
+                extracted_text = text_data.get("full_text") or None
 
             # Step 7: AI summary generation (respects org settings)
             summary = None
             if pdf_content:
-                summary = await self._generate_summary(pdf_content, final_filename, mime_type)
+                # pdf_content is always a PDF (emails are rendered to one);
+                # the summary reuses the text extracted above (DOC-09).
+                summary = await self._generate_summary(
+                    pdf_content, final_filename, "application/pdf", extracted_text
+                )
                 result.has_ai_summary = summary is not None
 
             # Step 8: Store files in GridFS
             gridfs_ids = await self._store_in_gridfs(
-                file_content, pdf_content, filename, final_filename, content_type, ext
+                file_content, pdf_content, filename, final_filename, original_mime, ext
             )
+            if not gridfs_ids.get("content_file_id"):
+                raise RuntimeError(f"Document storage failed for {filename}")
 
             # Step 9: Create document record
             document_id = str(uuid.uuid4())
@@ -317,15 +574,32 @@ class DocumentProcessingService:
                 conversion_result=conversion_result,
             )
 
-            # Step 10: Process attachments
+            # Step 10: Process attachments. Those the converter could not
+            # extract are reported alongside the ones that fail here (#80).
             attachment_docs = []
+            if context.process_attachments:
+                for dropped in conversion_result.get("dropped_attachments") or []:
+                    self._record_attachment_error(dropped["filename"], dropped["error"])
             if attachments and context.process_attachments:
+                # Includes attachments of forwarded/embedded messages (I8);
+                # the email lists its direct children.
                 attachment_docs = await self._process_attachments(attachments, document_id, context)
-                document["attachment_ids"] = [a["id"] for a in attachment_docs]
-                document["has_attachments"] = len(attachment_docs) > 0
-                document["total_attachments"] = len(attachment_docs)
+                document["attachment_ids"] = [
+                    a["id"]
+                    for a in attachment_docs
+                    if a.get("parent_document_id", document_id) == document_id
+                ]
+                document["has_attachments"] = len(document["attachment_ids"]) > 0
+                document["total_attachments"] = len(document["attachment_ids"])
                 result.attachment_count = len(attachment_docs)
-                result.attachment_ids = document["attachment_ids"]
+                result.attachment_ids = [a["id"] for a in attachment_docs]
+            if self.attachment_errors:
+                document["attachment_errors"] = list(self.attachment_errors)
+                result.warnings.extend(
+                    f"Attachment {e['filename']} was not processed: {e['error']}"
+                    for e in self.attachment_errors
+                )
+            result.warnings.extend(self.text_warnings)
 
             # Step 11: Insert document
             await self.db.documents.insert_one(document)
@@ -344,7 +618,9 @@ class DocumentProcessingService:
 
             # Step 14: Email thread consolidation
             if ext in [".eml", ".msg"] and context.consolidate_email_threads:
-                thread_result = await self._consolidate_email_thread(document, context.case_id)
+                thread_result = await self._consolidate_email_thread(
+                    document, context.case_id, result.warnings
+                )
                 if thread_result:
                     result.thread_consolidation = thread_result
 
@@ -364,6 +640,20 @@ class DocumentProcessingService:
             result.error = str(e)
             result.message = f"Error processing document: {str(e)}"
             return result
+
+    @staticmethod
+    def _limit_exceeded(
+        result: ProcessingResult, filename: str, exc: PdfLimitExceeded
+    ) -> ProcessingResult:
+        """Reject rather than store a document no later step (redaction,
+        release) can process (DOC-09)."""
+        message = f"{filename} exceeds a processing limit: {exc}"
+        logger.warning(message)
+        result.status = ProcessingStatus.VALIDATION_FAILED
+        result.error = message
+        result.message = message
+        result.http_status = 413
+        return result
 
     # =========================================================================
     # Validation
@@ -418,6 +708,7 @@ class DocumentProcessingService:
             "message_id": None,
             "extracted_text": None,
             "attachments": [],
+            "dropped_attachments": [],
             "error": None,
         }
 
@@ -434,7 +725,9 @@ class DocumentProcessingService:
                 f.write(content)
 
             try:
-                conversion = convert_to_pdf(temp_input, self.temp_dir)
+                # LibreOffice and OCR block for seconds to minutes: keep them
+                # off the event loop (DOC-09).
+                conversion = await asyncio.to_thread(convert_to_pdf, temp_input, self.temp_dir)
 
                 if conversion["success"]:
                     with open(conversion["pdf_path"], "rb") as f:
@@ -445,8 +738,10 @@ class DocumentProcessingService:
                     result["final_filename"] = f"{original_name}{ext}.pdf"
                     result["success"] = True
                     result["message_id"] = conversion.get("message_id")
+                    result["thread_headers"] = conversion.get("thread_headers")
                     result["extracted_text"] = conversion.get("extracted_text")
                     result["attachments"] = conversion.get("attachments", [])
+                    result["dropped_attachments"] = conversion.get("dropped_attachments") or []
 
                     # Set appropriate MIME type for emails
                     if ext == ".eml":
@@ -463,6 +758,8 @@ class DocumentProcessingService:
 
             return result
 
+        except PdfLimitExceeded:
+            raise
         except Exception as e:
             logger.error(f"Conversion error for {filename}: {str(e)}")
             result["error"] = str(e)
@@ -485,21 +782,42 @@ class DocumentProcessingService:
             logger.info(
                 f"Extracted {len(text_data.get('full_text', ''))} characters from {filename}"
             )
+            failed_pages = sorted(text_data.get("ocr_errors") or [])
+            if failed_pages:
+                self.text_warnings.append(_ocr_failure_warning(filename, failed_pages))
 
-            # Limit text_data to prevent MongoDB size issues
-            max_pages = 50
-            if len(text_data.get("pages", [])) > max_pages:
-                logger.warning(f"Limiting pages from {len(text_data['pages'])} to {max_pages}")
-                text_data["pages"] = text_data["pages"][:max_pages]
-                text_data["truncated"] = True
+            # text_data is stored inside the document record, which MongoDB
+            # caps at 16 MB, so only the first pages are kept. Pages past the
+            # cut get no suggestions and are not searchable: record the first
+            # such page and warn the uploader (#78).
+            pages = text_data.get("pages") or []
+            total_pages = len(pages)
+            stored_pages = min(total_pages, MAX_TEXT_DATA_PAGES)
+            offset = 0
+            for index, page in enumerate(pages[:stored_pages]):
+                # full_text is each page's text followed by a newline.
+                offset += len(page.get("text") or "") + 1
+                if offset > MAX_FULL_TEXT_CHARS:
+                    stored_pages = index
+                    break
 
-            if len(text_data.get("full_text", "")) > 500000:
-                logger.warning("Truncating full_text to 500000 chars")
-                text_data["full_text"] = text_data["full_text"][:500000]
+            text_truncated = len(text_data.get("full_text", "")) > MAX_FULL_TEXT_CHARS
+            if stored_pages < total_pages:
+                logger.warning(
+                    f"Storing text for {stored_pages} of {total_pages} pages of {filename}"
+                )
+                text_data["pages"] = pages[:stored_pages]
+                text_data["text_missing_from_page"] = stored_pages + 1
+            if text_truncated:
+                text_data["full_text"] = text_data["full_text"][:MAX_FULL_TEXT_CHARS]
+            if stored_pages < total_pages or text_truncated:
                 text_data["truncated"] = True
+                self.text_warnings.append(_truncation_warning(filename, stored_pages, total_pages))
 
             return text_data, text_summary
 
+        except PdfLimitExceeded:
+            raise
         except Exception as e:
             logger.error(f"OCR failed for {filename}: {str(e)}")
             return None, None
@@ -509,7 +827,7 @@ class DocumentProcessingService:
     # =========================================================================
 
     async def _generate_summary(
-        self, pdf_content: bytes, filename: str, mime_type: str
+        self, pdf_content: bytes, filename: str, mime_type: str, text: str | None = None
     ) -> str | None:
         """Generate AI summary if enabled in org settings."""
         try:
@@ -522,11 +840,13 @@ class DocumentProcessingService:
                 logger.info(f"AI summary disabled, skipping for {filename}")
                 return None
 
-            summary = await generate_document_summary(pdf_content, filename, mime_type)
+            summary = await generate_document_summary(pdf_content, filename, mime_type, text)
             return summary
 
         except Exception as e:
-            logger.error(f"AI summary generation failed for {filename}: {str(e)}")
+            # Logged, not swallowed silently (LLM-18); no exception text,
+            # which can carry provider details.
+            logger.error(f"AI summary generation failed: {type(e).__name__}", exc_info=False)
             return None
 
     # =========================================================================
@@ -629,6 +949,7 @@ class DocumentProcessingService:
             "status": "new",
             "processing_status": "ocr_complete" if text_data else "pending",
             "conversion_status": "converted" if pdf_content and ext != ".pdf" else "not_needed",
+            "conversion_failed": False,
             # Relationships
             "case_id": context.case_id,
             "redactions": [],
@@ -638,6 +959,15 @@ class DocumentProcessingService:
             "uploaded_by": context.uploaded_by,
             "uploaded_by_name": context.uploaded_by_name,
         }
+
+        if not conversion_result.get("success", True):
+            # Native bytes only: keep the record out of review/release as a
+            # PDF (DOC-19). The release builder only packages documents in
+            # "approved"/"released" status.
+            document["status"] = CONVERSION_FAILED_STATUS
+            document["conversion_status"] = "failed"
+            document["conversion_failed"] = True
+            document["conversion_error"] = conversion_result.get("error")
 
         # Add contributor info if present
         if context.contributor_id:
@@ -654,13 +984,23 @@ class DocumentProcessingService:
         # Add email-specific fields
         if ext in [".eml", ".msg"]:
             document["message_id"] = message_id
+            # Threading fields parsed from the message itself (I7), never
+            # scraped from the rendered text.
+            from src.utils.email_threads import thread_identifiers_from_headers
+
+            thread_metadata = thread_identifiers_from_headers(
+                conversion_result.get("thread_headers"), message_id
+            )
+            if thread_metadata:
+                document["thread_metadata"] = thread_metadata
             if ext == ".eml":
                 document["original_mime_type"] = "message/rfc822"
             elif (
                 ext == ".msg"
             ):  # pragma: no branch  # guarded by outer `ext in [.eml,.msg]`; B23 in audit Section 11
                 document["original_mime_type"] = "application/vnd.ms-outlook"
-            document["converted_mime_type"] = "application/pdf"
+            if pdf_content:
+                document["converted_mime_type"] = "application/pdf"
 
         return document
 
@@ -669,12 +1009,25 @@ class DocumentProcessingService:
     # =========================================================================
 
     async def _process_attachments(
-        self, attachments: list[dict], parent_document_id: str, context: UploadContext
+        self,
+        attachments: list[dict],
+        parent_document_id: str,
+        context: UploadContext,
+        depth: int = 1,
+        parent_path: str = "",
     ) -> list[dict]:
-        """Process email attachments as separate documents."""
+        """Process email attachments as separate documents.
+
+        Attachments of a forwarded or embedded message (.eml/.msg child)
+        are processed too, recursively, as children of that message's
+        record (I8, DOC-18). Beyond ``MAX_ATTACHMENT_DEPTH`` levels they are
+        recorded in ``attachment_errors`` instead. Nothing is dropped
+        silently. Returns every record created, nested ones included.
+        """
         attachment_docs = []
 
         for attachment in attachments:
+            display_name = parent_path + attachment.get("filename", "attachment")
             try:
                 att_filename = attachment.get("filename", "attachment")
                 att_path = attachment.get("path")
@@ -682,16 +1035,33 @@ class DocumentProcessingService:
 
                 if not att_path or not os.path.exists(att_path):
                     logger.warning(f"Attachment file not found: {att_path}")
+                    self._record_attachment_error(display_name, "attachment file not found")
                     continue
 
                 logger.info(f"Processing attachment: {att_filename}")
 
-                # Convert attachment to PDF
-                conversion = convert_to_pdf(att_path, self.temp_dir)
+                with open(att_path, "rb") as att_f:
+                    att_original_bytes = att_f.read()
+
+                # Content-check attachments bound for LibreOffice like uploads
+                # (read_verified_upload), against the extension of the
+                # extracted file, which is what convert_to_pdf goes by.
+                if (
+                    Path(att_path).suffix.lower() in _LIBREOFFICE_EXTENSIONS
+                    and content_matches_extension(att_path, att_original_bytes) is False
+                ):
+                    self._record_attachment_error(display_name, CONTENT_MISMATCH_ERROR)
+                    continue
+
+                # Convert attachment to PDF, off the event loop (DOC-09)
+                conversion = await asyncio.to_thread(convert_to_pdf, att_path, self.temp_dir)
 
                 if not conversion["success"]:
                     logger.warning(
                         f"Could not convert attachment {att_filename}: {conversion.get('error')}"
+                    )
+                    self._record_attachment_error(
+                        display_name, conversion.get("error") or "conversion failed"
                     )
                     continue
 
@@ -702,17 +1072,16 @@ class DocumentProcessingService:
                 att_text_data, att_text_summary = await self._extract_text(
                     att_pdf_content, att_filename
                 )
+                att_extracted_text = (
+                    conversion.get("extracted_text")
+                    or (att_text_data or {}).get("full_text")
+                    or None
+                )
                 att_summary = await self._generate_summary(
-                    att_pdf_content, att_filename, "application/pdf"
+                    att_pdf_content, att_filename, "application/pdf", att_extracted_text
                 )
 
-                # Store in GridFS. Phase 4 Batch 4.4 (audit B25/B58):
-                # open() in a `with` block to release the file handle
-                # eagerly; the prior `open(att_path, "rb").read()`
-                # without a `with` left the FD open until GC.
-                with open(att_path, "rb") as att_f:
-                    att_original_bytes = att_f.read()
-
+                # Store in GridFS (original bytes read above).
                 att_gridfs = await self._store_in_gridfs(
                     att_original_bytes,
                     att_pdf_content,
@@ -728,7 +1097,10 @@ class DocumentProcessingService:
                     "id": att_id,
                     "filename": Path(att_filename).stem + ".pdf",
                     "original_filename": att_filename,
-                    "content_hash": calculate_file_hash(att_pdf_content),
+                    # Hash the original attachment bytes, not the converted
+                    # PDF, so dedup matches a direct upload of the same file
+                    # (issue #70; process_upload hashes originals too).
+                    "content_hash": calculate_file_hash(att_original_bytes),
                     "mime_type": "application/pdf",
                     "original_mime_type": att_mime,
                     "size": len(att_pdf_content),
@@ -737,9 +1109,10 @@ class DocumentProcessingService:
                     # GridFS
                     "content_file_id": att_gridfs.get("content_file_id"),
                     "original_file_id": att_gridfs.get("original_file_id"),
-                    # Text
+                    # Text (extracted_text feeds bulk search, DOC-12)
                     "text_data": att_text_data,
                     "text_summary": att_text_summary,
+                    "extracted_text": att_extracted_text,
                     "summary": att_summary,
                     # Status
                     "status": "new",
@@ -757,10 +1130,39 @@ class DocumentProcessingService:
                 attachment_docs.append(att_doc)
                 logger.info(f"Processed attachment {att_filename} -> {att_id}")
 
+                # A forwarded/embedded message has attachments of its own.
+                nested_path = f"{display_name} / "
+                for dropped in conversion.get("dropped_attachments") or []:
+                    self._record_attachment_error(
+                        nested_path + dropped["filename"], dropped["error"]
+                    )
+                nested = conversion.get("attachments") or []
+                if nested:
+                    if depth >= MAX_ATTACHMENT_DEPTH:
+                        for inner in nested:
+                            self._record_attachment_error(
+                                nested_path + inner.get("filename", "attachment"),
+                                f"nested more than {MAX_ATTACHMENT_DEPTH} messages deep; "
+                                "not extracted",
+                            )
+                    else:
+                        children = await self._process_attachments(
+                            nested, att_id, context, depth + 1, nested_path
+                        )
+                        direct = [c["id"] for c in children if c["parent_document_id"] == att_id]
+                        att_doc["attachment_ids"] = direct
+                        att_doc["has_attachments"] = bool(direct)
+                        att_doc["total_attachments"] = len(direct)
+                        attachment_docs.extend(children)
+
             except Exception as e:
                 logger.error(f"Failed to process attachment {attachment.get('filename')}: {str(e)}")
+                self._record_attachment_error(display_name, str(e))
 
         return attachment_docs
+
+    def _record_attachment_error(self, filename: str, error: str) -> None:
+        self.attachment_errors.append({"filename": filename, "error": error})
 
     async def _merge_attachments_into_email(
         self, existing_email: dict, new_attachments: list[dict], context: UploadContext
@@ -770,30 +1172,26 @@ class DocumentProcessingService:
         # but might have different/additional attachments
         merged_count = 0
 
-        existing_att_ids = existing_email.get("attachment_ids", [])
+        # An attachment the email already has is matched on name and the
+        # hash of its original bytes. The stored "size" is the converted
+        # PDF's, so it never matches a non-PDF original (issue #77).
+        existing_atts = await self.db.documents.find(
+            {"id": {"$in": existing_email.get("attachment_ids", [])}},
+            {"_id": 0, "original_filename": 1, "content_hash": 1},
+        ).to_list(length=None)
+        existing_keys = {(a.get("original_filename"), a.get("content_hash")) for a in existing_atts}
 
         for attachment in new_attachments:
             try:
-                # Check if this attachment already exists (by filename + size)
                 att_filename = attachment.get("filename")
                 att_path = attachment.get("path")
 
                 if not att_path or not os.path.exists(att_path):
                     continue
 
-                att_size = os.path.getsize(att_path)
-
-                # Check existing attachments
-                existing_atts = await self.db.documents.find(
-                    {"id": {"$in": existing_att_ids}}
-                ).to_list(length=1000)
-
-                is_duplicate = any(
-                    a.get("original_filename") == att_filename and a.get("size") == att_size
-                    for a in existing_atts
-                )
-
-                if is_duplicate:
+                with open(att_path, "rb") as f:
+                    att_hash = calculate_file_hash(f.read())
+                if (att_filename, att_hash) in existing_keys:
                     continue
 
                 # Process and add new attachment
@@ -803,7 +1201,11 @@ class DocumentProcessingService:
 
                 if att_docs:
                     await self.db.documents.insert_many(att_docs)
-                    new_ids = [a["id"] for a in att_docs]
+                    new_ids = [
+                        a["id"]
+                        for a in att_docs
+                        if a.get("parent_document_id", existing_email["id"]) == existing_email["id"]
+                    ]
 
                     await self.db.documents.update_one(
                         {"id": existing_email["id"]},
@@ -823,33 +1225,41 @@ class DocumentProcessingService:
     # Email Thread Consolidation
     # =========================================================================
 
-    async def _consolidate_email_thread(self, document: dict, case_id: str | None) -> dict | None:
-        """Consolidate email threads (find related emails, mark superseded)."""
+    async def _consolidate_email_thread(
+        self, document: dict, case_id: str | None, warnings: list[str] | None = None
+    ) -> dict | None:
+        """Consolidate email threads (find related emails, mark superseded).
+
+        A failure never fails the upload, but it is logged with the document
+        id and traceback and reported through `warnings`.
+        """
         try:
             from src.documents.routes import (
                 consolidate_email_thread,
-                extract_thread_identifiers,
                 find_thread_emails,
+                thread_identifiers_from_headers,
             )
 
-            extracted_text = document.get("extracted_text", "")
-            message_id = document.get("message_id")
-
-            if not extracted_text:
-                return None
-
-            thread_identifiers = extract_thread_identifiers(extracted_text, message_id)
+            # Identifiers come from the headers parsed off the message at
+            # conversion time (I7); the rendered text is never scraped.
+            thread_identifiers = thread_identifiers_from_headers(
+                document.get("thread_metadata"), document.get("message_id")
+            )
             if not thread_identifiers:
                 return None
 
-            # Update document with thread metadata
+            # Update document with thread metadata. The in-memory copy needs
+            # it too: consolidation orders emails by their own Date header.
+            document["thread_metadata"] = thread_identifiers
             await self.db.documents.update_one(
                 {"id": document["id"]},
                 {"$set": {"thread_metadata": thread_identifiers, "thread_status": "pending"}},
             )
 
-            # Find related emails
-            thread_emails = await find_thread_emails(self.db, thread_identifiers, case_id)
+            # Find related emails (never the new email's own record)
+            thread_emails = await find_thread_emails(
+                self.db, thread_identifiers, case_id, exclude_id=document["id"]
+            )
 
             if not thread_emails:
                 await self.db.documents.update_one(
@@ -864,7 +1274,9 @@ class DocumentProcessingService:
             return result
 
         except Exception as e:
-            logger.error(f"Email thread consolidation error: {str(e)}")
+            logger.exception(f"Email thread consolidation failed for document {document.get('id')}")
+            if warnings is not None:
+                warnings.append(f"Email thread consolidation failed: {e}")
             return None
 
     # =========================================================================
@@ -904,4 +1316,4 @@ class DocumentProcessingService:
             )
 
         except Exception as e:
-            logger.error(f"Error queuing AI processing: {str(e)}")
+            logger.error(f"Error queuing AI processing for {document_id}: {type(e).__name__}")

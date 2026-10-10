@@ -8,6 +8,7 @@ Three-step workflow:
 3. RELEASE - Publishes to public portal, sets expiration, notifies requester
 """
 
+import asyncio
 import io
 import logging
 import secrets
@@ -21,12 +22,22 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import MongoClient
 
 from src.config import MONGODB_URI
-from src.utils.pdf_redaction import apply_redactions_to_pdf
+from src.documents.redaction_store import page_sizes_from_pdf
+from src.utils.filenames import safe_basename
+from src.utils.pdf_limits import PdfLimitExceeded
+from src.utils.pdf_redaction import RedactionError, apply_redactions_to_pdf
+from src.utils.redaction_records import (
+    RedactionValidationError,
+    partition_redactions,
+    unresolved_message,
+    unresolved_summary,
+)
 from src.utils.release_package import generate_cover_letter, generate_release_summary
 
 from .release_package_models import (
     DownloadRecord,
     IncludedDocument,
+    PackageDocumentIssue,
     ReleasePackageDB,
     ReleasePackageGenerate,
     ReleasePackageRelease,
@@ -137,6 +148,61 @@ async def start_package_generation(
     return package_id, replaced_draft_id
 
 
+def _exemptions(redactions: list[dict]) -> list[str]:
+    return sorted({str(r.get("category") or "S22") for r in redactions})
+
+
+def _zip_entry_name(idx: int, filename: str | None) -> str:
+    """``NN-name.pdf`` built from a sanitised basename (DOC-21)."""
+    name = safe_basename(filename, default="document.pdf")
+    if not name.lower().endswith(".pdf"):
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        name = f"{stem or 'document'}.pdf"
+    return f"{idx:02d}-{name}"
+
+
+def _redact_for_release(content: bytes, redactions: list[dict]) -> bytes:
+    """Burn, sanitise and verify one document (runs in a worker thread)."""
+    return apply_redactions_to_pdf(content, redactions)
+
+
+async def _prepare_release_document(
+    doc: dict, db: AsyncIOMotorDatabase
+) -> tuple[bytes | None, list[dict], str | None, list[dict]]:
+    """Return (redacted_pdf, applied_redactions, error, unresolved) for one
+    document. ``unresolved`` lists every redaction that blocks release, with
+    its reason (see ``unresolved_summary``).
+
+    Never returns the original bytes: every released PDF goes through the
+    redaction/sanitisation pipeline, even with zero redactions (DOC-05).
+    """
+    content = await get_document_content(doc, db)
+    if not content:
+        return None, [], "document content is missing", []
+
+    try:
+        # Page rotations let the rule hold back legacy boxes on rotated
+        # pages, whose coordinate space is unknown (C1).
+        rotations = [int(s[2]) for s in await asyncio.to_thread(page_sizes_from_pdf, content)]
+    except PdfLimitExceeded as exc:
+        return None, [], str(exc), []
+    except Exception:
+        return None, [], "document content is not a readable PDF", []
+
+    to_apply, unresolved = partition_redactions(doc.get("redactions", []), rotations)
+    if unresolved:
+        details = unresolved_summary(unresolved, rotations)
+        return None, to_apply, unresolved_message(details, "release"), details
+
+    try:
+        redacted = await asyncio.to_thread(_redact_for_release, content, to_apply)
+    except (RedactionError, RedactionValidationError, PdfLimitExceeded) as exc:
+        return None, to_apply, str(exc), []
+    except Exception as exc:  # anything else is still a failed document
+        return None, to_apply, f"Failed to apply redactions: {exc}", []
+    return redacted, to_apply, None, []
+
+
 async def process_package_generation(
     package_id: str,
     case_id: str,
@@ -147,6 +213,13 @@ async def process_package_generation(
     """
     Process the actual package generation (runs in background).
     Updates status to DRAFT when complete.
+
+    SECURITY: a document is only written to the ZIP after its redactions
+    were validated, burned in, the PDF sanitised and the output verified.
+    Any document that fails is recorded in ``failed_documents`` and the
+    package is marked FAILED; nothing falls back to unredacted content.
+    Documents whose conversion to PDF failed are never released; they are
+    listed in ``skipped_documents``.
     """
     try:
         # Get case
@@ -164,6 +237,22 @@ async def process_package_generation(
         # Filter to only released/approved documents
         documents = [d for d in documents if d.get("status") in ["released", "approved"]]
 
+        skipped_documents: list[PackageDocumentIssue] = []
+        releasable = []
+        for doc in documents:
+            if doc.get("conversion_failed") or doc.get("status") == "conversion_failed":
+                skipped_documents.append(
+                    PackageDocumentIssue(
+                        document_id=doc.get("id"),
+                        filename=doc.get("filename"),
+                        reason="document failed conversion to PDF and cannot be released",
+                    )
+                )
+                logger.warning(f"Skipping conversion-failed document {doc.get('id')}")
+            else:
+                releasable.append(doc)
+        documents = releasable
+
         if not documents:
             await db.release_packages.update_one(
                 {"id": package_id},
@@ -171,6 +260,7 @@ async def process_package_generation(
                     "$set": {
                         "status": "failed",
                         "generation_message": "No documents ready for release",
+                        "skipped_documents": [d.model_dump() for d in skipped_documents],
                     }
                 },
             )
@@ -189,11 +279,85 @@ async def process_package_generation(
             },
         )
 
-        # Generate ZIP content
-        zip_buffer = io.BytesIO()
-        included_docs = []
+        # Redact every document first; the manifest and cover letter are
+        # built from what actually goes into the archive.
+        entries: list[tuple[str, bytes]] = []
+        included_docs: list[IncludedDocument] = []
+        included_raw: list[tuple[dict, list[dict]]] = []
+        failed_documents: list[PackageDocumentIssue] = []
         total_redactions = 0
 
+        for idx, doc in enumerate(documents, 1):
+            progress = 10 + int((idx / total_docs) * 80)
+            await db.release_packages.update_one(
+                {"id": package_id},
+                {
+                    "$set": {
+                        "generation_progress": progress,
+                        "generation_message": f"Processing document {idx} of {total_docs}...",
+                    }
+                },
+            )
+
+            redacted_content, applied, error, unresolved = await _prepare_release_document(doc, db)
+            if error:
+                logger.error(f"Release: document {doc.get('id')} failed: {error}")
+                failed_documents.append(
+                    PackageDocumentIssue(
+                        document_id=doc.get("id"),
+                        filename=doc.get("filename"),
+                        reason=error,
+                        unresolved_redactions=unresolved or None,
+                    )
+                )
+                continue
+
+            zip_filename = _zip_entry_name(idx, doc.get("filename"))
+            entries.append((zip_filename, redacted_content))
+            total_redactions += len(applied)
+            included_raw.append((doc, applied))
+            included_docs.append(
+                IncludedDocument(
+                    document_id=doc.get("id"),
+                    filename=zip_filename,
+                    original_filename=doc.get("filename"),
+                    redaction_count=len(applied),
+                    exemptions=_exemptions(applied),
+                )
+            )
+
+        if failed_documents:
+            summary = "; ".join(
+                f"{d.filename or d.document_id}: {d.reason}" for d in failed_documents
+            )
+            await db.release_packages.update_one(
+                {"id": package_id},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "generation_message": (
+                            f"Generation failed: {len(failed_documents)} document(s) could "
+                            f"not be safely redacted: {summary}"
+                        ),
+                        "failed_documents": [d.model_dump() for d in failed_documents],
+                        "skipped_documents": [d.model_dump() for d in skipped_documents],
+                    }
+                },
+            )
+            return
+
+        doc_info = [
+            {
+                "filename": doc.get("filename", "document.pdf"),
+                "redaction_count": len(applied),
+                "exemptions": _exemptions(applied),
+                "status": doc.get("status", "released"),
+            }
+            for doc, applied in included_raw
+        ]
+
+        # Generate ZIP content
+        zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             # Add cover letter if requested
             if request.include_cover_letter:
@@ -213,21 +377,6 @@ async def process_package_generation(
                     "officer_name": "FOI Officer",
                     "officer_title": "Information Officer",
                 }
-
-                # Prepare doc info for cover letter
-                doc_info = []
-                for doc in documents:
-                    redactions = doc.get("redactions", [])
-                    exemptions = list(set([r.get("category", "S22") for r in redactions]))
-                    doc_info.append(
-                        {
-                            "filename": doc.get("filename", "document.pdf"),
-                            "redaction_count": len(redactions),
-                            "exemptions": exemptions,
-                            "status": doc.get("status", "released"),
-                        }
-                    )
-
                 cover_letter = generate_cover_letter(case_data, doc_info)
                 zf.writestr("00-Cover-Letter.txt", cover_letter)
 
@@ -237,77 +386,11 @@ async def process_package_generation(
                     "case_number": case.get("tracking_number", "N/A"),
                     "title": case.get("title", "N/A"),
                 }
-                doc_info = []
-                for doc in documents:
-                    redactions = doc.get("redactions", [])
-                    exemptions = list(set([r.get("category", "S22") for r in redactions]))
-                    doc_info.append(
-                        {
-                            "filename": doc.get("filename", "document.pdf"),
-                            "redaction_count": len(redactions),
-                            "exemptions": exemptions,
-                            "status": doc.get("status", "released"),
-                        }
-                    )
                 summary = generate_release_summary(case_data, doc_info)
                 zf.writestr("00-MANIFEST.txt", summary)
 
-            # Process each document
-            for idx, doc in enumerate(documents, 1):
-                # Update progress
-                progress = 10 + int((idx / total_docs) * 80)
-                await db.release_packages.update_one(
-                    {"id": package_id},
-                    {
-                        "$set": {
-                            "generation_progress": progress,
-                            "generation_message": f"Processing document {idx} of {total_docs}...",
-                        }
-                    },
-                )
-
-                content = await get_document_content(doc, db)
-                if not content:
-                    logger.warning(f"No content for document {doc.get('id')}")
-                    continue
-
-                # Apply redactions
-                # SECURITY: Never fall back to unredacted content on failure.
-                # A redaction error is a generation failure — the outer except
-                # marks the package as "failed" so the operator must investigate
-                # before retrying. Any silent fallback is a data-leak vector.
-                redactions = doc.get("redactions", [])
-                if redactions:
-                    try:
-                        redacted_content = apply_redactions_to_pdf(content, redactions)
-                    except Exception as e:
-                        logger.error(f"Error applying redactions to {doc.get('id')}: {e}")
-                        raise RuntimeError(
-                            f"Failed to apply redactions to document {doc.get('id')}: {e}"
-                        ) from e
-                else:
-                    redacted_content = content
-
-                # Add to ZIP
-                filename = doc.get("filename", "document.pdf")
-                # Ensure .pdf extension
-                if not filename.lower().endswith(".pdf"):
-                    filename = filename.rsplit(".", 1)[0] + ".pdf"
-                zip_filename = f"{idx:02d}-{filename}"
-                zf.writestr(zip_filename, redacted_content)
-
-                # Track included document
-                exemptions = list(set([r.get("category", "S22") for r in redactions]))
-                total_redactions += len(redactions)
-                included_docs.append(
-                    IncludedDocument(
-                        document_id=doc.get("id"),
-                        filename=zip_filename,
-                        original_filename=doc.get("filename"),
-                        redaction_count=len(redactions),
-                        exemptions=exemptions,
-                    )
-                )
+            for zip_filename, content in entries:
+                zf.writestr(zip_filename, content)
 
         # Get ZIP bytes
         zip_content = zip_buffer.getvalue()
@@ -336,6 +419,9 @@ async def process_package_generation(
         sync_client.close()
 
         # Update package record - status is now DRAFT (ready for review)
+        message = "Package ready for review"
+        if skipped_documents:
+            message += f" ({len(skipped_documents)} document(s) skipped: failed conversion)"
         await db.release_packages.update_one(
             {"id": package_id},
             {
@@ -345,9 +431,11 @@ async def process_package_generation(
                     "document_count": len(included_docs),
                     "total_redactions": total_redactions,
                     "included_documents": [d.model_dump() for d in included_docs],
+                    "failed_documents": [],
+                    "skipped_documents": [d.model_dump() for d in skipped_documents],
                     "status": ReleasePackageStatus.DRAFT.value,
                     "generation_progress": 100,
-                    "generation_message": "Package ready for review",
+                    "generation_message": message,
                 }
             },
         )
@@ -655,23 +743,51 @@ async def get_current_package_state(
     """
     Get current draft and released packages for a case.
 
+    ``current_draft`` is the newest generating/draft package. When there is
+    none, it is the case's latest package if that one FAILED, so a failed
+    generation stays visible after a reload until a newer package replaces it.
+
+    ``current_release`` is the RELEASED package, or failing that the most
+    recently released package if it has since EXPIRED. Revoked packages are
+    deliberately hidden.
+
     Returns:
         Tuple of (current_draft, current_release)
     """
-    # Get current draft (generating or draft status)
+    newest_first = [("created_at", -1)]
     current_draft = await db.release_packages.find_one(
         {
             "case_id": case_id,
             "status": {
                 "$in": [ReleasePackageStatus.GENERATING.value, ReleasePackageStatus.DRAFT.value]
             },
-        }
+        },
+        sort=newest_first,
     )
+    if current_draft is None:
+        latest = await db.release_packages.find_one({"case_id": case_id}, sort=newest_first)
+        if latest and latest.get("status") == ReleasePackageStatus.FAILED.value:
+            current_draft = latest
 
-    # Get current release
     current_release = await db.release_packages.find_one(
-        {"case_id": case_id, "status": ReleasePackageStatus.RELEASED.value}
+        {"case_id": case_id, "status": ReleasePackageStatus.RELEASED.value},
+        sort=newest_first,
     )
+    if current_release is None:
+        latest_released = await db.release_packages.find_one(
+            {
+                "case_id": case_id,
+                "status": {
+                    "$in": [
+                        ReleasePackageStatus.EXPIRED.value,
+                        ReleasePackageStatus.REVOKED.value,
+                    ]
+                },
+            },
+            sort=[("released_at", -1), ("created_at", -1)],
+        )
+        if latest_released and latest_released.get("status") == ReleasePackageStatus.EXPIRED.value:
+            current_release = latest_released
 
     draft = ReleasePackageDB(**current_draft) if current_draft else None
     release = ReleasePackageDB(**current_release) if current_release else None

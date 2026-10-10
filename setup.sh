@@ -41,15 +41,27 @@ if [ -z "$MONGO_PASSWORD" ]; then
     echo "Generated MONGO_PASSWORD and saved to .env"
 fi
 
-if [ -z "$JWT_SECRET" ]; then
+# The .env.example placeholder counts as unset: the backend refuses it.
+if [ -z "$JWT_SECRET" ] || [ "$JWT_SECRET" = "CHANGE_THIS_TO_RANDOM_32_CHAR_STRING" ]; then
     JWT_SECRET=$(openssl rand -base64 48)
-    echo "JWT_SECRET=$JWT_SECRET" >> .env
+    if grep -q '^JWT_SECRET=' .env; then
+        sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$JWT_SECRET|" .env
+    else
+        echo "JWT_SECRET=$JWT_SECRET" >> .env
+    fi
     echo "Generated JWT_SECRET and saved to .env"
 fi
 
-if [ -z "$LLM_API_KEY_ENCRYPTION_KEY" ]; then
-    LLM_API_KEY_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || openssl rand -base64 32)
-    echo "LLM_API_KEY_ENCRYPTION_KEY=$LLM_API_KEY_ENCRYPTION_KEY" >> .env
+# Same for the LLM key: the old .env.example placeholder is not a Fernet key,
+# and production refuses to start without a valid one.
+if [ -z "$LLM_API_KEY_ENCRYPTION_KEY" ] || [ "$LLM_API_KEY_ENCRYPTION_KEY" = "CHANGE_THIS_TO_FERNET_KEY" ]; then
+    # A Fernet key is 32 random bytes, URL-safe base64 encoded.
+    LLM_API_KEY_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || openssl rand -base64 32 | tr '+/' '-_')
+    if grep -q '^LLM_API_KEY_ENCRYPTION_KEY=' .env; then
+        sed -i "s|^LLM_API_KEY_ENCRYPTION_KEY=.*|LLM_API_KEY_ENCRYPTION_KEY=$LLM_API_KEY_ENCRYPTION_KEY|" .env
+    else
+        echo "LLM_API_KEY_ENCRYPTION_KEY=$LLM_API_KEY_ENCRYPTION_KEY" >> .env
+    fi
     echo "Generated LLM_API_KEY_ENCRYPTION_KEY and saved to .env"
 fi
 

@@ -61,7 +61,7 @@ afterEach(() => {
 });
 
 describe('MagicLinkVerify — missing token / email', () => {
-  it('shows an error when the URL has no token', async () => {
+  it('explains the link was used when the token is gone (refresh after stripping)', async () => {
     // Mount at /verify/ - no token param actually matches the route; instead
     // we route directly to the component without :token by using a wildcard.
     renderWithProviders(
@@ -73,7 +73,10 @@ describe('MagicLinkVerify — missing token / email', () => {
     await waitFor(() =>
       expect(screen.getByText(/verification failed/i)).toBeInTheDocument(),
     );
-    expect(screen.getByText(/missing token/i)).toBeInTheDocument();
+    expect(screen.getByText(/already been used/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /request a new magic link/i }),
+    ).toBeInTheDocument();
   });
 
   it('shows a session-expired error if magic_link_email is not stored', async () => {
@@ -82,6 +85,31 @@ describe('MagicLinkVerify — missing token / email', () => {
       expect(screen.getByText(/verification failed/i)).toBeInTheDocument(),
     );
     expect(screen.getByText(/session expired/i)).toBeInTheDocument();
+  });
+});
+
+describe('MagicLinkVerify — token leaves the address bar', () => {
+  afterEach(() => window.history.replaceState(null, '', '/'));
+
+  it('strips the token from the URL and still verifies with it', async () => {
+    localStorage.setItem('magic_link_email', 'a@b.com');
+    window.history.replaceState(null, '', '/public/verify/abc123');
+    let sentToken: unknown;
+    server.use(
+      http.post('/api/v1/auth/public/magic-link/verify', async ({ request }) => {
+        sentToken = ((await request.json()) as Record<string, unknown>).token;
+        return HttpResponse.json({ access_token: 't', user: { id: 'u' } });
+      }),
+    );
+
+    renderWithProviders(<VerifyHarness />, { route: '/verify/abc123' });
+
+    await waitFor(() => expect(window.location.pathname).toBe('/public/verify'));
+    expect(window.location.href).not.toContain('abc123');
+    await waitFor(() => expect(screen.getByText(/success!/i)).toBeInTheDocument());
+    expect(sentToken).toBe('abc123');
+    // Single-use: nothing is kept for a refresh.
+    expect(sessionStorage.length).toBe(0);
   });
 });
 

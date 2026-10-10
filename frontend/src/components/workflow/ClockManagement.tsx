@@ -34,6 +34,7 @@ import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 
 import { clockApi, ClockStatus, ClockEvent } from '../../api/workflowApi';
+import { getApiErrorMessage } from '../../api/errors';
 
 const PauseIcon = PauseCircleOutlineIcon;
 const PlayIcon = PlayCircleOutlineIcon;
@@ -104,7 +105,7 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
       setPauseNotes('');
       onClockChange?.();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to pause clock');
+      setError(getApiErrorMessage(err, 'Failed to pause clock'));
     } finally {
       setSubmitting(false);
     }
@@ -118,7 +119,7 @@ const ClockManagement: React.FC<ClockManagementProps> = ({ caseId, dueDate, onCl
       setResumeNotes('');
       onClockChange?.();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to resume clock');
+      setError(getApiErrorMessage(err, 'Failed to resume clock'));
     } finally {
       setSubmitting(false);
     }

@@ -230,11 +230,11 @@ class TestGetCurrentUserTokenFallback:
             await get_current_user(request, token=token)
         assert exc_info.value.status_code == 401
 
-    async def test_token_with_legacy_roles_list_uses_first_role(
+    async def test_role_comes_from_db_not_token(
         self, db: AsyncIOMotorDatabase, patch_deps_users
     ) -> None:
-        """Token has empty `role` and a `roles` list -> use first roles entry.
-        Pins lines 47-49."""
+        """AUTH-14: a legacy `roles` list (or any role claim) no longer
+        decides the principal's role; the DB record does."""
         repo = UsersRepository(db)
         user = await repo.create(
             UserCreate(email="legacy@example.com", name="Legacy", password="pwd"),
@@ -242,17 +242,18 @@ class TestGetCurrentUserTokenFallback:
         )
 
         future = int((datetime.utcnow() + timedelta(minutes=10)).timestamp())
-        # Use role="" (falsy) so the `if not role and "roles" in payload` branch fires.
-        token = _make_jwt({"sub": user.id, "role": "", "roles": ["analyst"], "exp": future})
+        token = _make_jwt({"sub": user.id, "role": "", "roles": ["admin"], "exp": future})
         request = _make_request({})
 
         result = await get_current_user(request, token=token)
-        assert result["role"] == "analyst"
+        assert result["role"] == "user"
 
-    async def test_token_with_empty_legacy_roles_falls_back_to_user(
+    async def test_token_with_empty_legacy_roles_is_rejected(
         self, db: AsyncIOMotorDatabase, patch_deps_users
     ) -> None:
-        """role="" + roles=[] -> fallback to 'user'. Pins line 49."""
+        """role="" + roles=[] -> no role claim at all -> 401 (AUTH-03)."""
+        from fastapi import HTTPException
+
         repo = UsersRepository(db)
         user = await repo.create(
             UserCreate(email="legacy2@example.com", name="Legacy2", password="pwd"),
@@ -263,8 +264,9 @@ class TestGetCurrentUserTokenFallback:
         token = _make_jwt({"sub": user.id, "role": "", "roles": [], "exp": future})
         request = _make_request({})
 
-        result = await get_current_user(request, token=token)
-        assert result["role"] == "user"
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_user(request, token=token)
+        assert exc_info.value.status_code == 401
 
 
 # ---------------------------------------------------------------------------

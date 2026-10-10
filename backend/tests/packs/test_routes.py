@@ -491,6 +491,54 @@ class TestUploadPack:
         assert body["success"] is False
         assert len(body["errors"]) > 0
 
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../bc-fippa-v1",
+            "../../src/evil",
+            "/etc/cron",
+            "Upper-Case",
+            "-leading-dash",
+            "has space",
+            "a" * 65,
+            "",
+            123,
+            {"a": 1},
+        ],
+    )
+    async def test_rejects_unsafe_pack_id_with_422(
+        self, packs_fs: Path, authed_client_factory, patch_routes_db, bad_id
+    ) -> None:
+        pack = _make_pack("placeholder")
+        pack["pack_id"] = bad_id
+        before = sorted(p.relative_to(packs_fs) for p in packs_fs.rglob("*"))
+        client = await authed_client_factory(role="admin")
+        r = await client.post(
+            "/api/v1/packs/upload",
+            files={"file": ("p.json", io.BytesIO(json.dumps(pack).encode()), "application/json")},
+        )
+        assert r.status_code == 422, r.text
+        assert sorted(p.relative_to(packs_fs) for p in packs_fs.rglob("*")) == before
+
+    async def test_accepts_pack_id_at_the_length_limit(
+        self, packs_fs: Path, authed_client_factory, patch_routes_db
+    ) -> None:
+        pack_id = "a" + "b_-9" * 15 + "xyz"  # 64 chars
+        assert len(pack_id) == 64
+        client = await authed_client_factory(role="admin")
+        r = await client.post(
+            "/api/v1/packs/upload",
+            files={
+                "file": (
+                    "p.json",
+                    io.BytesIO(json.dumps(_make_pack(pack_id)).encode()),
+                    "application/json",
+                )
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert (packs_fs / "custom" / f"{pack_id}.json").exists()
+
     async def test_user_role_forbidden(
         self, packs_fs: Path, authed_client_factory, patch_routes_db
     ) -> None:

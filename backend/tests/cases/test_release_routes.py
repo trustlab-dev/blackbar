@@ -190,6 +190,112 @@ class TestGetReleasePackagesState:
         # download_url / public_url populated only when RELEASED
         assert body["current_release"]["download_url"] is not None
 
+    async def test_failed_package_is_returned_as_current_draft(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """A failed generation must stay visible after a page reload."""
+        case_id = await _seed_case_id(db)
+        failed = _make_package_doc(
+            case_id,
+            ReleasePackageStatus.FAILED,
+            generation_message="Generation failed: boom",
+            failed_documents=[{"document_id": "d1", "filename": "a.pdf", "reason": "boom"}],
+        )
+        await db.release_packages.insert_one(failed)
+
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.get(f"/api/v1/cases/{case_id}/release-packages")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["current_draft"] is not None
+        assert body["current_draft"]["id"] == failed["id"]
+        assert body["current_draft"]["status"] == "failed"
+        assert body["current_draft"]["failed_documents"][0]["reason"] == "boom"
+
+    async def test_newer_generation_supersedes_older_failure(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case_id(db)
+        failed = _make_package_doc(
+            case_id, ReleasePackageStatus.FAILED, created_at=datetime(2026, 1, 1)
+        )
+        generating = _make_package_doc(
+            case_id, ReleasePackageStatus.GENERATING, created_at=datetime(2026, 1, 2)
+        )
+        await db.release_packages.insert_many([failed, generating])
+
+        client: AsyncClient = await authed_client_factory(role="admin")
+        r = await client.get(f"/api/v1/cases/{case_id}/release-packages")
+        assert r.json()["current_draft"]["id"] == generating["id"]
+
+    async def test_failure_older_than_a_release_is_not_resurfaced(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case_id(db)
+        failed = _make_package_doc(
+            case_id, ReleasePackageStatus.FAILED, created_at=datetime(2026, 1, 1)
+        )
+        released = _make_package_doc(
+            case_id,
+            ReleasePackageStatus.RELEASED,
+            created_at=datetime(2026, 1, 2),
+            released_at=datetime(2026, 1, 3),
+        )
+        await db.release_packages.insert_many([failed, released])
+
+        client: AsyncClient = await authed_client_factory(role="admin")
+        body = (await client.get(f"/api/v1/cases/{case_id}/release-packages")).json()
+        assert body["current_draft"] is None
+        assert body["current_release"]["id"] == released["id"]
+
+    async def test_expired_release_is_still_reported(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        """An expired release stays visible; only revocation hides it."""
+        case_id = await _seed_case_id(db)
+        expired = _make_package_doc(
+            case_id, ReleasePackageStatus.EXPIRED, released_at=datetime(2026, 1, 3)
+        )
+        await db.release_packages.insert_one(expired)
+
+        client: AsyncClient = await authed_client_factory(role="admin")
+        body = (await client.get(f"/api/v1/cases/{case_id}/release-packages")).json()
+        assert body["current_release"]["id"] == expired["id"]
+        assert body["current_release"]["status"] == "expired"
+        # No public link for a package that is no longer released
+        assert body["current_release"]["download_url"] is None
+
+    async def test_revoked_release_is_not_reported(
+        self,
+        db: AsyncIOMotorDatabase,
+        authed_client_factory,
+        patch_routes_db,
+    ) -> None:
+        case_id = await _seed_case_id(db)
+        expired = _make_package_doc(
+            case_id, ReleasePackageStatus.EXPIRED, released_at=datetime(2026, 1, 1)
+        )
+        revoked = _make_package_doc(
+            case_id, ReleasePackageStatus.REVOKED, released_at=datetime(2026, 1, 2)
+        )
+        await db.release_packages.insert_many([expired, revoked])
+
+        client: AsyncClient = await authed_client_factory(role="admin")
+        body = (await client.get(f"/api/v1/cases/{case_id}/release-packages")).json()
+        assert body["current_release"] is None
+
     async def test_packages_state_user_role_forbidden(
         self,
         db: AsyncIOMotorDatabase,

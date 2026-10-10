@@ -35,6 +35,7 @@ import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
 import DownloadIcon from '@mui/icons-material/Download';
 import { transferApi, CaseTransfer } from '../../api/workflowApi';
 import api from '../../api/client';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface Document {
   id: string;
@@ -129,7 +130,7 @@ const TransferCase: React.FC<TransferCaseProps> = ({ caseId, caseTitle }) => {
       setSelectedDocIds([]);
       await fetchTransfers();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to transfer request');
+      setError(getApiErrorMessage(err, 'Failed to transfer request'));
     } finally {
       setSubmitting(false);
     }

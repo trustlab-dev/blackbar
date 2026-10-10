@@ -19,7 +19,7 @@ import {
   Paper
 } from '@mui/material';
 import { useNavigate, Link } from 'react-router-dom';
-import axios from 'axios';
+import { publicApi } from '../../api/client';
 
 interface FOIRequest {
   id: string;
@@ -66,7 +66,7 @@ export const PublicPortalDashboard: React.FC = () => {
 
       // Fetch organization branding
       try {
-        const configRes = await axios.get('/api/v1/admin/config/public');
+        const configRes = await publicApi.get('/admin/config/public');
         setOrgConfig({
           org_name: configRes.data.org_name || 'Freedom of Information Office',
           org_logo_url: configRes.data.org_logo_url,
@@ -76,7 +76,7 @@ export const PublicPortalDashboard: React.FC = () => {
         console.error('Error fetching public config:', configErr);
       }
 
-      const requestsRes = await axios.get('/api/v1/cases/public/my-requests', { headers });
+      const requestsRes = await publicApi.get('/cases/public/my-requests', { headers });
       const requestsList = requestsRes.data.requests;
       setRequests(requestsList);
       

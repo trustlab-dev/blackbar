@@ -12,7 +12,15 @@ from .models import (
     RequestFormat,
 )
 from .repository import LLMRepository
-from .service import LLMService
+from .safety import (
+    LLMDisabledError,
+    LLMEndpointError,
+    LLMError,
+    LLMNotConfiguredError,
+    LLMProviderError,
+    redact_secrets,
+)
+from .service import LLMCompletion, LLMKeyMissingError, LLMService
 
 __all__ = [
     "LLMConfig",
@@ -23,6 +31,14 @@ __all__ = [
     "RequestFormat",
     "LLMRepository",
     "LLMService",
+    "LLMCompletion",
+    "LLMError",
+    "LLMDisabledError",
+    "LLMEndpointError",
+    "LLMKeyMissingError",
+    "LLMNotConfiguredError",
+    "LLMProviderError",
+    "redact_secrets",
     "encrypt_api_key",
     "decrypt_api_key",
 ]

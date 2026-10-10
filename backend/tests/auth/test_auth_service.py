@@ -18,14 +18,13 @@ Reality calibration vs. the plan:
   that unknown realms now raise `ValidationError`.
 - The plan called the validator method `decode_token`; the actual
   method is `validate_token`. Tests use the real name.
-- AuthService uses `bcrypt` directly, not the `passlib` CryptContext
-  that lives in `src.auth.security`. Both produce $2b$ hashes that
-  cross-verify, but the implementations are separate.
+- AuthService delegates hashing and token minting to `src.auth.security`,
+  which uses `bcrypt` directly (passlib was dropped in the 2026-09 review).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
@@ -34,6 +33,7 @@ from freezegun import freeze_time
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from src.auth.auth_service import AuthService, TokenPayload
+from src.auth.security import INTERNAL_AUDIENCE
 from src.config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, JWT_SECRET
 from src.users.models import User, UserCreate
 from src.users.repository import UsersRepository
@@ -215,7 +215,7 @@ def _build_user(role: str = "user", user_id: str = "u-1") -> User:
 
 
 def _decode(token: str) -> dict[str, Any]:
-    return jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+    return jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM], audience=INTERNAL_AUDIENCE)
 
 
 class TestIssueToken:
@@ -264,9 +264,11 @@ class TestIssueToken:
         token = await service.issue_token(_build_user())
         decoded = _decode(token)
 
+        # AUTH-26: a real epoch, i.e. computed from an aware UTC datetime.
         expected = int(
             (
-                datetime(2026, 5, 11, 12, 0, 0) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+                datetime(2026, 5, 11, 12, 0, 0, tzinfo=UTC)
+                + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
             ).timestamp()
         )
         assert decoded["exp"] == expected
@@ -340,34 +342,27 @@ class TestValidateToken:
         assert payload is not None
         assert payload.role == "admin"
 
-    def test_validate_token_legacy_empty_roles_list_falls_back_to_user(self) -> None:
-        """If `roles` is present but empty, fallback role is 'user'.
-        Pins line 131 (the else branch of the ternary)."""
+    def test_validate_token_legacy_empty_roles_list_is_rejected(self) -> None:
+        """AUTH-03: an empty legacy `roles` list no longer defaults to 'user'."""
         future = int((datetime.utcnow() + timedelta(minutes=10)).timestamp())
         token = _make_jwt({"sub": "u-legacy", "roles": [], "exp": future})
 
-        payload = AuthService.validate_token(token)
-        assert payload is not None
-        assert payload.role == "user"
+        assert AuthService.validate_token(token) is None
 
-    def test_validate_token_missing_role_defaults_to_user(self) -> None:
-        """A token with NO role and NO roles -> role defaults to 'user'.
-        Pins line 132-133."""
+    def test_validate_token_missing_role_is_rejected(self) -> None:
+        """AUTH-03: a token with NO role and NO roles used to default to the
+        internal 'user' role, which is how public tokens reached staff
+        routes. It is now rejected."""
         future = int((datetime.utcnow() + timedelta(minutes=10)).timestamp())
         token = _make_jwt({"sub": "u-noroles", "exp": future})
 
-        payload = AuthService.validate_token(token)
-        assert payload is not None
-        assert payload.role == "user"
+        assert AuthService.validate_token(token) is None
 
-    def test_validate_token_missing_sub_defaults_to_empty(self) -> None:
-        """A token with no `sub` claim gets sub=''. Pins line 135."""
+    def test_validate_token_missing_sub_is_rejected(self) -> None:
         future = int((datetime.utcnow() + timedelta(minutes=10)).timestamp())
         token = _make_jwt({"role": "user", "exp": future})
 
-        payload = AuthService.validate_token(token)
-        assert payload is not None
-        assert payload.sub == ""
+        assert AuthService.validate_token(token) is None
 
     def test_validate_token_missing_realm_defaults_to_org(self) -> None:
         """No `realm` claim -> default 'org'. Pins line 138."""
@@ -386,3 +381,48 @@ class TestValidateToken:
         token = _make_jwt({"sub": "u-1", "role": "user", "realm": "tenant", "exp": future})
 
         assert AuthService.validate_token(token) is None
+
+
+# ---------------------------------------------------------------------------
+# AUTH-23: every failed login spends one bcrypt comparison
+# ---------------------------------------------------------------------------
+
+
+class TestLoginTimingEqualisation:
+    async def test_unknown_email_still_runs_bcrypt(
+        self, db: AsyncIOMotorDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.auth import security
+
+        calls: list[str] = []
+        monkeypatch.setattr(security, "burn_password_check", lambda pw: calls.append(pw))
+        service = AuthService(UsersRepository(db))
+        assert await service.authenticate_local("ghost@example.com", "pw-attempt") is None
+        assert calls == ["pw-attempt"]
+
+    async def test_inactive_user_still_runs_bcrypt(
+        self, db: AsyncIOMotorDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.auth import security
+
+        repo = UsersRepository(db)
+        user = await repo.create(
+            UserCreate(email="off@example.com", name="Off", password="x"),
+            AuthService.hash_password("right-password"),
+        )
+        await db.users.update_one({"id": user.id}, {"$set": {"status": "disabled"}})
+        calls: list[str] = []
+        monkeypatch.setattr(security, "burn_password_check", lambda pw: calls.append(pw))
+        assert (
+            await AuthService(repo).authenticate_local("off@example.com", "right-password") is None
+        )
+        assert calls == ["right-password"]
+
+    def test_burn_password_check_runs_real_bcrypt(self) -> None:
+        import time
+
+        from src.auth import security
+
+        start = time.perf_counter()
+        security.burn_password_check("x" * 100)  # over 72 bytes must not raise
+        assert time.perf_counter() - start > 0.001

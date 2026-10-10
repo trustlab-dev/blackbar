@@ -13,7 +13,13 @@ import jwt
 import pytest
 from freezegun import freeze_time
 
-from src.auth.security import create_access_token, hash_password, verify_password
+from src.auth.security import (
+    PasswordTooLongError,
+    create_access_token,
+    hash_password,
+    password_policy_error,
+    verify_password,
+)
 from src.config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, JWT_SECRET
 
 pytestmark = pytest.mark.unit
@@ -63,23 +69,37 @@ def test_hash_password_handles_unicode() -> None:
     assert verify_password("pässwörd-🔒-日本", h) is False
 
 
-def test_hash_password_handles_long_password() -> None:
-    """bcrypt silently truncates inputs at 72 bytes.
+def test_hash_password_rejects_input_over_72_bytes() -> None:
+    """AUTH-27: bcrypt only reads 72 bytes. Rather than silently truncating
+    (so any 72-byte prefix would verify), over-long passwords are refused."""
+    with pytest.raises(PasswordTooLongError):
+        hash_password("a" * 73)
+    # Multi-byte characters count by UTF-8 length, not code points.
+    with pytest.raises(PasswordTooLongError):
+        hash_password("é" * 37)
 
-    Pins reality: with passlib + bcrypt 4.x in this project, a password
-    longer than 72 bytes hashes fine, AND its 72-byte prefix verifies
-    against the same hash. This is a well-known bcrypt property (RFC: the
-    algorithm operates on a 72-byte key). Documented here so future
-    upgrades that change this behavior are caught by CI.
-    """
-    long_pwd = "a" * 100
-    h = hash_password(long_pwd)
-    # Same long string verifies.
-    assert verify_password(long_pwd, h) is True
-    # 72-byte prefix also verifies — this is the documented bcrypt truncation.
-    assert verify_password("a" * 72, h) is True
-    # A genuinely different prefix does NOT verify.
-    assert verify_password("b" * 72, h) is False
+
+def test_hash_password_accepts_exactly_72_bytes() -> None:
+    pwd = "a" * 72
+    assert verify_password(pwd, hash_password(pwd)) is True
+
+
+def test_verify_password_over_72_bytes_is_false_not_error() -> None:
+    """Login with a >72-byte password must be a clean mismatch, never a 500
+    (bcrypt >= 5 raises ValueError on such input)."""
+    h = hash_password("a" * 72)
+    assert verify_password("a" * 100, h) is False
+
+
+def test_verify_password_malformed_hash_is_false() -> None:
+    assert verify_password("anything", "not-a-bcrypt-hash") is False
+
+
+def test_password_policy_error() -> None:
+    assert password_policy_error("short") is not None
+    assert password_policy_error("x" * 11) is not None
+    assert password_policy_error("x" * 12) is None
+    assert password_policy_error("x" * 73) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +108,7 @@ def test_hash_password_handles_long_password() -> None:
 
 
 def _decode(token: str) -> dict:
-    return jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+    return jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM], options={"verify_aud": False})
 
 
 def test_create_access_token_includes_exp_claim() -> None:

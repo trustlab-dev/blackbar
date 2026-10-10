@@ -130,6 +130,16 @@
   margin-bottom: 20px;
 }
 
+.session-notice {
+  background: var(--color-warning-bg);
+  border: 1px solid var(--border-default);
+  color: var(--color-warning-text);
+  padding: 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+
 .login-footer {
   margin-top: 24px;
   padding-top: 24px;

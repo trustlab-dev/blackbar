@@ -21,4 +21,4 @@ RUN pip install --no-cache-dir -U pip setuptools wheel "jaraco.context>=6.1" \
 COPY . .
 
 EXPOSE 8000
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

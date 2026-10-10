@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import './SharedDocuments.css';
+import { getApiErrorMessage } from '../api/errors';
 
 interface SharedDocument {
   id: string;
@@ -30,19 +31,12 @@ const SharedDocuments: React.FC = () => {
       setLoading(true);
       setError(null);
       const response = await api.get('/documents/shared-with-me');
-      setDocuments(response.data.documents);
+      setDocuments(response.data?.documents ?? []);
     } catch (err: any) {
       console.error('Error fetching shared documents:', err);
-      // Handle authentication errors explicitly
-      if (err.response?.status === 401) {
-        // Clear auth data and redirect to login
-        localStorage.removeItem('token');
-        localStorage.removeItem('userRole');
-        localStorage.removeItem('username');
-        window.location.href = '/login';
-        return;
-      }
-      setError(err.response?.data?.detail || 'Failed to load shared documents');
+      // A 401 is handled by the api client interceptor (it clears auth and
+      // redirects to /login with the reason and return path).
+      setError(getApiErrorMessage(err, 'Failed to load shared documents'));
     } finally {
       setLoading(false);
     }

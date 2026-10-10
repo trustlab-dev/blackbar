@@ -65,7 +65,6 @@ def test_is_valid_role_for_each_canonical_role(role: str) -> None:
 @pytest.mark.parametrize(
     "role",
     [
-        "owner",  # not in current 4-tier model
         "superadmin",
         "ADMIN",  # case-sensitive
         "Admin",  # case-sensitive
@@ -103,10 +102,16 @@ def test_get_role_level_hierarchy_order() -> None:
     # Strictly decreasing.
     levels = [get_role_level(r) for r in ["admin", "analyst", "user", "guest"]]
     assert levels == sorted(levels, reverse=True)
-    assert ROLE_HIERARCHY == {"admin": 4, "analyst": 3, "user": 2, "guest": 1}
+    # `owner` sits above admin (AUTH-25: the role catalogue now includes it).
+    assert ROLE_HIERARCHY == {"owner": 5, "admin": 4, "analyst": 3, "user": 2, "guest": 1}
 
 
-@pytest.mark.parametrize("role", ["owner", "unknown", "", "ADMIN"])
+def test_owner_is_a_valid_system_role() -> None:
+    assert is_valid_role("owner") is True
+    assert get_role_level("owner") == 5
+
+
+@pytest.mark.parametrize("role", ["unknown", "", "ADMIN"])
 def test_get_role_level_unknown_role_returns_default(role: str) -> None:
     """Unknown roles fall through to the .get() default (0). Documented
     behavior — relied upon by has_permission below."""

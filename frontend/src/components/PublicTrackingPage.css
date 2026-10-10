@@ -80,6 +80,10 @@
   padding: 15px 30px;
   border-radius: 8px;
   display: inline-block;
+  /* Tracking numbers are ~21 characters (FOI-2026-007-K7QX2M9A); let one
+     wrap rather than overflow a narrow phone. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
   border: 1px solid var(--border-default);
 }
 

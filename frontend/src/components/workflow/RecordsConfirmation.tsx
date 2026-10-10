@@ -23,6 +23,7 @@ import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
 import UndoIcon from '@mui/icons-material/Undo';
 import FolderIcon from '@mui/icons-material/Folder';
 import { recordsConfirmationApi, RecordsConfirmation as RecordsConfirmationType } from '../../api/workflowApi';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface RecordsConfirmationProps {
   caseId: string;
@@ -66,7 +67,7 @@ const RecordsConfirmation: React.FC<RecordsConfirmationProps> = ({ caseId, onCon
       await fetchConfirmation();
       onConfirmationChange?.();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to confirm records');
+      setError(getApiErrorMessage(err, 'Failed to confirm records'));
     } finally {
       setSubmitting(false);
     }
@@ -81,7 +82,7 @@ const RecordsConfirmation: React.FC<RecordsConfirmationProps> = ({ caseId, onCon
       await fetchConfirmation();
       onConfirmationChange?.();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to revoke confirmation');
+      setError(getApiErrorMessage(err, 'Failed to revoke confirmation'));
     } finally {
       setSubmitting(false);
     }

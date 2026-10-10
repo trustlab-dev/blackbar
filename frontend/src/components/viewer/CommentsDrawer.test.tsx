@@ -149,7 +149,7 @@ describe('CommentsDrawer', () => {
     const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {});
     server.use(
       http.get('https://localhost:3000/api/v1/documents/:id/comments', () =>
-        HttpResponse.json({ detail: 'Internal boom' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'Internal boom' } }, { status: 400 }),
       ),
     );
     renderWithProviders(

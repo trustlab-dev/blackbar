@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Button from '@mui/material/Button';
 import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
@@ -28,7 +28,15 @@ import PublishIcon from '@mui/icons-material/Publish';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CloseIcon from '@mui/icons-material/Close';
 import DescriptionIcon from '@mui/icons-material/Description';
-import api from '../api/client';
+import api, { TRANSFER_TIMEOUT_MS } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
+import {
+  formatUnresolvedList,
+  getBlockingRedactions,
+  isConversionFailed,
+  pageRotationsFromDims,
+  parseUnresolvedList,
+} from '../utils/redactionStatus';
 
 // Types matching backend models
 interface IncludedDocument {
@@ -39,15 +47,30 @@ interface IncludedDocument {
   exemptions: string[];
 }
 
+// A document left out of a package, and why
+// (backend/src/cases/release_package_models.py PackageDocumentIssue).
+interface PackageDocumentIssue {
+  document_id?: string | null;
+  filename?: string | null;
+  reason: string;
+  // Each redaction that blocked the document: id, page, status, reason
+  // code, message, approvable (redaction_records.py describe_unresolved).
+  unresolved_redactions?: unknown[] | null;
+}
+
 interface ReleasePackageResponse {
   id: string;
   case_id: string;
-  status: 'generating' | 'draft' | 'released' | 'expired' | 'revoked';
+  status: 'generating' | 'draft' | 'released' | 'expired' | 'revoked' | 'failed';
   filename: string;
   size_bytes: number;
   document_count: number;
   total_redactions: number;
   included_documents: IncludedDocument[];
+  // Failed safe redaction (the package is then `failed`), and deliberately
+  // left out (e.g. conversion to PDF failed).
+  failed_documents?: PackageDocumentIssue[];
+  skipped_documents?: PackageDocumentIssue[];
   generation_progress: number;
   generation_message?: string;
   download_url?: string;
@@ -70,8 +93,52 @@ interface Document {
   id: string;
   filename: string;
   status: string;
+  conversion_failed?: boolean;
   redactions?: any[];
+  // [[w, h, rotation], ...] cached by the backend (redaction_store.py).
+  page_dims?: unknown;
 }
+
+const IssueList: React.FC<{ issues: PackageDocumentIssue[] }> = ({ issues }) => (
+  <List dense disablePadding>
+    {issues.map((issue, i) => {
+      // With the per-redaction list, show it instead of the long one-line
+      // reason that repeats the same ids.
+      const blocking = parseUnresolvedList(issue.unresolved_redactions);
+      const n = blocking.length;
+      return (
+        <ListItem
+          key={`${issue.document_id ?? 'doc'}-${i}`}
+          disableGutters
+          sx={{ py: 0, flexDirection: 'column', alignItems: 'flex-start' }}
+        >
+          <ListItemText
+            primary={issue.filename || issue.document_id || 'Unknown document'}
+            secondary={
+              n > 0
+                ? `${n} redaction${n !== 1 ? 's' : ''} awaiting review:`
+                : issue.reason || undefined
+            }
+            slotProps={{ primary: { variant: 'body2' }, secondary: { variant: 'caption' } }}
+          />
+          {n > 0 && (
+            <Box component="ul" sx={{ m: 0, pl: 2 }}>
+              {formatUnresolvedList(blocking).map((line, j) => (
+                <Typography
+                  key={`${blocking[j].id ?? 'r'}-${j}`}
+                  component="li"
+                  variant="caption"
+                >
+                  {line}
+                </Typography>
+              ))}
+            </Box>
+          )}
+        </ListItem>
+      );
+    })}
+  </List>
+);
 
 interface ReleasePackageActionsProps {
   caseId: string;
@@ -95,6 +162,10 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A failed package leaves the draft slot of GET /release-packages, so the
+  // package we started is remembered and fetched by id when it disappears.
+  const [failedPackage, setFailedPackage] = useState<ReleasePackageResponse | null>(null);
+  const trackedPackageId = useRef<string | null>(null);
   
   // Dialog states
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
@@ -115,16 +186,46 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
   const [toastMessage, setToastMessage] = useState('');
   const [toastSeverity, setToastSeverity] = useState<'success' | 'error' | 'info'>('success');
 
-  // Filter to approved/released documents
+  // Approved/released documents. Documents that failed conversion to PDF
+  // can never be released (the backend skips them), so they are not offered.
   const approvedDocuments = documents.filter(
-    (doc) => doc.status === 'approved' || doc.status === 'released'
+    (doc) =>
+      (doc.status === 'approved' || doc.status === 'released') && !isConversionFailed(doc)
   );
 
   // Fetch current package state
   const fetchPackageState = useCallback(async () => {
     try {
       const response = await api.get(`/cases/${caseId}/release-packages`);
-      setPackageState(response.data);
+      const state: CurrentPackageState = response.data;
+      setPackageState(state);
+
+      const tracked = trackedPackageId.current;
+      const draft = state.current_draft;
+      // A newer package (possibly started by someone else) supersedes a
+      // remembered failure.
+      if (draft && draft.status !== 'failed') {
+        setFailedPackage((prev) =>
+          prev && draft.id !== prev.id && Date.parse(draft.created_at) > Date.parse(prev.created_at)
+            ? null
+            : prev,
+        );
+      }
+      if (state.current_draft?.status === 'failed') {
+        trackedPackageId.current = null;
+        setFailedPackage(state.current_draft);
+      } else if (
+        tracked &&
+        state.current_draft?.id !== tracked &&
+        state.current_release?.id !== tracked
+      ) {
+        trackedPackageId.current = null;
+        const pkg = await api.get(`/cases/${caseId}/release-package/${tracked}`);
+        if (pkg.data?.status === 'failed') {
+          setFailedPackage(pkg.data);
+          showToast('The release package failed. See the documents listed.', 'error');
+        }
+      }
     } catch (err) {
       console.error('Error fetching package state:', err);
     }
@@ -183,10 +284,12 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
     setError(null);
 
     try {
-      await api.post(`/cases/${caseId}/release-package/generate`, {
+      const response = await api.post(`/cases/${caseId}/release-package/generate`, {
         document_ids: selectedDocIds.length === approvedDocuments.length ? null : selectedDocIds,
         include_cover_letter: includeCoverLetter,
       });
+      trackedPackageId.current = response.data?.package_id ?? null;
+      setFailedPackage(null);
 
       setGenerateDialogOpen(false);
       showToast('Package generation started...', 'info');
@@ -195,7 +298,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
       await fetchPackageState();
     } catch (err: any) {
       console.error('Error starting generation:', err);
-      setError(err.response?.data?.detail || 'Failed to start package generation');
+      setError(getApiErrorMessage(err, 'Failed to start package generation'));
     } finally {
       setLoading(false);
     }
@@ -208,7 +311,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
     try {
       const response = await api.get(
         `/cases/${caseId}/release-package/${packageState.current_draft.id}/download`,
-        { responseType: 'blob' }
+        { responseType: 'blob', timeout: TRANSFER_TIMEOUT_MS }
       );
 
       // Create download link
@@ -222,7 +325,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
       console.error('Error downloading draft:', err);
-      showToast(err.response?.data?.detail || 'Failed to download package', 'error');
+      showToast(getApiErrorMessage(err, 'Failed to download package'), 'error');
     }
   };
 
@@ -256,7 +359,7 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
       onPackageReleased?.();
     } catch (err: any) {
       console.error('Error releasing package:', err);
-      setError(err.response?.data?.detail || 'Failed to release package');
+      setError(getApiErrorMessage(err, 'Failed to release package'));
     } finally {
       setLoading(false);
     }
@@ -284,16 +387,53 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
     });
   };
 
-  // Determine current state
-  const isGenerating = packageState.current_draft?.status === 'generating';
-  const hasDraft = packageState.current_draft?.status === 'draft';
+  // Determine current state. A failed package is never a usable draft: no
+  // download, no release.
+  const failed =
+    failedPackage ??
+    (packageState.current_draft?.status === 'failed' ? packageState.current_draft : null);
+  const activeDraft =
+    packageState.current_draft?.status === 'failed' ? null : packageState.current_draft;
+  const isGenerating = activeDraft?.status === 'generating';
+  const hasDraft = activeDraft?.status === 'draft';
   const hasRelease = packageState.current_release !== null;
-  const hasNoPackage = !packageState.current_draft && !packageState.current_release;
+  const hasNoPackage = !activeDraft && !packageState.current_release;
+  const skippedInDraft = hasDraft ? activeDraft?.skipped_documents ?? [] : [];
 
   return (
     <>
       {/* Action Buttons */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+        {/* Failed package: explain which documents stopped it */}
+        {failed && !isGenerating && (
+          <Alert severity="error" data-testid="release-package-failed">
+            <Typography variant="subtitle2">Package generation failed</Typography>
+            {failed.generation_message && (
+              <Typography variant="body2">{failed.generation_message}</Typography>
+            )}
+            {(failed.failed_documents?.length ?? 0) > 0 && (
+              <>
+                <Typography variant="caption" sx={{ display: 'block', mt: 1, fontWeight: 600 }}>
+                  Failed documents
+                </Typography>
+                <IssueList issues={failed.failed_documents!} />
+              </>
+            )}
+            {(failed.skipped_documents?.length ?? 0) > 0 && (
+              <>
+                <Typography variant="caption" sx={{ display: 'block', mt: 1, fontWeight: 600 }}>
+                  Left out
+                </Typography>
+                <IssueList issues={failed.skipped_documents!} />
+              </>
+            )}
+            <Typography variant="caption" sx={{ display: 'block', mt: 1 }}>
+              Fix these documents (approve or reject pending redactions, delete and re-add those
+              with no usable position), then generate again.
+            </Typography>
+          </Alert>
+        )}
+
         {/* Generate / Regenerate Button */}
         {hasNoPackage && (
           <Button
@@ -374,6 +514,16 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
           </Button>
         )}
 
+        {/* Documents the ready draft left out */}
+        {skippedInDraft.length > 0 && !isGenerating && (
+          <Alert severity="warning">
+            <Typography variant="body2">
+              {skippedInDraft.length} document{skippedInDraft.length !== 1 ? 's' : ''} left out of this package
+            </Typography>
+            <IssueList issues={skippedInDraft} />
+          </Alert>
+        )}
+
         {/* Release Button (draft only) */}
         {hasDraft && (
           <Button
@@ -442,7 +592,23 @@ const ReleasePackageActions: React.FC<ReleasePackageActionsProps> = ({
                       </ListItemIcon>
                       <ListItemText
                         primary={doc.filename}
-                        secondary={`${doc.redactions?.length || 0} redactions`}
+                        secondary={(() => {
+                          const total = doc.redactions?.length || 0;
+                          const blocking = getBlockingRedactions(
+                            doc.redactions,
+                            pageRotationsFromDims(doc.page_dims),
+                          ).length;
+                          return blocking > 0
+                            ? `${total} redactions · ${blocking} awaiting review (will fail release)`
+                            : `${total} redactions`;
+                        })()}
+                        slotProps={{
+                          secondary:
+                            getBlockingRedactions(doc.redactions, pageRotationsFromDims(doc.page_dims))
+                              .length > 0
+                              ? { color: 'error' }
+                              : undefined,
+                        }}
                       />
                     </ListItemButton>
                   </ListItem>

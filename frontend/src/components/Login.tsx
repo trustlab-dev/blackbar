@@ -2,11 +2,23 @@ import React, { useState, useEffect } from "react";
 import api from "../api/client";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
+import { getSafeRedirect } from "../utils/safeRedirect";
+import { getApiErrorMessage } from "../api/errors";
 import './Login.css';
 
 interface Props {
   onLoginSuccess: () => void;
 }
+
+/**
+ * Messages for `/login?reason=...`, set by the api/client.ts 401 interceptor
+ * when the backend ends a session (see SessionEndReason there).
+ */
+export const SESSION_END_MESSAGES: ReadonlyMap<string, string> = new Map([
+  ['revoked', 'Your session was signed out, for example after a logout elsewhere or a password or role change. Please sign in again.'],
+  ['inactive', 'Your account is not active. Contact your administrator if you think this is a mistake.'],
+  ['expired', 'Your session has expired. Please sign in again.'],
+]);
 
 interface OrgConfig {
   org_name: string;
@@ -30,8 +42,10 @@ const Login: React.FC<Props> = ({ onLoginSuccess }) => {
 
   // Get redirect URL from query params — validate to prevent open redirect
   const searchParams = new URLSearchParams(location.search);
-  const rawRedirect = searchParams.get('redirect') || '/';
-  const redirectUrl = rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') ? rawRedirect : '/';
+  const redirectUrl = getSafeRedirect(searchParams.get('redirect'), '/');
+  // A Map, not an object literal: `?reason=__proto__` must not resolve to a
+  // prototype member (rendering Object.prototype crashes the page).
+  const sessionNotice = SESSION_END_MESSAGES.get(searchParams.get('reason') ?? '') ?? null;
 
   // Fetch org branding on mount
   useEffect(() => {
@@ -67,10 +81,7 @@ const Login: React.FC<Props> = ({ onLoginSuccess }) => {
       navigate(redirectUrl);
     } catch (err: any) {
       console.error('Login error:', err);
-      const errorMessage = err.response?.data?.error?.message ||
-        err.response?.data?.detail ||
-        "Login failed. Please check your credentials.";
-      setError(errorMessage);
+      setError(getApiErrorMessage(err, "Login failed. Please check your credentials."));
     } finally {
       setLoading(false);
     }
@@ -101,6 +112,12 @@ const Login: React.FC<Props> = ({ onLoginSuccess }) => {
 
         <form onSubmit={handleLogin} className="login-form">
           <h2>Sign In</h2>
+
+          {sessionNotice && !error && (
+            <div className="session-notice" role="status">
+              {sessionNotice}
+            </div>
+          )}
 
           {error && (
             <div className="error-message">

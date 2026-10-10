@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import userEvent from '@testing-library/user-event';
 import { server } from '../test-utils/msw-handlers';
-import { renderWithProviders, screen, waitFor } from '../test-utils/render';
+import { renderWithProviders, screen, waitFor, within } from '../test-utils/render';
 import CaseTeamPanel from './CaseTeamPanel';
 
 // Stub UserPicker — it has its own /auth/users/search fetch and MUI
@@ -274,6 +274,47 @@ describe('CaseTeamPanel — remove member', () => {
     await screen.findByText('Larry Legal');
     await user.click(screen.getByRole('button', { name: '' }));
     expect(await screen.findByText(/cannot remove/i)).toBeInTheDocument();
+  });
+
+  it('shows the backend 409 message when a removal conflicts', async () => {
+    server.use(
+      http.get('/api/v1/cases/case-1/team', () =>
+        HttpResponse.json({ team_members: [legalMember] }),
+      ),
+      http.delete('/api/v1/cases/case-1/team/members/u-legal', () =>
+        HttpResponse.json(
+          { error: { code: 'HTTP_409', message: 'Team member could not be removed; retry' } },
+          { status: 409 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CaseTeamPanel caseId="case-1" canManageTeam={true} />);
+    await screen.findByText('Larry Legal');
+    await user.click(screen.getByRole('button', { name: '' }));
+    expect(
+      await screen.findByText('Team member could not be removed; retry'),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    [400, "Users with system role 'guest' cannot be assigned case team role 'legal'. Allowed roles: third_party"],
+    [403, "You don't have permission to manage this team"],
+  ])('shows the backend %s message inside the add dialog', async (status, message) => {
+    server.use(
+      http.get('/api/v1/cases/case-1/team', () => HttpResponse.json({ team_members: [] })),
+      http.post('/api/v1/cases/case-1/team/members', () =>
+        HttpResponse.json({ error: { code: `HTTP_${status}`, message } }, { status }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<CaseTeamPanel caseId="case-1" canManageTeam={true} />);
+    await screen.findByText(/no team members/i);
+    await user.click(screen.getByRole('button', { name: /add member/i }));
+    await screen.findByRole('heading', { name: /add team member/i });
+    await user.click(screen.getByRole('button', { name: /pick-user/i }));
+    await user.click(screen.getByRole('button', { name: /^add member$/i }));
+    expect(await within(screen.getByRole('dialog')).findByText(message)).toBeInTheDocument();
   });
 
   it('does not show a remove button for analyst members', async () => {

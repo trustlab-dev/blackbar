@@ -28,6 +28,7 @@ from ..utils.search_engine import (
     search_cases,
     search_documents,
 )
+from .listing import redact_case_for_listing
 from .models import CasePriority, CaseStatus
 from .utils import get_sla_status
 
@@ -187,7 +188,8 @@ async def get_my_cases(
         "$or": [
             {"assignee": current_user["id"]},
             {"assigned_user_ids": current_user["id"]},
-            {"case_team.user_id": current_user["id"]},
+            # Active membership only: removed members must drop off (AUTH-11).
+            {"case_team": {"$elemMatch": {"user_id": current_user["id"], "status": "active"}}},
         ]
     }
 
@@ -215,7 +217,9 @@ async def get_my_cases(
                 )
 
     return {
-        "cases": [convert_mongo_doc_to_json(doc) for doc in result],
+        "cases": [
+            convert_mongo_doc_to_json(redact_case_for_listing(doc, current_user)) for doc in result
+        ],
         "total": total,
         "skip": skip,
         "limit": limit,

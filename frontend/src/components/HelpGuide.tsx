@@ -129,7 +129,7 @@ const HelpGuide: React.FC = () => {
               <ol style={{marginLeft: '20px', marginTop: '10px'}}>
                 <li>Click <strong>New Request</strong> in the top nav.</li>
                 <li>Fill in: title (required), category, description, requester details (name, email, phone, organization).</li>
-                <li>Submit. A tracking number like <code>FOI-2026-007-DJH</code> is generated and the case lands in the queue with status <strong>New</strong>.</li>
+                <li>Submit. A tracking number like <code>FOI-2026-007-K7QX2M9A</code> is generated and the case lands in the queue with status <strong>New</strong>.</li>
               </ol>
               <p style={{marginTop: '15px'}}>Cases submitted via the public portal at <code>/request</code> end up in the same queue.</p>
               {tipBox(<>The default due date is set by the active jurisdiction pack (BC FIPPA defaults to 30 calendar days under s.7(1)). You can override per case.</>)}
@@ -291,14 +291,13 @@ const HelpGuide: React.FC = () => {
           question: 'Approval workflow on redactions',
           answer: (
             <div>
-              <p>By default, redactions move through:</p>
-              <ol style={{marginLeft: '20px', marginTop: '10px'}}>
-                <li><strong>pending</strong> — drafted by an analyst</li>
-                <li><strong>proposed</strong> — submitted for review</li>
-                <li><strong>approved</strong> — signed off by a reviewer/approver</li>
-                <li><strong>applied</strong> — burned into the final PDF at release</li>
-              </ol>
-              <p style={{marginTop: '15px'}}>Reviewers and approvers can also <strong>contest</strong> a redaction or <strong>reject</strong> it with a reason. The contest history is preserved on the document.</p>
+              <p>Redactions drawn by staff or case analysts are <strong>approved</strong> straight away. Anyone else creates a <strong>proposed</strong> redaction that a case analyst or manager must approve or reject.</p>
+              <ul style={{marginLeft: '20px', marginTop: '10px'}}>
+                <li><strong>approved</strong>: burned into the PDF on export and release</li>
+                <li><strong>rejected</strong>: ignored</li>
+                <li><strong>proposed</strong>, <strong>contested</strong> or anything else still awaiting review: <em>blocks</em> the document. Export is refused and the release package marks the document failed until every such redaction is approved or rejected.</li>
+              </ul>
+              <p style={{marginTop: '15px'}}>The document viewer lists redactions awaiting review, with Approve and Reject buttons for proposals. Reviewers can also <strong>contest</strong> a redaction with a reason; the contest history is preserved on the document.</p>
             </div>
           ),
           tags: ['approval', 'review', 'workflow', 'contest', 'reject']
@@ -315,7 +314,8 @@ const HelpGuide: React.FC = () => {
           question: 'How AI suggestions work',
           answer: (
             <div>
-              <p>BlackBar runs <strong>one LLM call per document</strong>, using the active jurisdiction pack's prompt. The default for any candidate is <em>disclosure</em> — the AI is calibrated to err on the side of NOT redacting. You should still review every suggestion.</p>
+              <p>BlackBar sends the document's extracted text to the default LLM provider, using the active jurisdiction pack's prompt. Long documents are analysed in overlapping chunks up to a size cap. The default for any candidate is <em>disclosure</em> — the AI is calibrated to err on the side of NOT redacting. You should still review every suggestion.</p>
+              <p style={{marginTop: '10px'}}><strong>Opening a document does not send it to the AI.</strong> Text only leaves BlackBar when you click Generate or Regenerate, or when an admin has turned on auto-generate in Admin → Configuration.</p>
               <p style={{marginTop: '10px'}}><strong>To generate suggestions:</strong></p>
               <ol style={{marginLeft: '20px'}}>
                 <li>Open a document in the viewer.</li>
@@ -323,7 +323,15 @@ const HelpGuide: React.FC = () => {
                 <li>Pick the <strong>AI Recommended</strong> tab.</li>
                 <li>Click <strong>Generate AI Suggestions</strong>. Takes ~10-25 seconds depending on provider and document length.</li>
               </ol>
-              <p style={{marginTop: '15px'}}>Suggestions are cached per document. The list survives reloads.</p>
+              <p style={{marginTop: '15px'}}>Suggestions are cached per document, including a result with no suggestions. The list survives reloads.</p>
+              <p style={{marginTop: '10px'}}>The AI tab can also show:</p>
+              <ul style={{marginLeft: '20px'}}>
+                <li><strong>AI suggestions are unavailable</strong> — AI is disabled or no default LLM is configured. Nothing was sent.</li>
+                <li><strong>An error with a code and reference</strong> — the provider call failed. Give the reference to your administrator; it matches the server log.</li>
+                <li><strong>Partial analysis</strong> — the document was longer than the analysis cap (the notice shows how many characters were analysed), or the AI response was cut off. Review the rest of the document manually.</li>
+                <li><strong>Try again in N seconds</strong> — AI analysis is rate limited per user and per document. Wait, then click the button again.</li>
+              </ul>
+              <p style={{marginTop: '10px'}}>A line under the notices shows which provider and model produced the result.</p>
               {warnBox(<>An LLM provider must be configured and marked as default before this works. See the LLM Configuration section.</>)}
             </div>
           ),
@@ -334,7 +342,7 @@ const HelpGuide: React.FC = () => {
           answer: (
             <div>
               <ul style={{marginLeft: '20px'}}>
-                <li><strong>Generate AI Suggestions</strong> — first call on a document. Uses the cache if present (so this is free on re-open).</li>
+                <li><strong>Generate AI Suggestions</strong> — sends the document for analysis. Uses the cache if present (so this is free on re-open).</li>
                 <li><strong>Regenerate</strong> — bypasses the cache and makes a fresh LLM call. Use this after a pack/prompt update.</li>
               </ul>
             </div>
@@ -407,9 +415,11 @@ const HelpGuide: React.FC = () => {
                 <li>Admin → <strong>LLM Configuration</strong>.</li>
                 <li>Click <strong>Add LLM</strong>.</li>
                 <li>Pick the request format (OpenAI / Anthropic / Google / Cohere).</li>
-                <li>Enter the API endpoint, API key, and model name (e.g. <code>gpt-4o-mini</code>, <code>claude-3-5-sonnet-latest</code>).</li>
+                <li>Enter the API endpoint, API key, and model name. For Anthropic, current IDs are <code>claude-sonnet-5</code> (suggested), <code>claude-opus-5-5</code>, <code>claude-fable-5-1</code> and <code>claude-haiku-4-5-20251001</code>. For other providers, use a current model ID from the provider's documentation.</li>
                 <li>Save.</li>
               </ol>
+              <p style={{marginTop: '15px'}}>Endpoints must use <code>https</code> (<code>http</code> is accepted only for localhost). Private and link-local addresses are refused unless the server sets <code>LLM_ALLOW_PRIVATE_ENDPOINTS</code>.</p>
+              <p style={{marginTop: '10px'}}>Changing a config's endpoint or provider without entering a new key clears the stored key; the row then shows <strong>API key must be re-entered</strong> and cannot be tested or used until you edit it and enter the key. Custom header values are never shown again after saving.</p>
               <p style={{marginTop: '15px'}}>The first enabled config you create is <strong>auto-promoted to default</strong>. Subsequent configs are added but don't displace the default — click <strong>Set Default</strong> on a row to switch.</p>
               {tipBox(<>API keys are encrypted at rest with Fernet using the <code>LLM_API_KEY_ENCRYPTION_KEY</code> env var.</>)}
             </div>
@@ -421,7 +431,8 @@ const HelpGuide: React.FC = () => {
           answer: (
             <div>
               <p>Each row in the LLM Configuration list has a <strong>Test</strong> button (play icon). Clicking it sends a short test prompt to the configured provider and reports success / failure + latency.</p>
-              <p style={{marginTop: '10px'}}>If you see <em>"Connection failed (1.37s): Client error '404 Not Found'"</em>, the model name is wrong — common cause is a retired model identifier like <code>gpt-4-turbo-preview</code>. Use a current name.</p>
+              <p style={{marginTop: '10px'}}>A failed test shows a short message with an <strong>error code</strong> and a <strong>reference</strong>. The provider's own error text is kept out of the browser; the reference matches the entry in the server log. A "not found" style failure usually means a retired model ID: check the provider's documentation for a current one.</p>
+              <p style={{marginTop: '10px'}}>Tests are rate limited. If you see <em>"Try again in N seconds"</em>, wait before testing again.</p>
             </div>
           ),
           tags: ['test', 'llm', 'connection', 'model']
@@ -465,7 +476,7 @@ const HelpGuide: React.FC = () => {
                 <li>Request title + description + category</li>
                 <li>Requester contact details (name, email, phone, organization)</li>
               </ul>
-              <p style={{marginTop: '10px'}}>On submission they get a tracking number (e.g. <code>FOI-2026-007-DJH</code>) and an email confirmation (when SendGrid is configured).</p>
+              <p style={{marginTop: '10px'}}>On submission they get a tracking number (e.g. <code>FOI-2026-007-K7QX2M9A</code>) and an email confirmation (when SendGrid is configured).</p>
             </div>
           ),
           tags: ['public', 'request', 'intake', 'submit']
@@ -547,6 +558,7 @@ const HelpGuide: React.FC = () => {
                 <li>Open the case.</li>
                 <li>Click <strong>Generate Release Package</strong> in the case actions.</li>
                 <li>The system applies all approved redactions permanently to copies of the PDFs, optionally generates a cover letter from the pack's template, and bundles everything into a ZIP.</li>
+                <li>If any document still has redactions awaiting review, or cannot be safely redacted, the package is marked <strong>failed</strong> and lists those documents with the reason. Documents that failed conversion to PDF are left out and listed too.</li>
                 <li>The package is recorded with a unique access token, an expiry date, and an optional download limit.</li>
               </ol>
             </div>
@@ -601,7 +613,7 @@ const HelpGuide: React.FC = () => {
                 <li>Default priority</li>
                 <li>Public-portal toggles (enable public requests, enable tracking, enable public upload)</li>
                 <li>Request categories shown on the public form</li>
-                <li>Auto-generate AI suggestions on upload (off by default — turning it on incurs LLM cost on every upload)</li>
+                <li>Auto-generate AI suggestions (off by default — turning it on sends documents to the LLM on upload and when opened without a cached result, which incurs LLM cost)</li>
               </ul>
             </div>
           ),

@@ -38,6 +38,7 @@ import GroupIcon from '@mui/icons-material/Group';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import UploadIcon from '@mui/icons-material/Upload';
 import { contributorsApi, CaseContributor } from '../../api/workflowApi';
+import { getApiErrorMessage } from '../../api/errors';
 
 interface ContributorsPanelProps {
   caseId: string;
@@ -97,7 +98,7 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
       setInviteData({ name: '', email: '', department: '', notes: '' });
       await fetchContributors();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to invite contributor');
+      setError(getApiErrorMessage(err, 'Failed to invite contributor'));
     } finally {
       setSubmitting(false);
     }
@@ -108,7 +109,7 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
       await contributorsApi.remind(caseId, contributorId);
       setSuccess(`Reminder sent to ${email}`);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to send reminder');
+      setError(getApiErrorMessage(err, 'Failed to send reminder'));
     }
   };
 
@@ -120,7 +121,7 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
       await fetchContributors();
       setSuccess('Contributor removed');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to remove contributor');
+      setError(getApiErrorMessage(err, 'Failed to remove contributor'));
     }
   };
 
@@ -157,7 +158,7 @@ const ContributorsPanel: React.FC<ContributorsPanelProps> = ({ caseId }) => {
       setBulkText('');
       await fetchContributors();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to bulk invite contributors');
+      setError(getApiErrorMessage(err, 'Failed to bulk invite contributors'));
     } finally {
       setSubmitting(false);
     }

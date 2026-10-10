@@ -112,6 +112,10 @@ class TestCreateIndexes:
         assert "is_duplicate_1" in docs_indexes
         assert "case_id_1_is_duplicate_1" in docs_indexes
         assert "case_id_1_file_hash_1" in docs_indexes
+        # Email thread lookup (#72): candidates are fetched per case by
+        # normalised subject or Message-ID.
+        assert "case_id_1_thread_metadata.normalized_subject_1" in docs_indexes
+        assert "case_id_1_message_id_1" in docs_indexes
 
         # templates
         templates_indexes = await db.templates.index_information()

@@ -46,6 +46,31 @@ def generate_correlation_id() -> str:
     return str(uuid.uuid4())
 
 
+# Versioned API prefix. Starlette no longer flattens included routers, so the
+# matched route's template lacks the outer "/api/v1" router prefix.
+API_PREFIX = "/api/v1"
+UNMATCHED_ENDPOINT = "unmatched"
+IN_FLIGHT_ENDPOINT = "all"
+
+
+def route_template(request: Request) -> str:
+    """Metric/span label for a request: the matched route template (e.g.
+    ``/api/v1/cases/collect/{token}``), never the raw path.
+
+    Raw paths carry capability tokens (collection links, release packages)
+    and arbitrary attacker-chosen segments, which leaked into /metrics and
+    gave unbounded label cardinality (AUTH-15). Requests that match no route
+    share the single ``unmatched`` label.
+    """
+    route = request.scope.get("route")
+    template = getattr(route, "path_format", None) or getattr(route, "path", None)
+    if not template:
+        return UNMATCHED_ENDPOINT
+    if request.url.path.startswith(API_PREFIX + "/") and not template.startswith(API_PREFIX):
+        template = API_PREFIX + template
+    return template
+
+
 class CorrelationMiddleware(BaseHTTPMiddleware):
     """
     Middleware that handles correlation IDs and request metrics.
@@ -71,21 +96,15 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
         # Add to request state for easy access
         request.state.correlation_id = correlation_id
 
-        # Get endpoint path for metrics (normalize dynamic segments)
-        endpoint = self._normalize_path(request.url.path)
         method = request.method
 
-        # Add to current trace span
-        add_span_attributes(
-            {
-                "correlation.id": correlation_id,
-                "http.method": method,
-                "http.url": str(request.url),
-            }
-        )
+        # Add to current trace span. Never the raw URL: its path and query
+        # string can carry capability tokens (AUTH-15).
+        add_span_attributes({"correlation.id": correlation_id, "http.method": method})
 
-        # Track in-progress requests
-        http_requests_in_progress.labels(method=method, endpoint=endpoint).inc()
+        # The route is only known after routing, so the in-flight gauge uses a
+        # constant endpoint label.
+        http_requests_in_progress.labels(method=method, endpoint=IN_FLIGHT_ENDPOINT).inc()
 
         # Record request timing
         start_time = time.perf_counter()
@@ -99,6 +118,7 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
         finally:
             # Calculate duration
             duration = time.perf_counter() - start_time
+            endpoint = route_template(request)
 
             # Record metrics
             http_requests_total.labels(
@@ -107,7 +127,9 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
 
             http_request_duration_seconds.labels(method=method, endpoint=endpoint).observe(duration)
 
-            http_requests_in_progress.labels(method=method, endpoint=endpoint).dec()
+            http_requests_in_progress.labels(method=method, endpoint=IN_FLIGHT_ENDPOINT).dec()
+
+            add_span_attributes({"http.route": endpoint})
 
         # Add correlation ID to response headers
         response.headers[CORRELATION_ID_HEADER] = correlation_id
@@ -152,7 +174,6 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/metrics":
             return await call_next(request)
 
-        endpoint = self._normalize_path(request.url.path)
         method = request.method
 
         start_time = time.perf_counter()
@@ -165,6 +186,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             raise
         finally:
             duration = time.perf_counter() - start_time
+            endpoint = route_template(request)
 
             http_requests_total.labels(
                 method=method, endpoint=endpoint, status=str(status_code)

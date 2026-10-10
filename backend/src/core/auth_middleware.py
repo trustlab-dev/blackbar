@@ -122,6 +122,31 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Attach user context to request
         request.state.user_id = token_payload.sub
         request.state.roles = [token_payload.role] if token_payload.role else []
+        request.state.realm = token_payload.realm
+        request.state.token_version = token_payload.tv
+
+        # Public (magic-link) principals may only use the allowlisted public
+        # routes above, which never reach this point (AUTH-03). Everything
+        # else is an internal endpoint.
+        if token_payload.realm == "public":
+            logger.warning(
+                "Public-realm token refused on internal endpoint",
+                extra={
+                    "correlation_id": getattr(request.state, "correlation_id", "unknown"),
+                    "user_id": token_payload.sub,
+                    "path": request.url.path,
+                },
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "PUBLIC_TOKEN_FORBIDDEN",
+                        "message": "Public accounts cannot access this endpoint",
+                        "correlation_id": getattr(request.state, "correlation_id", "unknown"),
+                    }
+                },
+            )
 
         logger.info(
             f"Authenticated user {token_payload.sub} with role {token_payload.role}",

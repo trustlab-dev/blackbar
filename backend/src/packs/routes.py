@@ -4,6 +4,7 @@ Pack Management API Routes
 
 import json
 import logging
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -14,6 +15,9 @@ from .registry import PackRegistry
 from .validator import validate_pack
 
 router = APIRouter(prefix="/packs", tags=["Packs"])
+
+# Custom pack ids become filenames under packs/custom (DOC-22).
+_PACK_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 logger = logging.getLogger(__name__)
 
 
@@ -312,6 +316,18 @@ async def upload_custom_pack(file: UploadFile = File(...), current_user=Depends(
         content = await file.read()
         pack_data = json.loads(content)
 
+        # The pack_id becomes a filename: validate it before anything else
+        # (DOC-22, path traversal).
+        pack_id = pack_data.get("pack_id") if isinstance(pack_data, dict) else None
+        if not isinstance(pack_id, str) or not _PACK_ID_RE.fullmatch(pack_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Invalid pack_id: use 1-64 lowercase letters, digits, '_' or '-', "
+                    "starting with a letter or digit"
+                ),
+            )
+
         # Validate pack
         validation = validate_pack(pack_data)
         if not validation["valid"]:
@@ -323,11 +339,12 @@ async def upload_custom_pack(file: UploadFile = File(...), current_user=Depends(
             }
 
         # Save to custom packs directory
-        pack_id = pack_data.get("pack_id")
         custom_dir = PackLoader.get_packs_directory() / "custom"
         custom_dir.mkdir(exist_ok=True)
 
         pack_file = custom_dir / f"{pack_id}.json"
+        if pack_file.resolve().parent != custom_dir.resolve():
+            raise HTTPException(status_code=422, detail="Invalid pack_id")
         with open(pack_file, "w", encoding="utf-8") as f:
             json.dump(pack_data, f, indent=2, ensure_ascii=False)
 
@@ -343,6 +360,8 @@ async def upload_custom_pack(file: UploadFile = File(...), current_user=Depends(
             "warnings": validation.get("warnings", []),
         }
 
+    except HTTPException:
+        raise
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
     except Exception as e:

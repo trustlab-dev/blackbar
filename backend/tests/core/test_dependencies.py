@@ -1,33 +1,32 @@
-"""Tests for `src.core.dependencies` — request-state-driven auth helpers.
+"""Tests for `src.core.dependencies` — request-context auth helpers.
 
-Critical-path: 100% line + branch.
+Since the 2026-09 security review (AUTH-14) every authorization helper here
+resolves the principal through `src.dependencies.get_current_user`, which
+re-reads the user from the database: the DB role is authoritative, inactive
+or deleted users are refused, and public-realm principals are refused.
 
 Functions under test:
 - get_current_user_id / get_current_user_id_optional
 - get_user_roles
-- require_role (factory) — wraps get_current_user_id + role membership
-- require_admin (4-tier: admin role)
-- _get_jwt_realm (private)
-- require_admin_access — realm-aware check with extra role gate
+- require_role (factory)
+- require_admin
+- require_admin_access
 - get_correlation_id
 
-All take only a duck-typed Request. The middleware sets request.state.user_id
-and request.state.roles upstream; these helpers consume that state.
+All take only a duck-typed Request whose `.state` mimics what AuthMiddleware
+sets (user_id, roles, realm, token_version).
 """
 
 from __future__ import annotations
 
-import time
+import uuid
 from types import SimpleNamespace
-from typing import Any
 
-import jwt
 import pytest
 from fastapi import HTTPException
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from src.config import ALGORITHM, JWT_SECRET
 from src.core.dependencies import (
-    _get_jwt_realm,
     get_correlation_id,
     get_current_user_id,
     get_current_user_id_optional,
@@ -38,35 +37,35 @@ from src.core.dependencies import (
 )
 
 
-def _make_request(
-    *,
-    state: dict | None = None,
-    auth_header: str | None = None,
-    path: str = "/api/v1/example",
-):
-    """Duck-typed Request with .state (SimpleNamespace), .headers.get(), .url.path."""
-    headers_dict = {}
-    if auth_header is not None:
-        headers_dict["Authorization"] = auth_header
-
-    class _Headers:
-        def __init__(self, d):
-            self._d = d
-
-        def get(self, key, default=None):
-            return self._d.get(key, default)
-
+def _make_request(*, state: dict | None = None, path: str = "/api/v1/example"):
+    """Duck-typed Request with .state (SimpleNamespace) and .url.path."""
     return SimpleNamespace(
         state=SimpleNamespace(**(state or {})),
-        headers=_Headers(headers_dict),
         url=SimpleNamespace(path=path),
     )
 
 
-def _make_jwt(payload: dict[str, Any], secret: str = JWT_SECRET) -> str:
-    base = {"exp": int(time.time() + 600)}
-    base.update(payload)
-    return jwt.encode(base, secret, algorithm=ALGORITHM)
+@pytest.fixture
+def seed_user(monkeypatch: pytest.MonkeyPatch, db: AsyncIOMotorDatabase):
+    """Point `src.dependencies.users` at the test DB and return a seeder."""
+    import src.dependencies as deps_mod
+
+    monkeypatch.setattr(deps_mod, "users", db.users)
+
+    async def _seed(role: str = "user", status: str = "active", token_version: int = 0) -> str:
+        uid = str(uuid.uuid4())
+        await db.users.insert_one(
+            {
+                "id": uid,
+                "email": f"{uid}@example.com",
+                "role": role,
+                "status": status,
+                "token_version": token_version,
+            }
+        )
+        return uid
+
+    return _seed
 
 
 # ---------------------------------------------------------------------------
@@ -75,48 +74,62 @@ def _make_jwt(payload: dict[str, Any], secret: str = JWT_SECRET) -> str:
 
 
 class TestGetCurrentUserId:
-    def test_state_populated_returns_id(self):
-        req = _make_request(state={"user_id": "u-1"})
-        assert get_current_user_id(req) == "u-1"
+    async def test_active_user_returns_id(self, seed_user):
+        uid = await seed_user("analyst")
+        req = _make_request(state={"user_id": uid, "roles": ["analyst"]})
+        assert await get_current_user_id(req) == uid
 
-    def test_missing_state_raises_401(self):
-        req = _make_request(state={})
+    async def test_missing_state_raises_401(self):
         with pytest.raises(HTTPException) as exc:
-            get_current_user_id(req)
+            await get_current_user_id(_make_request(state={}))
         assert exc.value.status_code == 401
-        assert exc.value.detail == "Authentication required"
 
-    def test_empty_state_user_id_raises_401(self):
-        """state.user_id is set but falsy (empty string)."""
-        req = _make_request(state={"user_id": ""})
+    async def test_empty_state_user_id_raises_401(self):
         with pytest.raises(HTTPException) as exc:
-            get_current_user_id(req)
+            await get_current_user_id(_make_request(state={"user_id": ""}))
         assert exc.value.status_code == 401
+
+    async def test_unknown_user_raises_401(self, seed_user):
+        req = _make_request(state={"user_id": "ghost", "roles": ["admin"]})
+        with pytest.raises(HTTPException) as exc:
+            await get_current_user_id(req)
+        assert exc.value.status_code == 401
+
+    async def test_disabled_user_raises_401(self, seed_user):
+        uid = await seed_user("admin", status="disabled")
+        req = _make_request(state={"user_id": uid, "roles": ["admin"]})
+        with pytest.raises(HTTPException) as exc:
+            await get_current_user_id(req)
+        assert exc.value.status_code == 401
+
+    async def test_stale_token_version_raises_401(self, seed_user):
+        uid = await seed_user("admin", token_version=3)
+        req = _make_request(state={"user_id": uid, "roles": ["admin"], "token_version": 2})
+        with pytest.raises(HTTPException) as exc:
+            await get_current_user_id(req)
+        assert exc.value.status_code == 401
+
+    async def test_public_realm_raises_403(self, seed_user):
+        req = _make_request(state={"user_id": "p-1", "roles": ["public_user"], "realm": "public"})
+        with pytest.raises(HTTPException) as exc:
+            await get_current_user_id(req)
+        assert exc.value.status_code == 403
 
 
 class TestGetCurrentUserIdOptional:
     def test_state_populated_returns_id(self):
-        req = _make_request(state={"user_id": "u-2"})
-        assert get_current_user_id_optional(req) == "u-2"
+        assert get_current_user_id_optional(_make_request(state={"user_id": "u-1"})) == "u-1"
 
     def test_missing_state_returns_none(self):
-        req = _make_request(state={})
-        assert get_current_user_id_optional(req) is None
-
-
-# ---------------------------------------------------------------------------
-# get_user_roles
-# ---------------------------------------------------------------------------
+        assert get_current_user_id_optional(_make_request(state={})) is None
 
 
 class TestGetUserRoles:
     def test_populated_returns_list(self):
-        req = _make_request(state={"roles": ["admin", "analyst"]})
-        assert get_user_roles(req) == ["admin", "analyst"]
+        assert get_user_roles(_make_request(state={"roles": ["admin"]})) == ["admin"]
 
     def test_missing_returns_empty(self):
-        req = _make_request(state={})
-        assert get_user_roles(req) == []
+        assert get_user_roles(_make_request(state={})) == []
 
 
 # ---------------------------------------------------------------------------
@@ -125,167 +138,107 @@ class TestGetUserRoles:
 
 
 class TestRequireRole:
-    def test_user_with_matching_role_passes(self):
-        gate = require_role(["admin"])
-        req = _make_request(state={"user_id": "u-1", "roles": ["admin"]})
-        assert gate(req) is True
+    async def test_user_with_matching_role_passes(self, seed_user):
+        uid = await seed_user("admin")
+        req = _make_request(state={"user_id": uid, "roles": ["admin"]})
+        assert await require_role(["admin"])(req) is True
 
-    def test_user_with_one_of_many_roles_passes(self):
-        gate = require_role(["admin", "analyst"])
-        req = _make_request(state={"user_id": "u-1", "roles": ["analyst"]})
-        assert gate(req) is True
+    async def test_user_with_one_of_many_roles_passes(self, seed_user):
+        uid = await seed_user("analyst")
+        req = _make_request(state={"user_id": uid, "roles": ["analyst"]})
+        assert await require_role(["admin", "analyst"])(req) is True
 
-    def test_no_matching_role_raises_403(self):
-        gate = require_role(["admin"])
-        req = _make_request(state={"user_id": "u-1", "roles": ["user"]})
+    async def test_no_matching_role_raises_403(self, seed_user):
+        uid = await seed_user("user")
+        req = _make_request(state={"user_id": uid, "roles": ["user"]})
         with pytest.raises(HTTPException) as exc:
-            gate(req)
+            await require_role(["admin"])(req)
         assert exc.value.status_code == 403
         assert exc.value.detail == "Insufficient permissions"
 
-    def test_unauthenticated_raises_401_not_403(self):
-        """The factory calls get_current_user_id first; auth fails before
-        the role check fires."""
-        gate = require_role(["admin"])
-        req = _make_request(state={})
+    async def test_token_role_claim_is_not_trusted(self, seed_user):
+        """AUTH-14: the token says admin, the DB says user -> 403."""
+        uid = await seed_user("user")
+        req = _make_request(state={"user_id": uid, "roles": ["admin"]})
         with pytest.raises(HTTPException) as exc:
-            gate(req)
+            await require_role(["admin"])(req)
+        assert exc.value.status_code == 403
+
+    async def test_unauthenticated_raises_401_not_403(self):
+        with pytest.raises(HTTPException) as exc:
+            await require_role(["admin"])(_make_request(state={}))
         assert exc.value.status_code == 401
 
 
 # ---------------------------------------------------------------------------
-# require_admin (4-tier role-based)
+# require_admin
 # ---------------------------------------------------------------------------
 
 
 class TestRequireAdmin:
-    def test_admin_role_passes(self):
-        req = _make_request(state={"user_id": "u-1", "roles": ["admin"]})
-        assert require_admin(req) is True
+    async def test_admin_role_passes(self, seed_user):
+        uid = await seed_user("admin")
+        assert await require_admin(_make_request(state={"user_id": uid})) is True
 
-    def test_mixed_case_admin_passes(self):
-        req = _make_request(state={"user_id": "u-1", "roles": ["Admin"]})
-        assert require_admin(req) is True
+    async def test_mixed_case_admin_passes(self, seed_user):
+        uid = await seed_user("Admin")
+        assert await require_admin(_make_request(state={"user_id": uid})) is True
 
-    def test_non_admin_raises_403(self):
-        req = _make_request(state={"user_id": "u-1", "roles": ["analyst"]})
+    async def test_non_admin_raises_403(self, seed_user):
+        uid = await seed_user("analyst")
         with pytest.raises(HTTPException) as exc:
-            require_admin(req)
+            await require_admin(_make_request(state={"user_id": uid}))
         assert exc.value.status_code == 403
         assert exc.value.detail == "Admin access required"
 
-    def test_unauthenticated_raises_401(self):
-        req = _make_request(state={})
+    async def test_unauthenticated_raises_401(self):
         with pytest.raises(HTTPException) as exc:
-            require_admin(req)
+            await require_admin(_make_request(state={}))
         assert exc.value.status_code == 401
 
 
 # ---------------------------------------------------------------------------
-# _get_jwt_realm (private helper)
-# ---------------------------------------------------------------------------
-
-
-class TestGetJwtRealm:
-    def test_valid_token_returns_realm(self):
-        token = _make_jwt({"sub": "u-1", "realm": "org"})
-        req = _make_request(auth_header=f"Bearer {token}")
-        assert _get_jwt_realm(req) == "org"
-
-    def test_no_realm_in_token_returns_none(self):
-        token = _make_jwt({"sub": "u-1"})  # no realm key
-        req = _make_request(auth_header=f"Bearer {token}")
-        assert _get_jwt_realm(req) is None
-
-    def test_no_auth_header_returns_none(self):
-        req = _make_request(auth_header=None)
-        assert _get_jwt_realm(req) is None
-
-    def test_wrong_scheme_returns_none(self):
-        req = _make_request(auth_header="Basic abc.def.ghi")
-        assert _get_jwt_realm(req) is None
-
-    def test_malformed_token_returns_none(self):
-        req = _make_request(auth_header="Bearer not.a.jwt")
-        assert _get_jwt_realm(req) is None
-
-    def test_expired_token_returns_none(self):
-        token = _make_jwt({"sub": "u-1", "realm": "org", "exp": int(time.time() - 600)})
-        req = _make_request(auth_header=f"Bearer {token}")
-        assert _get_jwt_realm(req) is None
-
-
-# ---------------------------------------------------------------------------
-# require_admin_access (realm + role)
+# require_admin_access (realm + DB role)
 # ---------------------------------------------------------------------------
 
 
 class TestRequireAdminAccess:
-    def test_admin_role_with_no_realm_passes(self):
-        """No token at all (realm=None) → not 'public' → falls through to
-        the role check, which passes for 'admin'."""
-        req = _make_request(state={"user_id": "u-1", "roles": ["admin"]})
-        assert require_admin_access(req) is True
+    async def test_admin_passes(self, seed_user):
+        uid = await seed_user("admin")
+        assert await require_admin_access(_make_request(state={"user_id": uid})) is True
 
-    def test_owner_role_with_no_realm_passes(self):
-        req = _make_request(state={"user_id": "u-1", "roles": ["owner"]})
-        assert require_admin_access(req) is True
+    async def test_owner_passes(self, seed_user):
+        uid = await seed_user("owner")
+        assert await require_admin_access(_make_request(state={"user_id": uid})) is True
 
-    def test_mixed_case_owner_passes(self):
-        req = _make_request(state={"user_id": "u-1", "roles": ["Owner"]})
-        assert require_admin_access(req) is True
+    async def test_mixed_case_owner_passes(self, seed_user):
+        uid = await seed_user("Owner")
+        assert await require_admin_access(_make_request(state={"user_id": uid})) is True
 
-    def test_public_realm_rejected_403(self):
-        token = _make_jwt({"sub": "u-1", "realm": "public"})
-        req = _make_request(
-            state={"user_id": "u-1", "roles": ["admin"]},
-            auth_header=f"Bearer {token}",
-        )
+    async def test_public_realm_rejected_403(self, seed_user):
+        req = _make_request(state={"user_id": "u-1", "roles": ["admin"], "realm": "public"})
         with pytest.raises(HTTPException) as exc:
-            require_admin_access(req)
+            await require_admin_access(req)
         assert exc.value.status_code == 403
         assert "Public users cannot access admin routes" in exc.value.detail
 
-    def test_public_realm_without_state_user_id_still_403(self):
-        """The public-realm warning uses get_current_user_id_optional which
-        returns None when state is empty. Pin that None doesn't crash."""
-        token = _make_jwt({"sub": "u-1", "realm": "public"})
-        req = _make_request(state={}, auth_header=f"Bearer {token}")
+    async def test_public_realm_without_state_user_id_still_403(self):
+        req = _make_request(state={"realm": "public"})
         with pytest.raises(HTTPException) as exc:
-            require_admin_access(req)
+            await require_admin_access(req)
         assert exc.value.status_code == 403
 
-    def test_org_realm_with_admin_role_passes(self):
-        token = _make_jwt({"sub": "u-1", "realm": "org"})
-        req = _make_request(
-            state={"user_id": "u-1", "roles": ["admin"]},
-            auth_header=f"Bearer {token}",
-        )
-        assert require_admin_access(req) is True
-
-    def test_org_realm_with_no_admin_role_raises_403(self):
-        token = _make_jwt({"sub": "u-1", "realm": "org"})
-        req = _make_request(
-            state={"user_id": "u-1", "roles": ["analyst"]},
-            auth_header=f"Bearer {token}",
-        )
+    async def test_non_admin_raises_403(self, seed_user):
+        uid = await seed_user("analyst")
         with pytest.raises(HTTPException) as exc:
-            require_admin_access(req)
+            await require_admin_access(_make_request(state={"user_id": uid, "realm": "org"}))
         assert exc.value.status_code == 403
         assert "Admin role required" in exc.value.detail
 
-    def test_org_realm_no_admin_role_unauthenticated_raises_403(self):
-        """Phase 4 Batch 4.4 (audit B42): when the role check fails and
-        `state.user_id` is unset, the warning block now uses the
-        None-safe `get_current_user_id_optional` so the intentional
-        403 reaches the caller instead of being masked by a 401 from
-        the strict getter. Test flipped from `_raises_401`."""
-        token = _make_jwt({"sub": "u-1", "realm": "org"})
-        req = _make_request(state={"roles": ["analyst"]}, auth_header=f"Bearer {token}")
+    async def test_unauthenticated_raises_401(self):
         with pytest.raises(HTTPException) as exc:
-            require_admin_access(req)
-        assert exc.value.status_code == 403
-        assert "Admin role required" in exc.value.detail
+            await require_admin_access(_make_request(state={"roles": ["admin"]}))
+        assert exc.value.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -299,5 +252,4 @@ class TestGetCorrelationId:
         assert get_correlation_id(req) == "abc-123"
 
     def test_missing_state_returns_unknown(self):
-        req = _make_request(state={})
-        assert get_correlation_id(req) == "unknown"
+        assert get_correlation_id(_make_request(state={})) == "unknown"

@@ -228,6 +228,69 @@ class TestHttpExceptionHandler:
         # FastAPI fills in "Internal Server Error" by default for 500
         assert b"Internal Server Error" in resp.body
 
+    @pytest.mark.asyncio
+    async def test_dict_detail_message_and_details_are_split(self) -> None:
+        """Bulk routes raise ``detail={"message": ..., "errors": [...]}``; the
+        envelope must carry the message as text, not a Python repr."""
+        import json
+        from unittest.mock import MagicMock
+
+        req = MagicMock()
+        req.url.path = "/x"
+        req.method = "POST"
+        errors = [{"document_id": "d1", "reason": "text not found"}]
+        exc = HTTPException(
+            status_code=422,
+            detail={"message": "Some redactions could not be placed.", "errors": errors},
+        )
+        resp = await http_exception_handler(req, exc)
+        assert resp.status_code == 422
+        body = json.loads(resp.body)
+        assert body["error"]["code"] == "HTTP_422"
+        assert body["error"]["message"] == "Some redactions could not be placed."
+        assert body["error"]["details"] == {"errors": errors}
+        assert body["error"]["correlation_id"]
+
+    @pytest.mark.asyncio
+    async def test_dict_detail_without_message_keeps_everything_in_details(self) -> None:
+        import json
+        from unittest.mock import MagicMock
+
+        req = MagicMock()
+        req.url.path = "/x"
+        req.method = "POST"
+        exc = HTTPException(status_code=409, detail={"document_ids": ["a", "b"]})
+        resp = await http_exception_handler(req, exc)
+        body = json.loads(resp.body)
+        assert body["error"]["message"] == "Conflict"
+        assert body["error"]["details"] == {"document_ids": ["a", "b"]}
+
+    @pytest.mark.asyncio
+    async def test_string_detail_message_is_unchanged(self) -> None:
+        import json
+        from unittest.mock import MagicMock
+
+        req = MagicMock()
+        req.url.path = "/x"
+        req.method = "GET"
+        exc = HTTPException(status_code=404, detail="Document not found")
+        body = json.loads((await http_exception_handler(req, exc)).body)
+        assert body["error"]["message"] == "Document not found"
+        assert body["error"]["details"] == {}
+
+    @pytest.mark.asyncio
+    async def test_headers_pass_through_for_dict_detail(self) -> None:
+        from unittest.mock import MagicMock
+
+        req = MagicMock()
+        req.url.path = "/x"
+        req.method = "POST"
+        exc = HTTPException(
+            status_code=429, detail={"message": "Slow down"}, headers={"Retry-After": "60"}
+        )
+        resp = await http_exception_handler(req, exc)
+        assert resp.headers["retry-after"] == "60"
+
 
 class TestGenericExceptionHandler:
     @pytest.mark.asyncio

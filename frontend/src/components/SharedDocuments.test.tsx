@@ -108,7 +108,7 @@ describe('SharedDocuments', () => {
   it('shows an error message when the fetch fails', async () => {
     server.use(
       http.get('/api/v1/documents/shared-with-me', () =>
-        HttpResponse.json({ detail: 'server unavailable' }, { status: 500 }),
+        HttpResponse.json({ error: { code: 'HTTP_400', message: 'server unavailable' } }, { status: 400 }),
       ),
     );
     renderWithProviders(<SharedDocuments />);
@@ -117,33 +117,47 @@ describe('SharedDocuments', () => {
     ).toBeInTheDocument();
   });
 
-  it('clears auth and redirects to login on a 401', async () => {
-    // jsdom's window.location is read-only; replace it with a full stub so
-    // both the api-client base-URL logic and the 401 interceptor work.
-    const originalLocation = window.location;
-    delete (window as any).location;
-    (window as any).location = {
-      href: 'http://localhost/shared',
-      origin: 'http://localhost',
-      protocol: 'http:',
-      host: 'localhost',
-      hostname: 'localhost',
-      pathname: '/shared',
-      search: '',
-    };
-    server.use(
-      http.get('/api/v1/documents/shared-with-me', () =>
-        HttpResponse.json({ detail: 'unauthorized' }, { status: 401 }),
-      ),
-    );
-    renderWithProviders(<SharedDocuments />);
-    // The api-client interceptor fires first (redirects with a ?redirect=
-    // param); the component's own 401 branch then overwrites href to
-    // exactly '/login'. Either way the user lands on the login route.
-    await waitFor(() =>
-      expect(window.location.href).toMatch(/\/login/),
-    );
-    expect(localStorage.getItem('token')).toBeNull();
-    (window as any).location = originalLocation;
+  it('leaves a 401 to the api client, keeping reason and return path', async () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')!;
+    const assignments: string[] = [];
+    let href = 'http://localhost/shared';
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        origin: 'http://localhost',
+        protocol: 'http:',
+        host: 'localhost',
+        hostname: 'localhost',
+        pathname: '/shared',
+        search: '',
+        get href() {
+          return href;
+        },
+        set href(v: string) {
+          assignments.push(v);
+          href = v;
+        },
+      },
+    });
+    localStorage.setItem('token', 'guest-token');
+    try {
+      server.use(
+        http.get('/api/v1/documents/shared-with-me', () =>
+          HttpResponse.json(
+            { error: { code: 'HTTP_401', message: 'Invalid or expired token' } },
+            { status: 401 },
+          ),
+        ),
+      );
+      renderWithProviders(<SharedDocuments />);
+      await waitFor(() => expect(assignments.length).toBeGreaterThan(0));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(assignments).toEqual([
+        `/login?redirect=${encodeURIComponent('/shared')}&reason=expired`,
+      ]);
+      expect(localStorage.getItem('token')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
   });
 });
