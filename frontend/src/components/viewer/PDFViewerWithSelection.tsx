@@ -15,11 +15,6 @@ import 'react-pdf/dist/Page/TextLayer.css';
 import './PDFViewerWithSelection.css';
 import { PDF_DOCUMENT_OPTIONS } from './pdfSetup';
 
-// Type assertion for react-pdf v10 compatibility
-const DocumentComponent = Document as any;
-const PageComponent = Page as any;
-
-
 interface Redaction {
   // Present on persisted redactions; absent on ones not yet saved. The resize
   // affordance below keys off it, so it must be part of the type.
@@ -416,7 +411,7 @@ const PDFViewerWithSelection: React.FC<Props> = ({
         ref={pageRef}
         sx={{ position: 'relative', display: 'inline-block' }}
       >
-        <DocumentComponent
+        <Document
           key={pdfUrl}
           file={pdfUrl}
           options={PDF_DOCUMENT_OPTIONS}
@@ -427,8 +422,11 @@ const PDFViewerWithSelection: React.FC<Props> = ({
           }}
           loading={<CircularProgress />}
           error={<Box className="pdf-viewer-error">Failed to load PDF file.</Box>}
+          // react-pdf 11 suspends and throws to an Error Boundary by default.
+          // Keep the 10.x behaviour so the loading/error props above apply.
+          suspense={false}
         >
-          <PageComponent
+          <Page
             key={`page-${currentPage}`}
             pageNumber={currentPage}
             scale={zoom}
@@ -436,7 +434,7 @@ const PDFViewerWithSelection: React.FC<Props> = ({
             renderAnnotationLayer={false}
             error={<Box p={2}>Failed to load page {currentPage}</Box>}
           />
-        </DocumentComponent>
+        </Document>
 
         {/* Redaction overlays - positioned relative to page */}
         {redactions.map((redaction, idx) => {
