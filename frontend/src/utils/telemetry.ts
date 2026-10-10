@@ -10,7 +10,7 @@
 import React from 'react';
 import * as Sentry from '@sentry/react';
 import type { Breadcrumb, Event } from '@sentry/react';
-import { getCLS, getFID, getFCP, getLCP, getTTFB } from 'web-vitals';
+import { onCLS, onFCP, onINP, onLCP, onTTFB } from 'web-vitals';
 import type { Metric } from 'web-vitals';
 
 // Configuration from environment. VITE_ENVIRONMENT is optional and no deploy
@@ -25,7 +25,7 @@ const VERSION = import.meta.env.VITE_VERSION || '1.0.0';
 // Web Vitals thresholds (in ms)
 const VITALS_THRESHOLDS = {
   CLS: 0.1,      // Cumulative Layout Shift (unitless)
-  FID: 100,      // First Input Delay
+  INP: 200,      // Interaction to Next Paint (replaced First Input Delay)
   FCP: 1800,     // First Contentful Paint
   LCP: 2500,     // Largest Contentful Paint
   TTFB: 800,     // Time to First Byte
@@ -297,11 +297,11 @@ function initWebVitals(): void {
   };
   
   // Register all Web Vitals
-  getCLS(reportVital);
-  getFID(reportVital);
-  getFCP(reportVital);
-  getLCP(reportVital);
-  getTTFB(reportVital);
+  onCLS(reportVital);
+  onINP(reportVital);
+  onFCP(reportVital);
+  onLCP(reportVital);
+  onTTFB(reportVital);
 }
 
 /**
