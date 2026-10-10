@@ -260,6 +260,8 @@ class TestConvertOfficeToPdf:
                     raise
 
         monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+        # Python 3.12+ binds rmtree into tempfile at import time.
+        monkeypatch.setattr(tempfile, "_rmtree", failing_rmtree, raising=False)
 
         with caplog.at_level("WARNING", logger="src.utils.conversion"):
             if exit_code:
