@@ -292,7 +292,7 @@ describe('UserManagement — toggle disable', () => {
     renderWithProviders(<UserManagement />);
     await screen.findByText('Alice Admin');
     await user.click(
-      screen.getByRole('checkbox', { name: /toggle user status/i }),
+      screen.getByRole('switch', { name: /toggle user status/i }),
     );
     await waitFor(() => expect(putBody?.disabled).toBe(true));
     expect(await screen.findByText('Disabled')).toBeInTheDocument();
@@ -308,7 +308,7 @@ describe('UserManagement — toggle disable', () => {
     renderWithProviders(<UserManagement />);
     await screen.findByText('Alice Admin');
     await user.click(
-      screen.getByRole('checkbox', { name: /toggle user status/i }),
+      screen.getByRole('switch', { name: /toggle user status/i }),
     );
     // No response body: getApiErrorMessage falls back to the contextual
     // message instead of axios's raw "Network Error".
@@ -507,6 +507,6 @@ describe('UserManagement — grantable roles', () => {
     await screen.findByText('Olive Owner');
     expect(screen.getByRole('button', { name: /edit user/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /change password/i })).toBeDisabled();
-    expect(screen.getByRole('checkbox', { name: /toggle user status/i })).toBeDisabled();
+    expect(screen.getByRole('switch', { name: /toggle user status/i })).toBeDisabled();
   });
 });
