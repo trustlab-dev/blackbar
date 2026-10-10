@@ -13,6 +13,7 @@ import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta
+from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -89,7 +90,7 @@ class ClockEventsRepository:
                 received = _parse_iso_naive(received)
             days_elapsed = (now - received).days
 
-        event_dict = {
+        event_dict: dict[str, Any] = {
             "id": event_id,
             "case_id": case_id,
             "event_type": event_data.event_type.value,
@@ -116,7 +117,7 @@ class ClockEventsRepository:
         event_date: datetime,
     ):
         """Update case document with clock status"""
-        update = {"updated_at": event_date}
+        update: dict[str, Any] = {"updated_at": event_date}
 
         if event_type == ClockEventType.PAUSE:
             update["clock_status"] = "paused"
@@ -210,7 +211,7 @@ class ContributorsRepository:
 
         expires_at = now + timedelta(days=contributor_data.token_expiration_days)
 
-        contributor_dict = {
+        contributor_dict: dict[str, Any] = {
             "id": contributor_id,
             "case_id": case_id,
             "name": contributor_data.name,
@@ -364,7 +365,7 @@ class RemindersRepository:
         reminder_id = str(uuid.uuid4())
         now = datetime.utcnow()
 
-        reminder_dict = {
+        reminder_dict: dict[str, Any] = {
             "id": reminder_id,
             "case_id": case_id,
             "reminder_type": reminder_data.reminder_type.value,
@@ -385,7 +386,7 @@ class RemindersRepository:
 
     async def get_by_case(self, case_id: str, include_sent: bool = False) -> list[CaseReminder]:
         """Get reminders for a case"""
-        query = {"case_id": case_id}
+        query: dict[str, Any] = {"case_id": case_id}
         if not include_sent:
             query["status"] = {"$in": [ReminderStatus.PENDING.value]}
 
@@ -400,7 +401,7 @@ class RemindersRepository:
         self, before_date: datetime | None = None
     ) -> list[CaseReminder]:
         """Get all pending reminders that should be sent"""
-        query = {"status": ReminderStatus.PENDING.value}
+        query: dict[str, Any] = {"status": ReminderStatus.PENDING.value}
         if before_date:
             query["trigger_date"] = {"$lte": before_date}
         else:
@@ -467,7 +468,7 @@ class QueueRepository:
         now = datetime.utcnow()
 
         # Build query
-        query = {}
+        query: dict[str, Any] = {}
         if not filters.include_closed:
             query["status"] = {"$ne": "closed"}
         if filters.analyst_id:
@@ -590,7 +591,7 @@ class TransfersRepository:
 
         expires_at = now + timedelta(days=token_expiration_days)
 
-        transfer_dict = {
+        transfer_dict: dict[str, Any] = {
             "id": transfer_id,
             "case_id": case_id,
             "tracking_number": tracking_number,

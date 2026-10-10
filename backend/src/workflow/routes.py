@@ -671,7 +671,7 @@ async def contributor_upload_document(
 
     result = await service.process_upload(
         file_content=content,
-        filename=file.filename,
+        filename=file.filename or "",
         content_type=file.content_type,
         context=context,
         background_tasks=background_tasks,
@@ -726,6 +726,8 @@ async def confirm_records_complete(contributor_id: str, token: str, request: Req
         return {"success": True, "message": "Records already confirmed as complete"}
 
     updated = await repo.confirm_records_complete(contributor_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Contributor not found")
 
     logger.info(
         f"Contributor {contributor.email} confirmed records complete",
