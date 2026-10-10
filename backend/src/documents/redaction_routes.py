@@ -5,6 +5,7 @@ Handles proposed redactions, approvals — extends the main document redaction C
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -77,7 +78,7 @@ def can_manage_redactions(current_user: dict, case: dict | None) -> bool:
     if not case:
         return False
     case_role = get_user_role_on_case(case.get("case_team", []), current_user["id"])
-    return bool(case_role) and can_create_redactions(case_role)
+    return bool(case_role and can_create_redactions(case_role))
 
 
 def assert_can_modify_redaction(redaction: dict, current_user: dict, case: dict | None) -> None:
@@ -288,7 +289,7 @@ async def approve_or_reject_proposed_redaction(
 
     now = datetime.utcnow()
     if data.action == "approve":
-        update_fields = {
+        update_fields: dict[str, Any] = {
             "redactions.$.type": "professional",
             "redactions.$.status": "approved",
             "redactions.$.approval_status": "approved",

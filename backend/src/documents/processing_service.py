@@ -700,7 +700,7 @@ class DocumentProcessingService:
 
     async def _convert_to_pdf(self, content: bytes, filename: str, ext: str) -> dict[str, Any]:
         """Convert file to PDF. Returns dict with pdf_content, final_filename, etc."""
-        result = {
+        result: dict[str, Any] = {
             "success": False,
             "pdf_content": None,
             "final_filename": filename,
@@ -868,7 +868,7 @@ class DocumentProcessingService:
         try:
             # Use synchronous PyMongo for GridFS
             # Use the same database name as the db to ensure consistency
-            sync_client = MongoClient(MONGODB_URI)
+            sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
             db_name = self.db.name  # Use actual database name from db
             sync_db = sync_client[db_name]
             fs = gridfs.GridFS(sync_db)
@@ -912,7 +912,7 @@ class DocumentProcessingService:
         final_filename: str,
         content_hash: str,
         pdf_content: bytes | None,
-        mime_type: str,
+        mime_type: str | None,
         message_id: str | None,
         extracted_text: str | None,
         text_data: dict | None,
@@ -926,7 +926,7 @@ class DocumentProcessingService:
         """Build the document record for MongoDB."""
         now = datetime.utcnow()
 
-        document = {
+        document: dict[str, Any] = {
             "id": document_id,
             "filename": final_filename,
             "original_filename": filename if ext != ".pdf" else None,

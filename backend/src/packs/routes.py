@@ -308,7 +308,7 @@ async def upload_custom_pack(file: UploadFile = File(...), current_user=Depends(
     Returns:
         Upload result
     """
-    if not file.filename.endswith(".json"):
+    if not file.filename or not file.filename.endswith(".json"):
         raise HTTPException(status_code=400, detail="File must be a JSON file")
 
     try:

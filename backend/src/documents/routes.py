@@ -1,4 +1,5 @@
 import os as _os
+from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -148,7 +149,7 @@ async def get_document(
 
             from src.config import MONGODB_URI
 
-            sync_client = MongoClient(MONGODB_URI)
+            sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
             db_name = db.name
             sync_db = sync_client[db_name]
             fs = gridfs.GridFS(sync_db)
@@ -205,7 +206,7 @@ async def download_original_file(
 
             from src.config import MONGODB_URI
 
-            sync_client = MongoClient(MONGODB_URI)
+            sync_client: MongoClient[dict[str, Any]] = MongoClient(MONGODB_URI)
             db_name = db.name
             sync_db = sync_client[db_name]
             fs = gridfs.GridFS(sync_db)
@@ -721,7 +722,7 @@ async def upload_document(
 
     result = await service.process_upload(
         file_content=content,
-        filename=file.filename,
+        filename=file.filename or "",
         content_type=file.content_type,
         context=context,
         background_tasks=background_tasks,
@@ -768,7 +769,7 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=result.error)
 
     # Success response
-    response = {
+    response: dict[str, Any] = {
         "id": result.document_id,
         "filename": result.filename,
         "message": "Uploaded successfully",

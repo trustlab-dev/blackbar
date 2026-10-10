@@ -5,6 +5,7 @@ Handles contesting redactions and rejecting documents
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -294,7 +295,7 @@ async def resolve_contest(
     elif current is not None:
         new_count = max(int(current.get("active_contests") or 1) - 1, 0)
         prefix = "redactions.$" if redaction_id else f"redactions.{index}"
-        update = {
+        update: dict[str, Any] = {
             f"{prefix}.active_contests": new_count,
             f"{prefix}.is_contested": new_count > 0,
             f"{prefix}.status": "approved" if new_count == 0 else "contested",
