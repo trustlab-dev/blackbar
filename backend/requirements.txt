@@ -10,7 +10,7 @@ motor>=3.3.0,<4.0.0
 pymongo>=4.6.3,<5.0.0
 # pypdf removed: not imported anywhere (PDF work uses PyMuPDF/fitz and
 # reportlab) and the pinned 4.x line carried 35 known CVEs.
-reportlab>=4.0.0,<5.0.0
+reportlab>=4.0.0,<6.0.0
 # openai/anthropic/cohere SDKs removed: never imported; LLM providers are
 # called over raw HTTP via httpx (src/llm/service.py).
 httpx>=0.28.1,<1.0.0
