@@ -1,5 +1,5 @@
 # backend/Dockerfile
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # Install system dependencies including LibreOffice and Tesseract OCR.
 # `upgrade` first: the base image is cut periodically, so without it every
