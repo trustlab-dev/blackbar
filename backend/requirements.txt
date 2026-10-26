@@ -22,7 +22,7 @@ pydantic[email]>=2.5.0,<3.0.0
 sendgrid>=6.12.5,<7.0.0
 pytesseract>=0.3.10,<1.0.0
 # Floor for CVE-2026-42311 / CVE-2026-40192 / CVE-2026-25990, CVE-2026-54058..CVE-2026-59205
-pillow>=12.3.0,<13.0.0
+pillow>=12.3.0,<14.0.0
 PyMuPDF>=1.23.0,<2.0.0
 extract-msg>=0.45.0,<1.0.0
 # Floor for CVE-2024-22195 / CVE-2024-34064 / CVE-2024-56201 / CVE-2024-56326 / CVE-2025-27516
